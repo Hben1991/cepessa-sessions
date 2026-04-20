@@ -2,6 +2,8 @@ import Foundation
 
 enum AppBuild {
   static let productionBundleIdentifier = "com.omi.computer-macos"
+  static let localOnlyBundleIdentifier = "me.cepessa.sessions.local"
+  static let legacyLocalOnlyBundleIdentifier = "me.omi.desktop.local"
   private static let updateChannelDefaultsKey = "update_channel"
   private static let betaOverwriteMigrationKey = "didMigrateBetaOverwrite_v1"
   private static let desktopAppcastURL = URL(
@@ -13,6 +15,12 @@ enum AppBuild {
 
   static var isNonProduction: Bool {
     bundleIdentifier.hasPrefix("com.omi.") && bundleIdentifier != productionBundleIdentifier
+  }
+
+  static var isLocalOnlyRuntime: Bool {
+    bundleIdentifier == localOnlyBundleIdentifier
+      || bundleIdentifier == legacyLocalOnlyBundleIdentifier
+      || CommandLine.arguments.contains("--local-only")
   }
 
   static var displayName: String {

@@ -32,6 +32,14 @@ class ViewModelContainer: ObservableObject {
         guard !isLoading else { return }
         isLoading = true
 
+        if AppBuild.isLocalOnlyRuntime {
+            isInitialLoadComplete = true
+            isLoading = false
+            initStatusMessage = "Local meetings are ready."
+            log("DATA LOAD: Skipping cloud-oriented eager loading in local-only runtime")
+            return
+        }
+
         let startupStart = CFAbsoluteTimeGetCurrent()
         let timer = PerfTimer("ViewModelContainer.loadAllData", logCPU: true)
         logPerf("DATA LOAD: Starting eager data load for all pages", cpu: true)

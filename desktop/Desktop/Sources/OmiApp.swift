@@ -9,7 +9,7 @@ import SwiftUI
 /// Determines which UI to show based on command-line arguments
 enum LaunchMode: String {
   case full = "full"  // Normal app with full sidebar
-  case rewind = "rewind"  // Rewind-only mode (no sidebar)
+  case rewind = "rewind"  // Sessions-only mode (no sidebar)
 
   static func fromCommandLine() -> LaunchMode {
     // Check for --mode=rewind argument
@@ -26,7 +26,14 @@ enum LaunchMode: String {
 // MARK: - Dev Flags
 /// Check for --skip-onboarding flag to bypass onboarding during development
 func shouldSkipOnboarding() -> Bool {
-  return CommandLine.arguments.contains("--skip-onboarding")
+  AppBuild.isLocalOnlyRuntime || CommandLine.arguments.contains("--skip-onboarding")
+}
+
+private func isPrimaryDesktopWindowTitle(_ title: String) -> Bool {
+  let lowered = title.lowercased()
+  return lowered.hasPrefix("omi")
+    || lowered.hasPrefix("cepessa")
+    || lowered.contains(AppBuild.displayName.lowercased())
 }
 
 // Simple observable state without Firebase types
@@ -46,6 +53,14 @@ class AuthState: ObservableObject {
   @Published var userEmail: String?
 
   private init() {
+    if AppBuild.isLocalOnlyRuntime {
+      self.isSignedIn = false
+      self.userEmail = nil
+      self.isRestoringAuth = false
+      NSLog("OMI AuthState: Local-only runtime detected, bypassing auth restore")
+      return
+    }
+
     // Restore auth state from UserDefaults immediately on init (before UI renders)
     let savedSignedIn = UserDefaults.standard.bool(forKey: Self.kAuthIsSignedIn)
     let savedEmail = UserDefaults.standard.string(forKey: Self.kAuthUserEmail)
@@ -82,6 +97,10 @@ struct OMIApp: App {
 
   /// Window title with version number (different for rewind mode)
   private var windowTitle: String {
+    if AppBuild.isLocalOnlyRuntime {
+      return AppBuild.displayName
+    }
+
     // Keep a distinct title in non-production builds so custom test apps are easy to identify.
     if AppBuild.isNonProduction {
       let baseName = AppBuild.displayName
@@ -96,7 +115,10 @@ struct OMIApp: App {
 
   /// Window size based on launch mode
   private var defaultWindowSize: CGSize {
-    Self.launchMode == .rewind ? CGSize(width: 1000, height: 700) : CGSize(width: 1200, height: 800)
+    if AppBuild.isLocalOnlyRuntime {
+      return CGSize(width: 1380, height: 860)
+    }
+    return Self.launchMode == .rewind ? CGSize(width: 1000, height: 700) : CGSize(width: 1200, height: 800)
   }
 
   var body: some Scene {
@@ -335,7 +357,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Initialize Firebase
     let plistPath = Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist")
 
-    if let path = plistPath,
+    if AppBuild.isLocalOnlyRuntime {
+      log("AppDelegate: Local-only runtime detected - skipping Firebase/auth bootstrap")
+    } else if let path = plistPath,
       let options = FirebaseOptions(contentsOfFile: path)
     {
       FirebaseApp.configure(options: options)
@@ -372,13 +396,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     ResourceMonitor.shared.start()
 
     // Recover any pending/failed transcription sessions from previous runs
-    Task {
-      await TranscriptionRetryService.shared.recoverPendingTranscriptions()
-      TranscriptionRetryService.shared.start()
+    if !AppBuild.isLocalOnlyRuntime {
+      Task {
+        await TranscriptionRetryService.shared.recoverPendingTranscriptions()
+        TranscriptionRetryService.shared.start()
+      }
     }
 
     // Start recurring task scheduler (checks every 60s for due tasks)
-    RecurringTaskScheduler.shared.start()
+    if !AppBuild.isLocalOnlyRuntime {
+      RecurringTaskScheduler.shared.start()
+    }
 
     // Identify user if already signed in
     if AuthState.shared.isSignedIn {
@@ -484,7 +512,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       var foundOmiWindow = false
       for window in NSApp.windows {
         log("AppDelegate: Window title='\(window.title)', isVisible=\(window.isVisible)")
-        if window.title.hasPrefix("Omi") {
+        if isPrimaryDesktopWindowTitle(window.title) {
           foundOmiWindow = true
           window.makeKeyAndOrderFront(nil)
           window.appearance = NSAppearance(named: .darkAqua)
@@ -494,7 +522,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
       }
       if !foundOmiWindow {
-        log("AppDelegate: WARNING - 'Omi' window not found!")
+        log("AppDelegate: WARNING - primary desktop window not found!")
       }
     }
 
@@ -604,7 +632,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   /// Set up global keyboard shortcuts
   private func setupGlobalHotkeys() {
-    // Handler for Ctrl+Option+R -> Open Rewind
+    // Handler for Ctrl+Option+R -> Open sessions workspace
     let hotkeyHandler: (NSEvent) -> NSEvent? = { event in
       let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
       let keyCode = event.keyCode
@@ -621,19 +649,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       let isR = keyCode == 15  // R key
 
       if isCtrlOption && isR {
-        log("AppDelegate: [HOTKEY] Rewind hotkey MATCHED (Ctrl+Option+R)")
+        log("AppDelegate: [HOTKEY] Sessions hotkey MATCHED (Ctrl+Option+R)")
         DispatchQueue.main.async {
           log("AppDelegate: [HOTKEY] Activating app and posting notification")
           // Bring app to front
           NSApp.activate()
           // Find and show main window
           for window in NSApp.windows {
-            if window.title.hasPrefix("Omi") {
+            if isPrimaryDesktopWindowTitle(window.title) {
               window.makeKeyAndOrderFront(nil)
               break
             }
           }
-          // Post notification to navigate to Rewind
+          // Post notification to navigate to the session workspace
           NotificationCenter.default.post(name: .navigateToRewind, object: nil)
           log("AppDelegate: [HOTKEY] Posted navigateToRewind notification")
         }
@@ -657,7 +685,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     log(
       "AppDelegate: Hotkey monitors registered - global=\(globalHotkeyMonitor != nil), local=\(localHotkeyMonitor != nil)"
     )
-    log("AppDelegate: Hotkey is Ctrl+Option+R (⌃⌥R), Ask Omi via Carbon hotkeys")
+    log("AppDelegate: Hotkey is Ctrl+Option+R (⌃⌥R)")
   }
 
   // Dock icon is always visible — LSUIElement=false and activation policy stays .regular
@@ -678,7 +706,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     if let button = item.button {
       if OMIApp.launchMode == .rewind {
         if let icon = NSImage(
-          systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "omi Rewind")
+          systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "Cepessa Sessions")
         {
           icon.isTemplate = true
           button.image = icon
@@ -743,14 +771,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Set up the button with icon — use "omi" text logo (not a circle)
     if let button = statusBarItem.button {
-      if OMIApp.launchMode == .rewind {
+      if OMIApp.launchMode == .rewind || AppBuild.isLocalOnlyRuntime {
         // Rewind mode uses SF Symbol
         if let icon = NSImage(
-          systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "omi Rewind")
+          systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "Cepessa Sessions")
         {
           icon.isTemplate = true
           button.image = icon
-          log("AppDelegate: [MENUBAR] Rewind icon set successfully")
+          log("AppDelegate: [MENUBAR] Sessions icon set successfully")
         }
       } else if let iconURL = Bundle.resourceBundle.url(
         forResource: "omi_text_logo", withExtension: "png"),
@@ -771,7 +799,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         log("AppDelegate: [MENUBAR] WARNING - Failed to load omi_text_logo, using fallback")
       }
-      button.toolTip = OMIApp.launchMode == .rewind ? "omi Rewind" : displayName
+      button.toolTip = AppBuild.isLocalOnlyRuntime ? "Cepessa Sessions" : (OMIApp.launchMode == .rewind ? "omi Rewind" : displayName)
     } else {
       log("AppDelegate: [MENUBAR] WARNING - statusBarItem.button is nil")
     }
@@ -1046,14 +1074,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool
   {
-    // Always try to show the main Omi window when dock icon is clicked
-    for window in sender.windows where window.title.hasPrefix("Omi") {
+    // Always try to show the main desktop window when dock icon is clicked
+    for window in sender.windows where isPrimaryDesktopWindowTitle(window.title) {
       if window.isMiniaturized {
         window.deminiaturize(nil)
       }
       window.makeKeyAndOrderFront(nil)
       sender.activate(ignoringOtherApps: true)
-      log("AppDelegate: Restored Omi window from dock click (wasVisible=\(flag))")
+      log("AppDelegate: Restored main window from dock click (wasVisible=\(flag))")
       return false
     }
     return true
@@ -1206,6 +1234,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let oldAppPaths = [
       "/Applications/Omi Computer.app",
       NSHomeDirectory() + "/Applications/Omi Computer.app",
+      "/Applications/Cepessa Sessions.app",
+      NSHomeDirectory() + "/Applications/Cepessa Sessions.app",
     ]
 
     for oldPath in oldAppPaths {

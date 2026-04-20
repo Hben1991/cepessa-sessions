@@ -7,6 +7,7 @@ struct RewindPage: View {
     var appState: AppState? = nil
 
     @StateObject private var viewModel = RewindViewModel()
+    @AppStorage("rewind.selectedMode") private var selectedModeRaw = RewindMode.screenHistory.rawValue
 
     @State private var currentIndex: Int = 0
     @State private var currentImage: NSImage?
@@ -50,6 +51,15 @@ struct RewindPage: View {
         viewModel.activeSearchQuery != nil || !viewModel.searchQuery.isEmpty
     }
 
+    private var selectedMode: RewindMode {
+        get { RewindMode(rawValue: selectedModeRaw) ?? .screenHistory }
+        set { selectedModeRaw = newValue.rawValue }
+    }
+
+    private var isMeetingsMode: Bool {
+        selectedMode == .meetings
+    }
+
     private var finishButtonText: String {
         if isFinishing { return "Saving..." }
         if showSavedSuccess { return "Saved!" }
@@ -89,13 +99,17 @@ struct RewindPage: View {
             // Background
             Color.black.ignoresSafeArea()
 
-            if viewModel.isLoading && viewModel.screenshots.isEmpty && viewModel.activeSearchQuery == nil {
+            if isMeetingsMode {
+                meetingsModeView
+            } else if viewModel.isLoading && viewModel.screenshots.isEmpty && viewModel.activeSearchQuery == nil {
                 loadingView
             } else if let error = viewModel.errorMessage {
                 errorView(error)
             } else {
                 // Main content with persistent search field
                 VStack(spacing: 0) {
+                    rewindModeSwitcher
+
                     if isTranscriptExpanded {
                         // Expanded transcript + notes view replaces timeline
                         expandedTranscriptView
@@ -148,8 +162,15 @@ struct RewindPage: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .expandRewindTranscript)) { _ in
+            guard !isMeetingsMode else { return }
             withAnimation(.easeInOut(duration: 0.2)) {
                 isTranscriptExpanded = true
+            }
+        }
+        .onChange(of: selectedModeRaw) { _, newValue in
+            if RewindMode(rawValue: newValue) == .meetings {
+                isSearchFocused = false
+                isPageFocused = true
             }
         }
         .onChange(of: isSearchFocused) { _, focused in
@@ -190,6 +211,9 @@ struct RewindPage: View {
         }
         // Global keyboard handlers
         .onKeyPress(.escape) {
+            if isMeetingsMode {
+                return .ignored
+            }
             // Expanded transcript → collapse
             if isTranscriptExpanded {
                 isTranscriptExpanded = false
@@ -214,6 +238,9 @@ struct RewindPage: View {
             return .ignored
         }
         .onKeyPress(.leftArrow) {
+            if isMeetingsMode {
+                return .ignored
+            }
             // Arrow keys only work in timeline mode
             // Left = older = lower index (ASC order: oldest first)
             if searchViewMode != .results {
@@ -223,6 +250,9 @@ struct RewindPage: View {
             return .ignored
         }
         .onKeyPress(.rightArrow) {
+            if isMeetingsMode {
+                return .ignored
+            }
             // Right = newer = higher index
             if searchViewMode != .results {
                 nextFrame()
@@ -231,6 +261,9 @@ struct RewindPage: View {
             return .ignored
         }
         .onKeyPress(.upArrow) {
+            if isMeetingsMode {
+                return .ignored
+            }
             // Up/down navigate search result groups
             if searchViewMode == .results {
                 if selectedGroupIndex > 0 {
@@ -241,6 +274,9 @@ struct RewindPage: View {
             return .ignored
         }
         .onKeyPress(.downArrow) {
+            if isMeetingsMode {
+                return .ignored
+            }
             if searchViewMode == .results {
                 let groups = viewModel.groupedSearchResults
                 if selectedGroupIndex < groups.count - 1 {
@@ -258,6 +294,7 @@ struct RewindPage: View {
 
     // Handle scroll wheel to move playhead
     private func handleScrollWheel(delta: CGFloat) {
+        guard !isMeetingsMode else { return }
         log("RewindPage: Scroll wheel delta=\(delta), currentIndex=\(currentIndex), screenshots=\(activeScreenshots.count)")
 
         guard !activeScreenshots.isEmpty else {
@@ -493,6 +530,28 @@ struct RewindPage: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(OmiColors.backgroundTertiary.opacity(0.8))
+    }
+
+    // MARK: - Mode Switcher
+
+    private var rewindModeSwitcher: some View {
+        RewindModeSwitcherView(selectedMode: Binding(
+            get: { RewindMode(rawValue: selectedModeRaw) ?? .screenHistory },
+            set: { selectedModeRaw = $0.rawValue }
+        ))
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
+    }
+
+    // MARK: - Meetings Mode
+
+    private var meetingsModeView: some View {
+        VStack(spacing: 0) {
+            rewindModeSwitcher
+            RewindMeetingsShellView()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - Timeline Content Body (without top bar)

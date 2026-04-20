@@ -1935,6 +1935,15 @@ class AppState: ObservableObject {
 
   /// Load conversations - first from local cache (instant), then from API (background refresh)
   func loadConversations() async {
+    guard !AppBuild.isLocalOnlyRuntime else {
+      conversations = []
+      totalConversationsCount = 0
+      conversationsError = nil
+      isLoadingConversations = false
+      log("Conversations: Skipping load in local-only runtime")
+      return
+    }
+
     guard !isLoadingConversations else { return }
 
     isLoadingConversations = true
@@ -2202,6 +2211,13 @@ class AppState: ObservableObject {
 
   /// Load folders from API
   func loadFolders() async {
+    guard !AppBuild.isLocalOnlyRuntime else {
+      folders = []
+      isLoadingFolders = false
+      log("Folders: Skipping load in local-only runtime")
+      return
+    }
+
     guard !isLoadingFolders else { return }
 
     isLoadingFolders = true

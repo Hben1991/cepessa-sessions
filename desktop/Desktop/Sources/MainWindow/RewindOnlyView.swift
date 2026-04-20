@@ -5,10 +5,11 @@ import SwiftUI
 struct RewindOnlyView: View {
     @StateObject private var appState = AppState()
     @ObservedObject private var authState = AuthState.shared
+    private let isLocalOnlyMode = AppBuild.isLocalOnlyRuntime
 
     var body: some View {
         Group {
-            if authState.isRestoringAuth {
+            if authState.isRestoringAuth && !isLocalOnlyMode {
                 VStack(spacing: 16) {
                     if let iconURL = Bundle.resourceBundle.url(forResource: "herologo", withExtension: "png"),
                        let nsImage = NSImage(contentsOf: iconURL) {
@@ -22,7 +23,7 @@ struct RewindOnlyView: View {
                         .tint(.white.opacity(0.6))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if !authState.isSignedIn {
+            } else if !authState.isSignedIn && !isLocalOnlyMode {
                 // Not signed in - show sign in view
                 SignInView(authState: authState)
                     .onAppear {
@@ -32,9 +33,11 @@ struct RewindOnlyView: View {
                 // Signed in - show Rewind page with settings overlay
                 rewindContent
                     .onAppear {
-                        log("RewindOnlyView: Showing Rewind content (signed in)")
+                        log("RewindOnlyView: Showing Rewind content (\(isLocalOnlyMode ? "local-only" : "signed in"))")
                         // Start screen monitoring automatically in rewind mode
-                        startMonitoringIfNeeded()
+                        if !isLocalOnlyMode {
+                            startMonitoringIfNeeded()
+                        }
                     }
             }
         }

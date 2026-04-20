@@ -17,8 +17,12 @@ struct DesktopHomeView: View {
   @ObservedObject private var authState = AuthState.shared
   @ObservedObject private var apiKeyService = APIKeyService.shared
   @State private var selectedIndex: Int = {
-    if OMIApp.launchMode == .rewind { return SidebarNavItem.rewind.rawValue }
-    let tier = UserDefaults.standard.integer(forKey: "currentTierLevel")
+    if AppBuild.isLocalOnlyRuntime {
+      return SidebarNavItem.dashboard.rawValue
+    }
+    if OMIApp.launchMode == .rewind {
+      return SidebarNavItem.rewind.rawValue
+    }
     return SidebarNavItem.dashboard.rawValue
   }()
   @State private var isSidebarCollapsed: Bool = false
@@ -46,9 +50,13 @@ struct DesktopHomeView: View {
     selectedIndex == SidebarNavItem.settings.rawValue
   }
 
+  private var isLocalOnlyMode: Bool {
+    AppBuild.isLocalOnlyRuntime
+  }
+
   var body: some View {
     Group {
-      if authState.isRestoringAuth {
+      if authState.isRestoringAuth && !isLocalOnlyMode {
         // State 0: Restoring auth session - show loading
         VStack(spacing: 16) {
           if let nsImage = Self.heroLogoImage {
@@ -65,13 +73,13 @@ struct DesktopHomeView: View {
         .onAppear {
           log("DesktopHomeView: Showing auth loading splash")
         }
-      } else if !authState.isSignedIn {
+      } else if !authState.isSignedIn && !isLocalOnlyMode {
         // State 1: Not signed in - show sign in
         SignInView(authState: authState)
           .onAppear {
             log("DesktopHomeView: Showing SignInView (not signed in)")
           }
-      } else if !appState.hasCompletedOnboarding {
+      } else if !appState.hasCompletedOnboarding && !isLocalOnlyMode {
         // State 2: Signed in but onboarding not complete
         if shouldSkipOnboarding() {
           Color.clear.onAppear {
@@ -95,7 +103,7 @@ struct DesktopHomeView: View {
             .onAppear {
               if UserDefaults.standard.bool(forKey: "onboardingJustCompleted") {
                 UserDefaults.standard.removeObject(forKey: "onboardingJustCompleted")
-                log("DesktopHomeView: Onboarding just completed — navigating to Dashboard")
+                log("DesktopHomeView: Onboarding just completed — navigating to Sessions")
                 selectedIndex = SidebarNavItem.dashboard.rawValue
               }
             }
@@ -123,7 +131,14 @@ struct DesktopHomeView: View {
               appState.triggerUsageLimitPopup(reason: reason)
             }
             .onAppear {
-              log("DesktopHomeView: Showing mainContent (signed in and onboarded)")
+              log(
+                "DesktopHomeView: Showing mainContent (\(isLocalOnlyMode ? "local-only" : "signed in and onboarded"))"
+              )
+              if isLocalOnlyMode {
+                appState.checkAllPermissions()
+                return
+              }
+
               // Check all permissions on launch
               appState.checkAllPermissions()
 
@@ -206,6 +221,13 @@ struct DesktopHomeView: View {
               }
             }
             .task {
+              if isLocalOnlyMode {
+                viewModelContainer.isInitialLoadComplete = true
+                viewModelContainer.isLoading = false
+                viewModelContainer.initStatusMessage = "Local sessions are ready."
+                return
+              }
+
               // Trigger eager data loading when main content appears
               // Load conversations/folders in parallel with other data
               async let vmLoad: Void = viewModelContainer.loadAllData()
@@ -361,9 +383,13 @@ struct DesktopHomeView: View {
       // The window's min size is enforced at the AppKit level instead.
       DispatchQueue.main.async {
         for window in NSApp.windows {
-          if window.title.lowercased().hasPrefix("omi") {
+          let lowercasedTitle = window.title.lowercased()
+          if lowercasedTitle.hasPrefix("omi") || lowercasedTitle.contains("cepessa") {
             window.appearance = NSAppearance(named: .darkAqua)
             window.minSize = NSSize(width: 900, height: 600)
+            if AppBuild.isLocalOnlyRuntime {
+              window.title = "Cepessa Sessions"
+            }
             // Remove .minSize from hosting view's sizingOptions.
             // Search contentView itself + all descendants.
             Self.disableMinSizeComputation(in: window)
@@ -430,6 +456,7 @@ struct DesktopHomeView: View {
 
   /// Redirect to conversations if current page isn't visible at the current tier level
   private func redirectIfPageHidden() {
+    if isLocalOnlyMode { return }
     // Tier 0 or tier 6+ shows everything — no redirect needed
     guard currentTierLevel > 0 && currentTierLevel < 6 else { return }
     // Don't redirect from settings/permissions/device/help pages
@@ -454,10 +481,11 @@ struct DesktopHomeView: View {
 
   /// Whether to hide the sidebar (rewind mode)
   private var hideSidebar: Bool {
-    OMIApp.launchMode == .rewind
+    !isLocalOnlyMode && OMIApp.launchMode == .rewind
   }
 
   private var currentAppStateLabel: String {
+    if isLocalOnlyMode { return "main" }
     if authState.isRestoringAuth { return "restoring_auth" }
     if !authState.isSignedIn { return "signed_out" }
     if !appState.hasCompletedOnboarding { return "onboarding" }
@@ -468,7 +496,8 @@ struct DesktopHomeView: View {
     guard DesktopAutomationLaunchOptions.isEnabled else { return }
 
     let currentWindow = NSApp.windows.first(where: {
-      $0.title.lowercased().hasPrefix("omi") && $0.isVisible
+      let title = $0.title.lowercased()
+      return (title.hasPrefix("omi") || title.contains("cepessa")) && $0.isVisible
     })
     let snapshot = DesktopAutomationSnapshot(
       bridgeEnabled: true,
@@ -502,7 +531,10 @@ struct DesktopHomeView: View {
 
     if activateApp {
       NSApp.activate()
-      if let window = NSApp.windows.first(where: { $0.title.lowercased().hasPrefix("omi") }) {
+      if let window = NSApp.windows.first(where: {
+        let title = $0.title.lowercased()
+        return title.hasPrefix("omi") || title.contains("cepessa")
+      }) {
         window.makeKeyAndOrderFront(nil)
       }
     }
@@ -525,10 +557,23 @@ struct DesktopHomeView: View {
 
   private func resolvedAutomationTarget(_ target: String) -> SidebarNavItem? {
     let normalized = target.lowercased().replacingOccurrences(of: "-", with: "_")
+    if isLocalOnlyMode {
+      switch normalized {
+      case "dashboard", "home", "sessions", "workspace", "rewind":
+        return .dashboard
+      case "conversations", "library":
+        return .conversations
+      case "settings", "permissions":
+        return .settings
+      default:
+        return .dashboard
+      }
+    }
+
     switch normalized {
-    case "dashboard", "home":
+    case "dashboard", "home", "sessions", "workspace":
       return .dashboard
-    case "conversations":
+    case "conversations", "library":
       return .conversations
     case "chat":
       return .chat
@@ -569,8 +614,10 @@ struct DesktopHomeView: View {
     UserDefaults.standard.set(Double(0), forKey: key)
     // Delay slightly so the window is fully visible
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-      guard let window = NSApp.windows.first(where: { $0.title.hasPrefix("Omi") && $0.isVisible })
-      else { return }
+      guard let window = NSApp.windows.first(where: {
+        let title = $0.title.lowercased()
+        return (title.hasPrefix("omi") || title.contains("cepessa")) && $0.isVisible
+      }) else { return }
       var frame = window.frame
       frame.size.width = saved
       window.setFrame(frame, display: true)
@@ -578,6 +625,12 @@ struct DesktopHomeView: View {
   }
 
   private func updateStoreActivity(for index: Int) {
+    if isLocalOnlyMode {
+      viewModelContainer.tasksStore.isActive = false
+      viewModelContainer.memoriesViewModel.isActive = false
+      return
+    }
+
     viewModelContainer.tasksStore.isActive =
       index == SidebarNavItem.dashboard.rawValue || index == SidebarNavItem.tasks.rawValue
     viewModelContainer.memoriesViewModel.isActive =
@@ -598,11 +651,11 @@ struct DesktopHomeView: View {
             isCollapsed: $isSidebarCollapsed,
             appState: appState
           )
-          .opacity(isInSettings ? 0 : 1)
-          .allowsHitTesting(!isInSettings)
+          .opacity(isInSettings && !isLocalOnlyMode ? 0 : 1)
+          .allowsHitTesting(!(isInSettings && !isLocalOnlyMode))
         }
 
-        if isInSettings {
+        if isInSettings && !isLocalOnlyMode {
           SettingsSidebar(
             selectedSection: $selectedSettingsSection,
             highlightedSettingId: $highlightedSettingId,
@@ -720,15 +773,17 @@ struct DesktopHomeView: View {
         "DesktopHomeView: Received navigateToRewind notification, navigating to Rewind (index \(SidebarNavItem.rewind.rawValue))"
       )
       withAnimation(.easeInOut(duration: 0.2)) {
-        selectedIndex = SidebarNavItem.rewind.rawValue
+        selectedIndex = isLocalOnlyMode ? SidebarNavItem.dashboard.rawValue : SidebarNavItem.rewind.rawValue
       }
     }
     .onReceive(NotificationCenter.default.publisher(for: .navigateToRewindNotes)) { _ in
       withAnimation(.easeInOut(duration: 0.2)) {
-        selectedIndex = SidebarNavItem.rewind.rawValue
+        selectedIndex = isLocalOnlyMode ? SidebarNavItem.dashboard.rawValue : SidebarNavItem.rewind.rawValue
       }
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-        NotificationCenter.default.post(name: .expandRewindTranscript, object: nil)
+      if !isLocalOnlyMode {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+          NotificationCenter.default.post(name: .expandRewindTranscript, object: nil)
+        }
       }
     }
     .onReceive(NotificationCenter.default.publisher(for: .navigateToChat)) { _ in
@@ -785,6 +840,18 @@ private struct PageContentView: View {
   var body: some View {
     let _ = log("RENDER: PageContentView body evaluated (index=\(selectedIndex))")
     Group {
+      if AppBuild.isLocalOnlyRuntime {
+        switch selectedIndex {
+        case 0:
+          CepessaSessionsHomePage()
+        case 1:
+          CepessaSessionsLibraryPage()
+        case 9:
+          CepessaSessionsSettingsPage()
+        default:
+          CepessaSessionsHomePage()
+        }
+      } else {
       switch selectedIndex {
       case 0:
         DashboardPage(
@@ -834,6 +901,7 @@ private struct PageContentView: View {
           appProvider: viewModelContainer.appProvider,
           chatProvider: viewModelContainer.chatProvider,
           selectedIndex: $selectedTabIndex)
+      }
       }
     }
   }

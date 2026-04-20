@@ -18,8 +18,10 @@ enum SidebarNavItem: Int, CaseIterable {
 
   var title: String {
     switch self {
-    case .dashboard: return "Home"
-    case .conversations: return "Conversations"
+    case .dashboard:
+      return AppBuild.isLocalOnlyRuntime ? "Sessions" : "Home"
+    case .conversations:
+      return AppBuild.isLocalOnlyRuntime ? "Library" : "Conversations"
     case .chat: return "Chat"
     case .memories: return "Memories"
     case .tasks: return "Tasks"
@@ -36,8 +38,9 @@ enum SidebarNavItem: Int, CaseIterable {
 
   var icon: String {
     switch self {
-    case .dashboard: return "house.fill"
-    case .conversations: return "text.bubble.fill"
+    case .dashboard: return AppBuild.isLocalOnlyRuntime ? "record.circle.fill" : "house.fill"
+    case .conversations:
+      return AppBuild.isLocalOnlyRuntime ? "books.vertical.fill" : "text.bubble.fill"
     case .chat: return "bubble.left.and.bubble.right.fill"
     case .memories: return "brain"
     case .tasks: return "checklist"
@@ -55,19 +58,27 @@ enum SidebarNavItem: Int, CaseIterable {
   /// Minimum tier level required to access this item (0 = always available)
   var requiredTier: Int {
     switch self {
-    case .conversations, .rewind: return 1
+    case .dashboard:
+      return AppBuild.isLocalOnlyRuntime ? 0 : 5
+    case .conversations:
+      return AppBuild.isLocalOnlyRuntime ? 0 : 1
+    case .rewind: return 1
     case .memories: return 2
     case .tasks: return 3
     case .chat: return 4
-    case .dashboard: return 5
     case .apps: return 6
-    default: return 0
+    case .focus, .insight, .settings, .permissions, .device, .help: return 0
     }
   }
 
-  /// Items shown in the main navigation (top section)
+  /// Items shown in the shell navigation (top section)
+  static var shellItems: [SidebarNavItem] {
+    [.dashboard, .conversations, .settings]
+  }
+
+  /// Items shown in the main navigation (legacy-compatible alias)
   static var mainItems: [SidebarNavItem] {
-    [.dashboard, .conversations, .memories, .tasks, .rewind, .apps]
+    AppBuild.isLocalOnlyRuntime ? shellItems : [.dashboard, .conversations, .memories, .tasks, .rewind, .apps]
   }
 }
 
@@ -121,6 +132,162 @@ struct SidebarView: View {
     isCollapsed ? collapsedWidth : expandedWidth
   }
 
+  private var shellBackground: some View {
+    RoundedRectangle(cornerRadius: 0, style: .continuous)
+      .fill(
+        LinearGradient(
+          colors: [
+            OmiColors.backgroundPrimary.opacity(0.99),
+            OmiColors.backgroundSecondary.opacity(0.96),
+          ],
+          startPoint: .topLeading,
+          endPoint: .bottomTrailing
+        )
+      )
+      .overlay(
+        Rectangle()
+          .fill(Color.white.opacity(0.025))
+          .blendMode(.softLight)
+      )
+  }
+
+  private var shellHeader: some View {
+    HStack(alignment: .top, spacing: 10) {
+      ZStack {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .fill(OmiColors.backgroundTertiary.opacity(0.85))
+        Image(systemName: "record.circle.fill")
+          .scaledFont(size: 15)
+          .foregroundStyle(OmiColors.purplePrimary)
+      }
+      .frame(width: 34, height: 34)
+
+      if !isCollapsed {
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Cepessa Sessions")
+            .scaledFont(size: 18, weight: .semibold)
+            .foregroundStyle(OmiColors.textPrimary)
+            .tracking(-0.4)
+
+          Text("Session workspace")
+            .scaledFont(size: 11)
+            .foregroundStyle(OmiColors.textTertiary)
+        }
+
+        Spacer(minLength: 8)
+
+        Button(action: {
+          withAnimation(.easeInOut(duration: 0.2)) {
+            isCollapsed.toggle()
+          }
+        }) {
+          Image(systemName: "sidebar.left")
+            .scaledFont(size: 16)
+            .foregroundStyle(OmiColors.textTertiary)
+        }
+        .buttonStyle(.plain)
+        .help("Collapse sidebar")
+      }
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 10)
+  }
+
+  private func shellNavButton(for item: SidebarNavItem) -> some View {
+    let isSelected = selectedIndex == item.rawValue
+
+    return Button {
+      guard selectedIndex != item.rawValue else { return }
+      withAnimation(.easeInOut(duration: 0.18)) {
+        selectedIndex = item.rawValue
+      }
+      AnalyticsManager.shared.tabChanged(tabName: item.title)
+    } label: {
+      HStack(spacing: 11) {
+        Image(systemName: item.icon)
+          .scaledFont(size: 16)
+          .foregroundStyle(isSelected ? OmiColors.textPrimary : OmiColors.textTertiary)
+          .frame(width: iconWidth)
+          .scaleEffect(isSelected ? 1.0 : 0.96)
+
+        if !isCollapsed {
+          Text(item.title)
+            .scaledFont(size: 13, weight: isSelected ? .semibold : .medium)
+            .foregroundStyle(isSelected ? OmiColors.textPrimary : OmiColors.textSecondary)
+
+          Spacer(minLength: 8)
+
+          Circle()
+            .fill(isSelected ? OmiColors.purplePrimary : Color.clear)
+            .frame(width: 6, height: 6)
+        }
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 11)
+      .background(
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .fill(isSelected ? OmiColors.backgroundTertiary.opacity(0.72) : Color.clear)
+          .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+              .stroke(
+                isSelected ? OmiColors.border.opacity(0.12) : Color.clear,
+                lineWidth: 1
+              )
+          )
+      )
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .help(isCollapsed ? item.title : "")
+  }
+
+  @ViewBuilder
+  private var shellSupportSection: some View {
+    if hasPermissionDenied {
+      Button {
+        withAnimation(.easeInOut(duration: 0.18)) {
+          selectedIndex = SidebarNavItem.permissions.rawValue
+        }
+        AnalyticsManager.shared.tabChanged(tabName: SidebarNavItem.permissions.title)
+      } label: {
+        HStack(spacing: 10) {
+          Image(systemName: "exclamationmark.triangle.fill")
+            .scaledFont(size: 15)
+            .foregroundStyle(.orange)
+            .frame(width: iconWidth)
+
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Permissions needed")
+              .scaledFont(size: 13, weight: .semibold)
+              .foregroundStyle(OmiColors.textPrimary)
+
+            Text("Open access checks")
+              .scaledFont(size: 11)
+              .foregroundStyle(OmiColors.textTertiary)
+          }
+
+          Spacer(minLength: 8)
+
+          Image(systemName: "chevron.right")
+            .scaledFont(size: 11, weight: .semibold)
+            .foregroundStyle(OmiColors.textTertiary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+        .background(
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(OmiColors.backgroundTertiary.opacity(0.58))
+            .overlay(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(OmiColors.border.opacity(0.12), lineWidth: 1)
+            )
+        )
+      }
+      .buttonStyle(.plain)
+      .help("Open permissions")
+    }
+  }
+
   /// Whether a sidebar item is locked at the current tier level
   private func isItemLocked(_ item: SidebarNavItem) -> Bool {
     currentTierLevel != 0 && currentTierLevel < item.requiredTier
@@ -140,15 +307,73 @@ struct SidebarView: View {
     return status == .focused ? Color.green : Color.orange
   }
 
-  var body: some View {
+  private var localOnlyBody: some View {
     ZStack(alignment: .trailing) {
       VStack(alignment: .leading, spacing: 0) {
-        // Header: Logo + Collapse button on same row
+        shellHeader
+          .padding(.top, 14)
+          .padding(.horizontal, isCollapsed ? 10 : 14)
+
+        if isCollapsed {
+          collapsedExpandButton
+            .padding(.top, 8)
+            .padding(.horizontal, 8)
+        }
+
+        Spacer().frame(height: isCollapsed ? 12 : 18)
+
+        VStack(alignment: .leading, spacing: 8) {
+          ForEach(SidebarNavItem.shellItems, id: \.rawValue) { item in
+            shellNavButton(for: item)
+          }
+        }
+        .padding(.horizontal, isCollapsed ? 8 : 10)
+
+        Spacer()
+
+        if !isCollapsed {
+          shellSupportSection
+            .padding(.horizontal, 10)
+            .padding(.bottom, 10)
+        } else {
+          Spacer().frame(height: 12)
+        }
+      }
+      .frame(maxWidth: currentWidth + dragOffset, maxHeight: .infinity, alignment: .top)
+      .background(shellBackground)
+      .animation(.easeInOut(duration: 0.2), value: isCollapsed)
+    }
+    .frame(width: currentWidth)
+    .onAppear {
+      syncMonitoringState()
+      appState.checkAllPermissions()
+      updatePermissionPulse(hasPermissionDenied)
+    }
+    .onChange(of: hasPermissionDenied) { _, denied in
+      updatePermissionPulse(denied)
+    }
+    .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) {
+      _ in
+      appState.checkAllPermissions()
+    }
+  }
+
+  @ViewBuilder
+  var body: some View {
+    if AppBuild.isLocalOnlyRuntime {
+      localOnlyBody
+    } else {
+      legacyBody
+    }
+  }
+
+  private var legacyBody: some View {
+    ZStack(alignment: .trailing) {
+      VStack(alignment: .leading, spacing: 0) {
         headerSection
           .padding(.top, 12)
           .padding(.horizontal, isCollapsed ? 8 : 16)
 
-        // Expand button when collapsed (below logo)
         if isCollapsed {
           collapsedExpandButton
             .padding(.horizontal, 8)
@@ -156,14 +381,10 @@ struct SidebarView: View {
 
         Spacer().frame(height: isCollapsed ? 8 : 16)
 
-        // Main navigation section
         VStack(alignment: .leading, spacing: 0) {
-          // Main navigation items
           ForEach(SidebarNavItem.mainItems, id: \.rawValue) { item in
             Group {
               if item == .conversations {
-                // Conversations - icon shows audio activity when recording
-                // Audio levels wrapped in a separate view to avoid re-rendering the entire sidebar
                 AudioLevelNavItem(
                   icon: item.icon,
                   label: item.title,
@@ -174,10 +395,8 @@ struct SidebarView: View {
                   isToggling: isTogglingTranscription,
                   isPageLoading: isConversationsPageLoading,
                   onTap: {
-                    // Show loading immediately when navigating to Conversations
                     if selectedIndex != item.rawValue {
                       isConversationsPageLoading = true
-                      // Fallback timeout
                       DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
                         if isConversationsPageLoading {
                           isConversationsPageLoading = false
@@ -192,7 +411,6 @@ struct SidebarView: View {
                   }
                 )
               } else if item == .rewind {
-                // Rewind - shows pulsing recording icon when both audio and screen are active
                 NavItemWithStatusView(
                   icon: item.icon,
                   label: item.title,
@@ -203,11 +421,9 @@ struct SidebarView: View {
                   isToggling: isTogglingMonitoring,
                   isPageLoading: isRewindPageLoading,
                   onTap: {
-                    // Show loading immediately when navigating to Rewind
                     if selectedIndex != item.rawValue {
                       log("SIDEBAR: Rewind tapped, showing loading indicator")
                       isRewindPageLoading = true
-                      // Fallback timeout in case page load notification never comes
                       DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
                         if isRewindPageLoading {
                           log("SIDEBAR: Rewind loading timeout, clearing indicator")
@@ -219,7 +435,6 @@ struct SidebarView: View {
                     AnalyticsManager.shared.tabChanged(tabName: item.title)
                   },
                   onToggle: {
-                    // Toggle both — on if either is off, off if both are on
                     let isAnyOn = isMonitoring || appState.isTranscribing
                     toggleMonitoring(enabled: !isAnyOn)
                   },
@@ -248,10 +463,8 @@ struct SidebarView: View {
                     AnalyticsManager.shared.tabChanged(tabName: item.title)
                   },
                   onTap: {
-                    // Show loading immediately when navigating
                     if selectedIndex != item.rawValue {
                       setPageLoading(for: item, loading: true)
-                      // Fallback timeout
                       DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
                         setPageLoading(for: item, loading: false)
                       }
@@ -266,22 +479,16 @@ struct SidebarView: View {
 
           Spacer()
 
-          // Subscription upgrade banner
-          // upgradeToPro
-
-          // Device status widget (when device paired/connected)
           if deviceProvider.isConnected || deviceProvider.pairedDevice != nil {
             Spacer().frame(height: 12)
             deviceStatusWidget
           }
 
-          // Get Omi promo widget (dismissible sales link)
           if showGetOmiWidget {
             Spacer().frame(height: 12)
             getOmiWidget
           }
 
-          // Update available widget
           if updaterViewModel.updateAvailable || updaterViewModel.updateSessionInProgress {
             Spacer().frame(height: 12)
             updateAvailableWidget
@@ -310,7 +517,6 @@ struct SidebarView: View {
       .background(Color.clear)
       .animation(.easeInOut(duration: 0.2), value: isCollapsed)
 
-      // Drag handle
       Rectangle()
         .fill(Color.clear)
         .frame(width: 8)
@@ -328,11 +534,9 @@ struct SidebarView: View {
                     isCollapsed = true
                   }
                 }
-              } else {
-                if isCollapsed {
-                  withAnimation(.easeInOut(duration: 0.2)) {
-                    isCollapsed = false
-                  }
+              } else if isCollapsed {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                  isCollapsed = false
                 }
               }
             }
@@ -352,7 +556,6 @@ struct SidebarView: View {
       updatePermissionPulse(hasPermissionDenied)
     }
     .onChange(of: currentTierLevel) { _, newTier in
-      // Redirect if current page became locked after tier change
       if let currentItem = SidebarNavItem(rawValue: selectedIndex),
         newTier != 0 && newTier < currentItem.requiredTier,
         selectedIndex != SidebarNavItem.settings.rawValue
@@ -364,10 +567,7 @@ struct SidebarView: View {
       }
     }
     .onChange(of: selectedIndex) { _, _ in
-      // Check tier eligibility on page navigation (at most once per day)
-      Task {
-        await TierManager.shared.checkTierIfNeeded()
-      }
+      Task { await TierManager.shared.checkTierIfNeeded() }
     }
     .onChange(of: hasPermissionDenied) { _, denied in
       updatePermissionPulse(denied)
@@ -379,13 +579,10 @@ struct SidebarView: View {
         (notification.userInfo?["isMonitoring"] as? Bool)
         ?? ProactiveAssistantsPlugin.shared.isMonitoring
       if isNowMonitoring {
-        // Reset retry counter on successful start
         monitoringAutoRestartAttempts = 0
       } else if screenAnalysisEnabled && !isTogglingMonitoring
         && monitoringAutoRestartAttempts < maxAutoRestartAttempts
       {
-        // Auto-restart: monitoring stopped but user's setting says it should be on.
-        // Try to restart after a delay (handles transient failures, sleep/wake, etc.)
         monitoringAutoRestartAttempts += 1
         let attempt = monitoringAutoRestartAttempts
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
@@ -407,7 +604,6 @@ struct SidebarView: View {
     }
     .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification))
     { _ in
-      // Refresh permissions when app becomes active (user may have changed them in System Settings)
       appState.checkAllPermissions()
     }
     .onReceive(NotificationCenter.default.publisher(for: .rewindPageDidLoad)) { _ in
@@ -486,7 +682,7 @@ struct SidebarView: View {
         isCollapsed.toggle()
       }
     }) {
-      Image(systemName: "sidebar.left")
+      Image(systemName: "sidebar.right")
         .scaledFont(size: 17)
         .foregroundColor(OmiColors.textTertiary)
         .frame(width: iconWidth)
@@ -794,13 +990,13 @@ struct SidebarView: View {
   }
 
   private var shouldShowScreenRecordingStatus: Bool {
-    appState.hasScreenRecordingPermission || !appState.hasScreenRecordingPermission
+    !appState.hasScreenRecordingPermission
       || appState.isScreenCaptureKitBroken
       || appState.isScreenRecordingStale
   }
 
   private var shouldShowMicrophoneStatus: Bool {
-    appState.hasMicrophonePermission || !appState.hasMicrophonePermission
+    !appState.hasMicrophonePermission
   }
 
   private var shouldShowAccessibilityStatus: Bool {

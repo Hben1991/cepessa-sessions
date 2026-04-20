@@ -7,6 +7,7 @@ let package = Package(
     .macOS("14.0")
   ],
   dependencies: [
+    .package(path: "../../../typewhisper-mac/Vendor/whisper.spm"),
     .package(url: "https://github.com/firebase/firebase-ios-sdk.git", from: "11.0.0"),
     .package(url: "https://github.com/mixpanel/mixpanel-swift.git", from: "4.0.0"),
     .package(url: "https://github.com/PostHog/posthog-ios.git", from: "3.0.0"),
@@ -30,6 +31,7 @@ let package = Package(
         "ObjCExceptionCatcher",
         .product(name: "FirebaseCore", package: "firebase-ios-sdk"),
         .product(name: "FirebaseAuth", package: "firebase-ios-sdk"),
+        .product(name: "whisper", package: "whisper.spm"),
         .product(name: "Mixpanel", package: "mixpanel-swift"),
         .product(name: "PostHog", package: "posthog-ios"),
         .product(name: "Sentry", package: "sentry-cocoa"),
@@ -40,6 +42,9 @@ let package = Package(
         .product(name: "HeapSwiftCore", package: "heap-swift-core-sdk"),
       ],
       path: "Sources",
+      exclude: [
+        "GoogleService-Info-Dev.plist",
+      ],
       resources: [
         .process("GoogleService-Info.plist"),
         .process("Resources"),
