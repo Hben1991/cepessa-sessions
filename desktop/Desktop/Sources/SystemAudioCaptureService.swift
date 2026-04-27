@@ -61,6 +61,9 @@ class SystemAudioCaptureService: @unchecked Sendable {
   private var inputFormat: AVAudioFormat?
   private var targetFormat: AVAudioFormat?
   private var sourceSampleRate: Double = 0.0
+  private let audioLevelDispatchInterval: CFTimeInterval = 1.0 / 15.0
+  private var lastAudioLevelDispatchTime: CFAbsoluteTime = 0
+  private var lastDispatchedAudioLevel: Float = 0
 
   // Tap UUID for identification
   private let tapUUID = UUID()
@@ -104,6 +107,8 @@ class SystemAudioCaptureService: @unchecked Sendable {
 
     self.onAudioChunk = onAudioChunk
     self.onAudioLevel = onAudioLevel
+    self.lastAudioLevelDispatchTime = 0
+    self.lastDispatchedAudioLevel = 0
 
     // All CoreAudio HAL calls (CreateTap, CreateAggregateDevice, AudioDeviceStart) are
     // synchronous IPC to coreaudiod via mach_msg. After wake from sleep the daemon can
@@ -258,6 +263,8 @@ class SystemAudioCaptureService: @unchecked Sendable {
     self.inputFormat = nil
     self.targetFormat = nil
     self.sourceSampleRate = 0.0
+    self.lastAudioLevelDispatchTime = 0
+    self.lastDispatchedAudioLevel = 0
 
     // AudioDeviceStop can block — run off main thread
     audioQueue.async {
@@ -411,13 +418,31 @@ class SystemAudioCaptureService: @unchecked Sendable {
       let rms = sqrt(sumOfSquares / Float(pcmData.count))
       // Clamp to 0.0 - 1.0 range
       let level = min(Float(1.0), max(Float(0.0), rms))
-      DispatchQueue.main.async {
-        levelHandler(level)
+      if shouldDispatchAudioLevel(level) {
+        DispatchQueue.main.async {
+          levelHandler(level)
+        }
       }
     }
 
     // Send to callback
     onAudioChunk?(byteData)
+  }
+
+  private func shouldDispatchAudioLevel(_ level: Float) -> Bool {
+    let now = CFAbsoluteTimeGetCurrent()
+    let isFirstDispatch = lastAudioLevelDispatchTime == 0
+    let didReachInterval = now - lastAudioLevelDispatchTime >= audioLevelDispatchInterval
+    let didStartFromSilence = lastDispatchedAudioLevel == 0 && level > 0.05
+    let didReturnToSilence = lastDispatchedAudioLevel > 0 && level == 0
+
+    guard isFirstDispatch || didReachInterval || didStartFromSilence || didReturnToSilence else {
+      return false
+    }
+
+    lastAudioLevelDispatchTime = now
+    lastDispatchedAudioLevel = level
+    return true
   }
 
   /// Clean up tap resources

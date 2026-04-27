@@ -7,6 +7,7 @@ final class LocalSessionAppModel: ObservableObject {
   @Published var sessions: [LocalSession] {
     didSet {
       reconcileSelection()
+      refreshRetranscriptionAvailabilityCache(for: sessions)
     }
   }
   @Published var selectedSessionID: LocalSession.ID?
@@ -24,6 +25,7 @@ final class LocalSessionAppModel: ObservableObject {
   @Published private(set) var processingStatusDetail: String?
   @Published private(set) var processingProgress: Double?
   @Published private(set) var processingSnapshots: [LocalSessionProcessingSnapshot] = []
+  @Published private(set) var retranscribableSessionIDs: Set<LocalSession.ID> = []
 
   private let fileLayout: LocalSessionFileLayout
   private let store: LocalSessionStore?
@@ -64,9 +66,6 @@ final class LocalSessionAppModel: ObservableObject {
     self.selectedSessionID = nil
     bindRecorder()
     loadStoredSessions()
-    Task { [weak self] in
-      await self?.warmUpTranscriptionModelIfNeeded()
-    }
   }
 
   var selectedSession: LocalSession? {
@@ -92,15 +91,17 @@ final class LocalSessionAppModel: ObservableObject {
 
   func canRetranscribe(_ session: LocalSession) -> Bool {
     guard processingSnapshot(for: session.id) == nil else { return false }
-    return resolvedAudioURL(for: session) != nil
+    return retranscribableSessionIDs.contains(session.id)
   }
 
   func loadEmptySessions() {
+    retranscribableSessionIDs = []
     sessions = []
     selectedSessionID = nil
   }
 
   func loadSampleSessions() {
+    retranscribableSessionIDs = []
     sessions = LocalSession.sampleSessions.sorted { $0.startedAt > $1.startedAt }
     selectedSessionID = sessions.first?.id
   }
@@ -110,6 +111,7 @@ final class LocalSessionAppModel: ObservableObject {
 
     let storedSessions = store.loadSessions()
     let normalizedSessions = storedSessions.map(normalizedStoredSession(_:))
+    refreshRetranscriptionAvailabilityCache(for: normalizedSessions)
     sessions = normalizedSessions
 
     for (storedSession, normalizedSession) in zip(storedSessions, normalizedSessions)
@@ -520,6 +522,8 @@ final class LocalSessionAppModel: ObservableObject {
 
     recorder.$micLevel
       .receive(on: DispatchQueue.main)
+      .removeDuplicates { abs($0 - $1) < 0.01 }
+      .throttle(for: .milliseconds(80), scheduler: DispatchQueue.main, latest: true)
       .sink { [weak self] in self?.micLevel = $0 }
       .store(in: &cancellables)
 
@@ -535,6 +539,8 @@ final class LocalSessionAppModel: ObservableObject {
 
     recorder.$systemLevel
       .receive(on: DispatchQueue.main)
+      .removeDuplicates { abs($0 - $1) < 0.01 }
+      .throttle(for: .milliseconds(80), scheduler: DispatchQueue.main, latest: true)
       .sink { [weak self] in self?.systemLevel = $0 }
       .store(in: &cancellables)
 
@@ -962,6 +968,18 @@ final class LocalSessionAppModel: ObservableObject {
     }
 
     return normalizedSession
+  }
+
+  private func refreshRetranscriptionAvailabilityCache(for sessions: [LocalSession]) {
+    let availableSessionIDs = Set(
+      sessions.compactMap { session in
+        resolvedAudioURL(for: session) == nil ? nil : session.id
+      }
+    )
+
+    if availableSessionIDs != retranscribableSessionIDs {
+      retranscribableSessionIDs = availableSessionIDs
+    }
   }
 
   private func resolvedAudioURL(for session: LocalSession) -> URL? {

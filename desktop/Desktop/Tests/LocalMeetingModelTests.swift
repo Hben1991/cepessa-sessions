@@ -516,6 +516,68 @@ final class LocalMeetingAppModelTests: XCTestCase {
     XCTAssertEqual(persistedStatuses, [.failed, .failed])
   }
 
+  func testCanRetranscribeUsesCachedAudioAvailability() throws {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let sessionID = UUID(uuidString: "B75E1812-7C50-4D22-9B26-0F4C68742B1D")!
+    let session = makeSession(
+      id: sessionID,
+      startedAt: Date(timeIntervalSince1970: 1_750),
+      status: .failed,
+      title: "Recoverable",
+      audioArtifacts: .init(micFileName: nil, systemFileName: nil, mixedFileName: "mixed.wav")
+    )
+    let audioURL = layout.mixedAudioURL(for: sessionID)
+    try fileManager.createDirectory(
+      at: audioURL.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try Data("audio".utf8).write(to: audioURL)
+    try store.save(session)
+
+    let model = LocalMeetingAppModel(store: store, fileLayout: layout)
+    guard let loadedSession = model.sessions.first else {
+      XCTFail("Expected stored session to load.")
+      return
+    }
+
+    XCTAssertTrue(model.canRetranscribe(loadedSession))
+
+    try fileManager.removeItem(at: audioURL)
+
+    XCTAssertTrue(model.canRetranscribe(loadedSession))
+  }
+
+  func testAudioAvailabilityCacheRefreshesWhenSessionIsUpserted() throws {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let model = LocalMeetingAppModel(store: store, fileLayout: layout)
+    let sessionID = UUID(uuidString: "E1B98A60-594B-4E6B-9058-F27E29BC70F6")!
+    let session = makeSession(
+      id: sessionID,
+      startedAt: Date(timeIntervalSince1970: 1_760),
+      status: .failed,
+      title: "Audio arrives later",
+      audioArtifacts: .init(micFileName: nil, systemFileName: nil, mixedFileName: "mixed.wav")
+    )
+
+    let insertedSession = model.upsertSession(session)
+    XCTAssertFalse(model.canRetranscribe(insertedSession))
+
+    let audioURL = layout.mixedAudioURL(for: sessionID)
+    try fileManager.createDirectory(
+      at: audioURL.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try Data("audio".utf8).write(to: audioURL)
+
+    let refreshedSession = model.upsertSession(session)
+
+    XCTAssertTrue(model.canRetranscribe(refreshedSession))
+  }
+
   func testUpsertSessionPersistsStatusTransitionsWithoutDuplicatingRows() throws {
     let layout = LocalMeetingFileLayout(
       baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))

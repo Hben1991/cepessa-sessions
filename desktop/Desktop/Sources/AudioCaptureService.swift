@@ -85,6 +85,9 @@ class AudioCaptureService: @unchecked Sendable {
     private var smoothedLevel: Float = 0.0
     private let noiseFloor: Float = 0.005  // Very low threshold for preamp noise
     private let decayRate: Float = 0.85    // Decay multiplier per frame (lower = faster decay)
+    private let audioLevelDispatchInterval: CFTimeInterval = 1.0 / 15.0
+    private var lastAudioLevelDispatchTime: CFAbsoluteTime = 0
+    private var lastDispatchedAudioLevel: Float = 0
 
     // Device change handling
     private var isReconfiguring = false
@@ -144,6 +147,8 @@ class AudioCaptureService: @unchecked Sendable {
 
         self.onAudioChunk = onAudioChunk
         self.onAudioLevel = onAudioLevel
+        self.lastAudioLevelDispatchTime = 0
+        self.lastDispatchedAudioLevel = 0
 
         // All CoreAudio HAL calls (AudioObjectGetPropertyData, AudioDeviceStart, etc.) are
         // synchronous IPC to coreaudiod via mach_msg. After wake from sleep the daemon can
@@ -286,6 +291,8 @@ class AudioCaptureService: @unchecked Sendable {
         targetFormat = nil
         detectedSampleRate = 0.0
         smoothedLevel = 0.0
+        lastAudioLevelDispatchTime = 0
+        lastDispatchedAudioLevel = 0
 
         // AudioDeviceStop can block waiting for the IO thread — run off main thread
         if let procID = procID, devID != kAudioObjectUnknown {
@@ -511,13 +518,31 @@ class AudioCaptureService: @unchecked Sendable {
             }
 
             let level = min(Float(1.0), smoothedLevel)
-            DispatchQueue.main.async {
-                levelHandler(level)
+            if shouldDispatchAudioLevel(level) {
+                DispatchQueue.main.async {
+                    levelHandler(level)
+                }
             }
         }
 
         // Send to callback
         onAudioChunk?(byteData)
+    }
+
+    private func shouldDispatchAudioLevel(_ level: Float) -> Bool {
+        let now = CFAbsoluteTimeGetCurrent()
+        let isFirstDispatch = lastAudioLevelDispatchTime == 0
+        let didReachInterval = now - lastAudioLevelDispatchTime >= audioLevelDispatchInterval
+        let didStartFromSilence = lastDispatchedAudioLevel == 0 && level > 0.05
+        let didReturnToSilence = lastDispatchedAudioLevel > 0 && level == 0
+
+        guard isFirstDispatch || didReachInterval || didStartFromSilence || didReturnToSilence else {
+            return false
+        }
+
+        lastAudioLevelDispatchTime = now
+        lastDispatchedAudioLevel = level
+        return true
     }
 
     // MARK: - Property Listeners

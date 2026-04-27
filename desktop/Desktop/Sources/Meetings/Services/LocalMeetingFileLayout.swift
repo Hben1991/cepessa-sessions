@@ -136,6 +136,20 @@ struct LocalSessionFileLayout {
   ]
 
   let baseDirectory: URL
+  private let resolvedLegacyRootDirectory: URL
+
+  init(baseDirectory: URL) {
+    self.baseDirectory = baseDirectory
+
+    let standardizedCurrent = baseDirectory.standardizedFileURL.path
+    let standardizedDefault = Self.currentBaseDirectory.standardizedFileURL.path
+    if standardizedCurrent == standardizedDefault {
+      resolvedLegacyRootDirectory = Self.legacyBaseDirectory
+    } else {
+      resolvedLegacyRootDirectory = baseDirectory.appendingPathComponent(
+        "LegacyMeetings", isDirectory: true)
+    }
+  }
 
   private static var currentBaseDirectory: URL {
     FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -181,14 +195,7 @@ struct LocalSessionFileLayout {
   }
 
   private var resolvedLegacyBaseDirectory: URL {
-    let standardizedCurrent = baseDirectory.standardizedFileURL.path
-    let standardizedDefault = Self.currentBaseDirectory.standardizedFileURL.path
-
-    if standardizedCurrent == standardizedDefault {
-      return Self.legacyBaseDirectory
-    }
-
-    return baseDirectory.appendingPathComponent("LegacyMeetings", isDirectory: true)
+    resolvedLegacyRootDirectory
   }
 
   func modelURL(
