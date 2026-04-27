@@ -88,7 +88,7 @@ class AudioCaptureService: @unchecked Sendable {
 
     // Device change handling
     private var isReconfiguring = false
-    private let listenerQueue = DispatchQueue(label: "com.omi.audiocapture.listener")
+    private let listenerQueue = DispatchQueue(label: "me.cepessa.audiocapture.listener")
 
     // Silent-mic watchdog state — tracks peak amplitude within a ~1 second window
     // so we can detect a Bluetooth mic that's alive-but-silent (A2DP profile conflict).
@@ -97,7 +97,7 @@ class AudioCaptureService: @unchecked Sendable {
 
     /// Dedicated queue for CoreAudio device operations (start/stop/reconfigure)
     /// to avoid blocking the main thread on AudioDeviceStart/Stop calls.
-    private let audioQueue = DispatchQueue(label: "com.omi.audiocapture.device")
+    private let audioQueue = DispatchQueue(label: "me.cepessa.audiocapture.device")
 
     // MARK: - Public Methods
 
@@ -138,7 +138,7 @@ class AudioCaptureService: @unchecked Sendable {
     ///   - onAudioLevel: Optional callback receiving normalized audio level (0.0 - 1.0)
     func startCapture(onAudioChunk: @escaping AudioChunkHandler, onAudioLevel: AudioLevelHandler? = nil) async throws {
         guard !isCapturing else {
-            log("AudioCapture: Already capturing")
+            localMeetingLog("AudioCapture: Already capturing")
             return
         }
 
@@ -172,7 +172,7 @@ class AudioCaptureService: @unchecked Sendable {
 
         if let override = overrideDeviceID {
             inputDeviceID = override
-            log("AudioCapture: Using override device ID \(override)")
+            localMeetingLog("AudioCapture: Using override device ID \(override)")
         } else {
             var size = UInt32(MemoryLayout<AudioDeviceID>.size)
             var address = AudioObjectPropertyAddress(
@@ -202,7 +202,7 @@ class AudioCaptureService: @unchecked Sendable {
         }
 
         detectedSampleRate = streamFormat.mSampleRate
-        log("AudioCapture: Hardware format - \(streamFormat.mSampleRate)Hz, \(streamFormat.mChannelsPerFrame) channels")
+        localMeetingLog("AudioCapture: Hardware format - \(streamFormat.mSampleRate)Hz, \(streamFormat.mChannelsPerFrame) channels")
 
         // 3. Create mono input format (we mix to mono before conversion)
         guard let inputFmt = AVAudioFormat(
@@ -221,7 +221,7 @@ class AudioCaptureService: @unchecked Sendable {
         }
         self.targetFormat = targetFmt
 
-        log("AudioCapture: Target format - \(targetFmt.sampleRate)Hz, \(targetFmt.channelCount) channels, Float32")
+        localMeetingLog("AudioCapture: Target format - \(targetFmt.sampleRate)Hz, \(targetFmt.channelCount) channels, Float32")
 
         // 5. Create audio converter for resampling
         guard let converter = AVAudioConverter(from: inputFmt, to: targetFmt) else {
@@ -256,7 +256,7 @@ class AudioCaptureService: @unchecked Sendable {
         }
 
         isCapturing = true
-        log("AudioCapture: Started capturing")
+        localMeetingLog("AudioCapture: Started capturing")
 
         // 8. Install property listeners for device changes
         installPropertyListeners()
@@ -295,7 +295,7 @@ class AudioCaptureService: @unchecked Sendable {
             }
         }
 
-        log("AudioCapture: Stopped capturing")
+        localMeetingLog("AudioCapture: Stopped capturing")
     }
 
     /// Check if currently capturing
@@ -428,7 +428,7 @@ class AudioCaptureService: @unchecked Sendable {
         converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
 
         if let error = error {
-            logError("AudioCapture: Conversion error", error: error)
+            localMeetingLogError("AudioCapture: Conversion error", error: error)
             return
         }
 
@@ -475,7 +475,7 @@ class AudioCaptureService: @unchecked Sendable {
                 if consecutiveSilentWindows >= silentMicWindowThreshold,
                    Self.isBluetoothTransport(deviceID: deviceID) {
                     silentMicDetectedFired = true
-                    log("AudioCapture: Bluetooth mic returning silence for \(consecutiveSilentWindows)s — falling back to built-in mic")
+                    localMeetingLog("AudioCapture: Bluetooth mic returning silence for \(consecutiveSilentWindows)s — falling back to built-in mic")
                     let handler = onSilentMicDetected
                     DispatchQueue.main.async { handler?() }
                 }
@@ -610,7 +610,7 @@ class AudioCaptureService: @unchecked Sendable {
         guard isCapturing, !isReconfiguring else { return }
         isReconfiguring = true
 
-        log("AudioCapture: Configuration changed, restarting with new device...")
+        localMeetingLog("AudioCapture: Configuration changed, restarting with new device...")
 
         // Stop IOProc on old device
         if let procID = ioProcID, deviceID != kAudioObjectUnknown {
@@ -663,7 +663,7 @@ class AudioCaptureService: @unchecked Sendable {
         )
 
         guard status == noErr, newDeviceID != kAudioObjectUnknown else {
-            log("AudioCapture: No valid input device after config change (attempt \(retryCount + 1))")
+            localMeetingLog("AudioCapture: No valid input device after config change (attempt \(retryCount + 1))")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
@@ -672,19 +672,19 @@ class AudioCaptureService: @unchecked Sendable {
 
         // Get new format
         guard let streamFormat = getStreamFormat(for: deviceID) else {
-            log("AudioCapture: Failed to get stream format (attempt \(retryCount + 1))")
+            localMeetingLog("AudioCapture: Failed to get stream format (attempt \(retryCount + 1))")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
 
         guard streamFormat.mSampleRate > 0, streamFormat.mChannelsPerFrame > 0 else {
-            log("AudioCapture: No valid format after config change (attempt \(retryCount + 1))")
+            localMeetingLog("AudioCapture: No valid format after config change (attempt \(retryCount + 1))")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
 
         detectedSampleRate = streamFormat.mSampleRate
-        log("AudioCapture: New hardware format - \(streamFormat.mSampleRate)Hz, \(streamFormat.mChannelsPerFrame) channels (attempt \(retryCount + 1))")
+        localMeetingLog("AudioCapture: New hardware format - \(streamFormat.mSampleRate)Hz, \(streamFormat.mChannelsPerFrame) channels (attempt \(retryCount + 1))")
 
         // Recreate input format and converter
         guard let inputFmt = AVAudioFormat(
@@ -693,7 +693,7 @@ class AudioCaptureService: @unchecked Sendable {
             channels: 1,
             interleaved: false
         ) else {
-            logError("AudioCapture: Failed to create input format")
+            localMeetingLogError("AudioCapture: Failed to create input format")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
@@ -701,7 +701,7 @@ class AudioCaptureService: @unchecked Sendable {
 
         guard let targetFmt = targetFormat,
               let newConverter = AVAudioConverter(from: inputFmt, to: targetFmt) else {
-            logError("AudioCapture: Failed to create converter for new format")
+            localMeetingLogError("AudioCapture: Failed to create converter for new format")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
@@ -715,7 +715,7 @@ class AudioCaptureService: @unchecked Sendable {
         }
 
         guard ioProcStatus == noErr, let validProcID = procID else {
-            logError("AudioCapture: Failed to create IOProc: \(ioProcStatus) (attempt \(retryCount + 1))")
+            localMeetingLogError("AudioCapture: Failed to create IOProc: \(ioProcStatus) (attempt \(retryCount + 1))")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
@@ -724,7 +724,7 @@ class AudioCaptureService: @unchecked Sendable {
         // Start device
         let startStatus = AudioDeviceStart(deviceID, validProcID)
         guard startStatus == noErr else {
-            logError("AudioCapture: Failed to start device: \(startStatus) (attempt \(retryCount + 1))")
+            localMeetingLogError("AudioCapture: Failed to start device: \(startStatus) (attempt \(retryCount + 1))")
             AudioDeviceDestroyIOProcID(deviceID, validProcID)
             self.ioProcID = nil
             retryOrGiveUp(retryCount: retryCount)
@@ -752,19 +752,19 @@ class AudioCaptureService: @unchecked Sendable {
             formatBlock
         )
 
-        log("AudioCapture: Restarted with new configuration")
+        localMeetingLog("AudioCapture: Restarted with new configuration")
         isReconfiguring = false
     }
 
     private func retryOrGiveUp(retryCount: Int) {
         if retryCount < Self.maxRetries {
             let delay = Double(retryCount + 1) * 1.0  // 1s, 2s, 3s backoff
-            log("AudioCapture: Retrying in \(delay)s...")
+            localMeetingLog("AudioCapture: Retrying in \(delay)s...")
             audioQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.reconfigureAfterChange(retryCount: retryCount + 1)
             }
         } else {
-            logError("AudioCapture: Giving up after \(retryCount + 1) attempts")
+            localMeetingLogError("AudioCapture: Giving up after \(retryCount + 1) attempts")
             isReconfiguring = false
         }
     }

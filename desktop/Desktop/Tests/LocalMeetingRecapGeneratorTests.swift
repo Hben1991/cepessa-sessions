@@ -1,31 +1,16 @@
 import Foundation
 import XCTest
-@testable import Omi_Computer
+@testable import CepessaSessions
 
 final class LocalMeetingRecapGeneratorTests: XCTestCase {
-    func testDefaultLLMClientFallsBackToLocalGemma4Ollama() {
-        let client = LocalSessionRecapGenerator.defaultLLMClient(environment: [:])
-        let ollamaClient = client as? LocalSessionOllamaRecapClient
+    func testDefaultModelClientFallsBackToLocalModel() {
+        let client = LocalSessionRecapGenerator.defaultModelClient()
 
-        XCTAssertEqual(ollamaClient?.baseURL.absoluteString, "http://127.0.0.1:11434")
-        XCTAssertEqual(ollamaClient?.model, "gemma4:e4b")
-    }
-
-    func testDefaultLLMClientHonorsEnvironmentOverrides() {
-        let client = LocalSessionRecapGenerator.defaultLLMClient(
-            environment: [
-                "CEPESSA_OLLAMA_BASE_URL": "http://localhost:22434",
-                "CEPESSA_OLLAMA_MODEL": "custom-gemma"
-            ]
-        )
-        let ollamaClient = client as? LocalSessionOllamaRecapClient
-
-        XCTAssertEqual(ollamaClient?.baseURL.absoluteString, "http://localhost:22434")
-        XCTAssertEqual(ollamaClient?.model, "custom-gemma")
+        XCTAssertNotNil(client as? LocalSessionEmbeddedRecapClient)
     }
 
     func testDeterministicGeneratorBuildsStructuredSections() async {
-        let generator = LocalSessionRecapGenerator(llmClient: nil)
+        let generator = LocalSessionRecapGenerator(modelClient: nil)
         let startedAt = Date(timeIntervalSince1970: 1_700_000)
         let session = LocalMeetingSession(
             id: UUID(uuidString: "C15A3F3F-208F-4B16-BB45-5E48F85A1A77")!,

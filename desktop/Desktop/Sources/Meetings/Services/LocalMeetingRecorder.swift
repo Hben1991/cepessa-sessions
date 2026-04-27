@@ -61,7 +61,7 @@ final class LocalMeetingRecorder: ObservableObject {
 
     private let fileLayout: LocalSessionFileLayout
     private let timer = LocalMeetingRecordingTimer.shared
-    private let ioQueue = DispatchQueue(label: "me.omi.localmeetings.recorder")
+    private let ioQueue = DispatchQueue(label: "me.cepessa.localsessions.recorder")
 
     private var micCaptureService: LocalMeetingAudioCaptureService?
     private var systemCaptureService: AnyObject?

@@ -20,24 +20,24 @@ struct LocalSessionRecapGenerationInput: Sendable {
     let captureArtifactCount: Int
 }
 
-protocol LocalSessionRecapLLMProviding: Sendable {
+protocol LocalSessionRecapModelProviding: Sendable {
     func generateRecap(for input: LocalSessionRecapGenerationInput) async throws -> LocalSessionRecap
 }
 
 struct LocalSessionRecapGenerator: LocalSessionRecapGenerating {
-    private let llmClient: (any LocalSessionRecapLLMProviding)?
+    private let modelClient: (any LocalSessionRecapModelProviding)?
     private let fallback = LocalSessionDeterministicRecapGenerator()
 
-    init(llmClient: (any LocalSessionRecapLLMProviding)? = Self.defaultLLMClient()) {
-        self.llmClient = llmClient
+    init(modelClient: (any LocalSessionRecapModelProviding)? = Self.defaultModelClient()) {
+        self.modelClient = modelClient
     }
 
     func generateRecap(for session: LocalSession) async -> LocalSessionRecap {
         let input = Self.makeInput(from: session)
 
-        if let llmClient {
+        if let modelClient {
             do {
-                let recap = try await llmClient.generateRecap(for: input)
+                let recap = try await modelClient.generateRecap(for: input)
                 if recap.isMeaningful {
                     return recap
                 }
@@ -69,84 +69,33 @@ struct LocalSessionRecapGenerator: LocalSessionRecapGenerating {
         )
     }
 
-    static func defaultLLMClient(
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> (any LocalSessionRecapLLMProviding)? {
-        let baseURL = normalizedBaseURL(environment["CEPESSA_OLLAMA_BASE_URL"] ?? environment["OLLAMA_HOST"])
-            ?? URL(string: "http://127.0.0.1:11434")
-        let model = environment["CEPESSA_OLLAMA_MODEL"] ?? environment["OLLAMA_MODEL"] ?? "gemma4:e4b"
-
-        guard let baseURL else { return nil }
-        return LocalSessionOllamaRecapClient(baseURL: baseURL, model: model)
-    }
-
-    private static func normalizedBaseURL(_ rawValue: String?) -> URL? {
-        guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !rawValue.isEmpty else {
-            return nil
-        }
-
-        if rawValue.contains("://") {
-            return URL(string: rawValue)
-        }
-
-        return URL(string: "http://\(rawValue)")
+    static func defaultModelClient(
+    ) -> (any LocalSessionRecapModelProviding)? {
+        LocalSessionEmbeddedRecapClient()
     }
 }
 
-struct LocalSessionOllamaRecapClient: LocalSessionRecapLLMProviding, Sendable {
-    let baseURL: URL
-    let model: String
-    var requestTimeout: TimeInterval = 90
-    var availabilityTimeout: TimeInterval = 1.5
+struct LocalSessionEmbeddedRecapClient: LocalSessionRecapModelProviding, Sendable {
+    let languageModel: any LocalSessionLanguageModelGenerating
+    var maxTokens: Int = 900
+
+    init(
+        languageModel: any LocalSessionLanguageModelGenerating = EmbeddedLocalLanguageModel.shared,
+        maxTokens: Int = 900
+    ) {
+        self.languageModel = languageModel
+        self.maxTokens = maxTokens
+    }
 
     func generateRecap(for input: LocalSessionRecapGenerationInput) async throws -> LocalSessionRecap {
-        struct RequestBody: Codable {
-            let model: String
-            let prompt: String
-            let stream: Bool
-        }
-
-        struct ResponseBody: Codable {
-            let response: String
-        }
-
-        try await ensureServerIsReachable()
-
-        let prompt = LocalSessionOllamaRecapClient.prompt(for: input)
-        let endpoint = baseURL.appendingPathComponent("api").appendingPathComponent("generate")
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = requestTimeout
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(
-            RequestBody(model: model, prompt: prompt, stream: false)
+        let rawResponse = try await languageModel.generateText(
+            prompt: Self.prompt(for: input),
+            maxTokens: maxTokens
         )
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode) else {
-            throw NSError(domain: "LocalSessionOllamaRecapClient", code: 1)
-        }
-
-        let decoded = try JSONDecoder().decode(ResponseBody.self, from: data)
-        let jsonString = decoded.response.jsonSubstringOrSelf
+        let jsonString = rawResponse.jsonSubstringOrSelf
         let payloadData = jsonString.data(using: .utf8) ?? Data()
         let payload = try JSONDecoder().decode(LocalSessionRecapPayload.self, from: payloadData)
         return payload.makeRecap(startedAt: input.startedAt)
-    }
-
-    private func ensureServerIsReachable() async throws {
-        let endpoint = baseURL.appendingPathComponent("api").appendingPathComponent("tags")
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "GET"
-        request.timeoutInterval = availabilityTimeout
-
-        let (_, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode) else {
-            throw NSError(domain: "LocalSessionOllamaRecapClient", code: 0)
-        }
     }
 
     private static func prompt(for input: LocalSessionRecapGenerationInput) -> String {
