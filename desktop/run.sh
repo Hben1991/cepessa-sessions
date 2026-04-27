@@ -650,6 +650,10 @@ if [ -n "$SIGN_IDENTITY" ]; then
         substep "Signing llama framework"
         codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/Frameworks/llama.framework"
     fi
+    if [ -f "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" ]; then
+        substep "Signing local model runner"
+        codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
+    fi
     if [ -d "$APP_BUNDLE/Contents/Frameworks/CSSwiftProtobuf.framework" ]; then
         substep "Signing CSSwiftProtobuf framework"
         codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/Frameworks/CSSwiftProtobuf.framework"

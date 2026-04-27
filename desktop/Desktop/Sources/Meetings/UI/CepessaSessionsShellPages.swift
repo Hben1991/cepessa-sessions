@@ -785,7 +785,7 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
     switch block {
     case .heading(let level, let text):
       Text(inlineMarkdown(text))
-        .scaledFont(size: headingSize(for: level), weight: .semibold, design: .serif)
+        .scaledFont(size: headingSize(for: level), weight: .semibold)
         .tracking(level == 1 ? -0.5 : -0.25)
         .foregroundStyle(CepessaColors.textPrimary.opacity(level == 1 ? 0.98 : 0.92))
         .textSelection(.enabled)
@@ -794,7 +794,7 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
 
     case .paragraph(let text):
       Text(inlineMarkdown(text))
-        .scaledFont(size: 15, design: .serif)
+        .scaledFont(size: 15)
         .lineSpacing(5)
         .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
         .textSelection(.enabled)
@@ -808,7 +808,7 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
               .fill(CepessaColors.purplePrimary.opacity(0.72))
               .frame(width: 5, height: 5)
             Text(inlineMarkdown(item))
-              .scaledFont(size: 14.5, design: .serif)
+              .scaledFont(size: 14.5)
               .lineSpacing(4)
               .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
               .textSelection(.enabled)
@@ -826,7 +826,7 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
               .foregroundStyle(CepessaColors.purplePrimary)
               .frame(width: 26, alignment: .trailing)
             Text(inlineMarkdown(item))
-              .scaledFont(size: 14.5, design: .serif)
+              .scaledFont(size: 14.5)
               .lineSpacing(4)
               .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
               .textSelection(.enabled)
@@ -837,7 +837,7 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
 
     case .quote(let text):
       Text(inlineMarkdown(text))
-        .scaledFont(size: 14.5, design: .serif)
+        .scaledFont(size: 14.5)
         .lineSpacing(4)
         .foregroundStyle(CepessaColors.textSecondary)
         .textSelection(.enabled)

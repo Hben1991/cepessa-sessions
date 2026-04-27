@@ -82,6 +82,7 @@ func generate(prompt: String, options: RunnerOptions) throws -> String {
   var contextParams = llama_context_default_params()
   contextParams.n_ctx = 4096
   contextParams.n_batch = 512
+  let batchCapacity = max(1, Int(contextParams.n_batch))
 
   guard let context = llama_init_from_model(model, contextParams) else {
     throw RunnerError.contextLoadFailed
@@ -105,28 +106,35 @@ func generate(prompt: String, options: RunnerOptions) throws -> String {
     throw RunnerError.tokenizationFailed
   }
 
-  let promptTokens = Array(tokens.prefix(Int(tokenCount)))
+  let maxPromptTokens = max(1, Int(contextParams.n_ctx) - options.maxTokens - 1)
+  let promptTokens = Array(tokens.prefix(Int(tokenCount)).suffix(maxPromptTokens))
   var batch = llama_batch_init(Int32(contextParams.n_batch), 0, 1)
   defer { llama_batch_free(batch) }
 
-  batch.n_tokens = Int32(promptTokens.count)
-  for index in promptTokens.indices {
-    batch.token[index] = promptTokens[index]
-    batch.pos[index] = Int32(index)
-    batch.n_seq_id[index] = 1
-    if let seqIDs = batch.seq_id, let seqID = seqIDs[index] {
-      seqID[0] = 0
-    }
-    batch.logits[index] = 0
-  }
-  batch.logits[Int(batch.n_tokens) - 1] = 1
+  var currentPosition = Int32(0)
+  for chunkStart in stride(from: 0, to: promptTokens.count, by: batchCapacity) {
+    let chunkEnd = min(chunkStart + batchCapacity, promptTokens.count)
+    let chunk = promptTokens[chunkStart..<chunkEnd]
 
-  guard llama_decode(context, batch) == 0 else {
-    throw RunnerError.promptEvaluationFailed
+    batch.n_tokens = Int32(chunk.count)
+    for chunkIndex in 0..<chunk.count {
+      let absoluteIndex = chunkStart + chunkIndex
+      batch.token[chunkIndex] = promptTokens[absoluteIndex]
+      batch.pos[chunkIndex] = Int32(absoluteIndex)
+      batch.n_seq_id[chunkIndex] = 1
+      if let seqIDs = batch.seq_id, let seqID = seqIDs[chunkIndex] {
+        seqID[0] = 0
+      }
+      batch.logits[chunkIndex] = chunkEnd == promptTokens.count && chunkIndex == chunk.count - 1 ? 1 : 0
+    }
+
+    guard llama_decode(context, batch) == 0 else {
+      throw RunnerError.promptEvaluationFailed
+    }
+    currentPosition = Int32(chunkEnd)
   }
 
   var output = ""
-  var currentPosition = batch.n_tokens
 
   for _ in 0..<options.maxTokens {
     guard let logits = llama_get_logits_ith(context, batch.n_tokens - 1) else {

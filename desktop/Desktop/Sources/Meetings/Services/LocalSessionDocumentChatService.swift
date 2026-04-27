@@ -12,11 +12,11 @@ protocol LocalSessionDocumentChatProviding: Sendable {
 
 struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendable {
   let languageModel: any LocalSessionLanguageModelGenerating
-  var maxTokens: Int = 900
+  var maxTokens: Int = 180
 
   init(
     languageModel: any LocalSessionLanguageModelGenerating = EmbeddedLocalLanguageModel.shared,
-    maxTokens: Int = 900
+    maxTokens: Int = 180
   ) {
     self.languageModel = languageModel
     self.maxTokens = maxTokens
@@ -34,12 +34,8 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
 
   private static func prompt(for request: LocalSessionDocumentChatRequest) -> String {
     let session = request.session
-    let markdown = LocalSessionRecapMarkdownDocument(session: session).markdown
-    let transcript = session.transcriptSegments.map { segment in
-      let offset = max(0, segment.timestamp.timeIntervalSince(session.startedAt))
-      return "[segmentID=\(segment.id.uuidString) offset=\(String(format: "%.1f", offset))s speaker=\(segment.speaker)] \(segment.text)"
-    }
-    .joined(separator: "\n")
+    let markdown = conciseMarkdownContext(for: session)
+    let transcript = transcriptContext(for: session)
 
     let chatHistory = session.documentChat.messages.suffix(12).map { message in
       "\(message.role.rawValue): \(message.text)"
@@ -80,10 +76,10 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       Session title: \(session.title)
       Started at: \(session.startedAt.formatted(date: .complete, time: .complete))
 
-      Markdown preview:
+      Markdown preview excerpt:
       \(markdown)
 
-      Transcript with stable segment IDs:
+      Transcript excerpt with stable segment IDs:
       \(transcript)
 
       Recent chat:
@@ -92,6 +88,53 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       User request:
       \(request.userMessage)
       """
+  }
+
+  private static func conciseMarkdownContext(for session: LocalSession) -> String {
+    let recapOnlySession = LocalSession(
+      id: session.id,
+      title: session.title,
+      startedAt: session.startedAt,
+      status: session.status,
+      transcriptSegments: [],
+      recap: session.recap,
+      attachments: session.attachments,
+      captureArtifacts: session.captureArtifacts,
+      audioArtifacts: session.audioArtifacts,
+      documentChat: session.documentChat
+    )
+    return LocalSessionRecapMarkdownDocument(session: recapOnlySession).markdown
+  }
+
+  private static func transcriptContext(for session: LocalSession) -> String {
+    let segments = session.transcriptSegments
+    let maxHeadSegments = 80
+    let maxTailSegments = 40
+    let selectedSegments: [LocalSessionTranscriptSegment]
+    if segments.count > maxHeadSegments + maxTailSegments {
+      selectedSegments = Array(segments.prefix(maxHeadSegments)) + Array(segments.suffix(maxTailSegments))
+    } else {
+      selectedSegments = segments
+    }
+
+    let lines = selectedSegments.map { segment in
+      let offset = max(0, segment.timestamp.timeIntervalSince(session.startedAt))
+      return
+        "[segmentID=\(segment.id.uuidString) offset=\(String(format: "%.1f", offset))s speaker=\(segment.speaker)] \(segment.text)"
+    }
+
+    guard segments.count > selectedSegments.count else {
+      return lines.joined(separator: "\n")
+    }
+
+    let omittedCount = segments.count - selectedSegments.count
+    let insertionIndex = min(maxHeadSegments, lines.count)
+    var excerpt = lines
+    excerpt.insert(
+      "[\(omittedCount) middle transcript segments omitted to keep local generation fast. Ask for a specific timestamp if you need a precise edit there.]",
+      at: insertionIndex
+    )
+    return excerpt.joined(separator: "\n")
   }
 
   static func decodeProposal(from rawResponse: String) -> LocalSessionDocumentEditProposal {
