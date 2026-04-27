@@ -264,6 +264,47 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
     XCTAssertTrue(markdown.contains("Original transcript line."))
   }
 
+  func testRecapMarkdownDocumentCanOmitTranscriptForPreview() {
+    let session = makeSession(
+      id: UUID(uuidString: "26F99059-9893-42C7-B3F0-F91597F0F5C2")!,
+      startedAt: Date(timeIntervalSince1970: 1_900),
+      status: .ready,
+      title: "Preview Markdown",
+      segments: [
+        .init(
+          id: UUID(uuidString: "47D53626-B87D-4655-91DA-95734E6E1623")!,
+          speaker: "Transcript",
+          text: "Very long transcript line that should stay out of recap previews.",
+          timestamp: Date(timeIntervalSince1970: 1_920))
+      ]
+    )
+    var sessionWithRecap = session
+    sessionWithRecap.recap = LocalSessionRecap(
+      overview: "Preview overview.",
+      generatedAt: Date(timeIntervalSince1970: 2_000),
+      sections: [
+        LocalSessionRecapSection(
+          id: UUID(uuidString: "4EBAAC21-8C73-48EE-A581-4E49DBB25701")!,
+          kind: .decisions,
+          title: "Decisions",
+          summary: "Use recap-only rendering for the preview document.",
+          bullets: [],
+          anchorTimestamp: nil,
+          startOffset: nil,
+          endOffset: nil
+        )
+      ]
+    )
+
+    let markdown = LocalSessionRecapMarkdownDocument.markdown(
+      for: sessionWithRecap, includeTranscript: false)
+
+    XCTAssertTrue(markdown.contains("Preview overview."))
+    XCTAssertTrue(markdown.contains("Use recap-only rendering for the preview document."))
+    XCTAssertFalse(markdown.contains("## Transcript"))
+    XCTAssertFalse(markdown.contains("Very long transcript line"))
+  }
+
   func testExistingAudioURLFallsBackToLegacyMixedTrack() throws {
     let baseDirectory = tempRootURL.appendingPathComponent("Meetings", isDirectory: true)
     let layout = LocalMeetingFileLayout(baseDirectory: baseDirectory)

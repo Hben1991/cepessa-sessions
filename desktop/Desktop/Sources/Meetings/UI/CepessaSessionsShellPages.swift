@@ -377,14 +377,25 @@ private struct CepessaLibraryDetailPane: View {
                     .background(CepessaColors.backgroundSecondary.opacity(0.82))
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 } else {
-                  Text(session.transcriptText)
-                    .scaledFont(size: 13)
-                    .foregroundStyle(CepessaColors.textSecondary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-                    .background(CepessaColors.backgroundSecondary.opacity(0.82))
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                  LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(session.segments) { segment in
+                      VStack(alignment: .leading, spacing: 5) {
+                        Text(segment.timestamp.formatted(date: .omitted, time: .shortened))
+                          .scaledFont(size: 10.5, weight: .semibold)
+                          .foregroundStyle(CepessaColors.textTertiary)
+
+                        Text(segment.text)
+                          .scaledFont(size: 13)
+                          .foregroundStyle(CepessaColors.textSecondary)
+                          .textSelection(.enabled)
+                          .frame(maxWidth: .infinity, alignment: .leading)
+                      }
+                      .padding(12)
+                      .frame(maxWidth: .infinity, alignment: .leading)
+                      .background(CepessaColors.backgroundSecondary.opacity(0.82))
+                      .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                  }
                 }
               }
 
@@ -709,7 +720,7 @@ private struct LocalSessionRecapWorkspace: View {
   private var recapSurface: some View {
     if hasRecap {
       LocalSessionMarkdownDocumentPreview(
-        markdown: LocalSessionRecapMarkdownDocument(session: session).markdown
+        markdown: LocalSessionRecapMarkdownDocument.markdown(for: session, includeTranscript: false)
       )
     } else {
       Text("Recap is still being prepared.")

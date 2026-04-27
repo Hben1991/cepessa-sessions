@@ -512,7 +512,7 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     markdown = Self.markdown(for: session)
   }
 
-  static func markdown(for session: LocalSession) -> String {
+  static func markdown(for session: LocalSession, includeTranscript: Bool = true) -> String {
     var lines: [String] = []
     lines.append("# \(sanitizedLine(session.displayTitle))")
     lines.append("")
@@ -557,7 +557,7 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     }
 
     let transcript = session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !transcript.isEmpty {
+    if includeTranscript && !transcript.isEmpty {
       lines.append("## Transcript")
       lines.append("")
       lines.append(transcript)
