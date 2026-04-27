@@ -30,7 +30,15 @@ struct CepessaSessionsLibraryPage: View {
 
   var body: some View {
     ZStack {
-      Color(nsColor: .windowBackgroundColor)
+      LinearGradient(
+        colors: [
+          CepessaColors.paperRaised,
+          CepessaColors.paper,
+          CepessaColors.paperDeep.opacity(0.68),
+        ],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+      )
         .ignoresSafeArea()
 
       HStack(spacing: 18) {
@@ -115,14 +123,7 @@ struct CepessaSessionsLibraryPage: View {
         }
         .padding(22)
         .frame(minWidth: 360, idealWidth: 420, maxWidth: 440, maxHeight: .infinity, alignment: .top)
-        .cepessaPanel(
-          fill: CepessaColors.backgroundSecondary.opacity(0.78),
-          radius: 10,
-          stroke: CepessaColors.border.opacity(0.55),
-          shadowOpacity: 0.01,
-          shadowRadius: 2,
-          shadowY: 1
-        )
+        .cepessaCanvas(radius: 22)
 
         CepessaLibraryDetailPane(model: model, session: model.selectedSession)
       }
@@ -178,12 +179,12 @@ struct CepessaSessionsLibraryPage: View {
       RoundedRectangle(cornerRadius: 8, style: .continuous)
         .fill(
           isSelected
-            ? Color.accentColor.opacity(0.14) : CepessaColors.backgroundSecondary.opacity(0.76))
+            ? CepessaColors.capture.opacity(0.14) : CepessaColors.backgroundSecondary.opacity(0.76))
     )
     .overlay(
       RoundedRectangle(cornerRadius: 8, style: .continuous)
         .stroke(
-          isSelected ? Color.accentColor.opacity(0.28) : CepessaColors.border.opacity(0.22),
+          isSelected ? CepessaColors.capture.opacity(0.28) : CepessaColors.border.opacity(0.22),
           lineWidth: 1)
     )
     .shadow(
@@ -488,14 +489,7 @@ private struct CepessaLibraryDetailPane: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    .cepessaPanel(
-      fill: CepessaColors.backgroundSecondary.opacity(0.78),
-      radius: 12,
-      stroke: CepessaColors.border.opacity(0.34),
-      shadowOpacity: 0.03,
-      shadowRadius: 6,
-      shadowY: 2
-    )
+    .cepessaCanvas(radius: 24)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: session?.id)
   }
 
@@ -1607,14 +1601,7 @@ struct CepessaSessionsSettingsPage: View {
     }
     .padding(20)
     .frame(maxWidth: .infinity, alignment: .leading)
-    .cepessaPanel(
-      fill: CepessaColors.backgroundSecondary.opacity(0.80),
-      radius: 12,
-      stroke: CepessaColors.border.opacity(0.34),
-      shadowOpacity: 0.03,
-      shadowRadius: 6,
-      shadowY: 2
-    )
+    .cepessaPaper(radius: 16)
   }
 
   private func pickerRow(title: String, value: Binding<String>, options: [String]) -> some View {

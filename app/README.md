@@ -1,8 +1,8 @@
-# Omi App
+# Cepessa Sessions App
 
-The Omi App is a Flutter-based mobile application that serves as the companion app for Omi devices. This app enables users to interact with their Omi device, manage apps, and customize their experience.
+The Cepessa Sessions app is a Flutter-based mobile application that serves as the companion app for Cepessa devices. This app enables users to interact with their Cepessa device, manage apps, and customize their experience.
 
-## 📚 **[View Full App setup instructions in the documentation](https://docs.omi.me/doc/developer/AppSetup)**
+## 📚 **[View Full App setup instructions in the documentation](../docs/doc/developer/AppSetup)**
 
 ### Quick Setup
 
@@ -56,4 +56,4 @@ Once installed, the app will run on your iPhone independently from your developm
 
 ## Need Help?
 
-- 💬 Join our [Discord Community](http://discord.omi.me)
+- 💬 Join our [Discord Community](https://github.com/Hben1991/cepessa-sessions)

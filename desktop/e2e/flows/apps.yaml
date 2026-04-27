@@ -1,7 +1,7 @@
 version: 2
 name: apps
 description: Apps/Integrations marketplace flow — browse apps, filter by category, search, view app details
-app: com.omi.computer-macos
+app: me.cepessa.sessions.local
 covers:
   - desktop/Desktop/Sources/MainWindow/Pages/IntegrationsPage.swift
 preconditions:

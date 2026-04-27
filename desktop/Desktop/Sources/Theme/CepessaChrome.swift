@@ -1,11 +1,15 @@
 import SwiftUI
 
 enum CepessaChrome {
-  static let windowRadius: CGFloat = 12
-  static let cardRadius: CGFloat = 10
-  static let sectionRadius: CGFloat = 8
-  static let controlRadius: CGFloat = 7
-  static let chipRadius: CGFloat = 7
+  static let windowRadius: CGFloat = 28
+  static let canvasRadius: CGFloat = 28
+  static let cardRadius: CGFloat = 18
+  static let sectionRadius: CGFloat = 14
+  static let controlRadius: CGFloat = 12
+  static let chipRadius: CGFloat = 999
+  static let paperRadius: CGFloat = 8
+  static let instrumentRadius: CGFloat = 24
+  static let stripRadius: CGFloat = 999
 }
 
 private struct CepessaPanelModifier: ViewModifier {
@@ -88,8 +92,72 @@ struct CepessaPressStyle: ButtonStyle {
       .scaleEffect(configuration.isPressed && !reduceMotion ? scale : 1)
       .brightness(configuration.isPressed ? pressedBrightness : 0)
       .animation(
-        reduceMotion ? nil : .spring(response: 0.18, dampingFraction: 0.88),
+        reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.86),
         value: configuration.isPressed)
+  }
+}
+
+private struct CepessaCanvasModifier: ViewModifier {
+  let radius: CGFloat
+
+  func body(content: Content) -> some View {
+    content
+      .background(
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+          .fill(CepessaColors.paper.opacity(0.96))
+      )
+      .overlay {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+          .stroke(CepessaColors.hairline.opacity(0.72), lineWidth: 1)
+      }
+      .shadow(color: CepessaColors.warmShadow.opacity(0.08), radius: 28, x: 0, y: 18)
+  }
+}
+
+private struct CepessaPaperModifier: ViewModifier {
+  let radius: CGFloat
+
+  func body(content: Content) -> some View {
+    content
+      .background(
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+          .fill(CepessaColors.paperRaised.opacity(0.88))
+      )
+      .overlay {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+          .stroke(CepessaColors.hairline.opacity(0.58), lineWidth: 1)
+      }
+  }
+}
+
+private struct CepessaInstrumentStripModifier: ViewModifier {
+  let radius: CGFloat
+
+  func body(content: Content) -> some View {
+    content
+      .background(
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+          .fill(
+            LinearGradient(
+              colors: [
+                CepessaColors.paperRaised.opacity(0.72),
+                CepessaColors.graphite.opacity(0.88),
+              ],
+              startPoint: .topLeading,
+              endPoint: .bottomTrailing
+            )
+          )
+      )
+      .overlay {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+          .stroke(Color.white.opacity(0.70), lineWidth: 1)
+      }
+      .overlay {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+          .stroke(CepessaColors.border.opacity(0.48), lineWidth: 1)
+          .padding(0.5)
+      }
+      .shadow(color: CepessaColors.warmShadow.opacity(0.16), radius: 28, x: 0, y: 16)
   }
 }
 
@@ -147,5 +215,17 @@ extension View {
         shadowOpacity: shadowOpacity
       )
     )
+  }
+
+  func cepessaCanvas(radius: CGFloat = CepessaChrome.canvasRadius) -> some View {
+    modifier(CepessaCanvasModifier(radius: radius))
+  }
+
+  func cepessaPaper(radius: CGFloat = CepessaChrome.paperRadius) -> some View {
+    modifier(CepessaPaperModifier(radius: radius))
+  }
+
+  func cepessaInstrumentStrip(radius: CGFloat = CepessaChrome.instrumentRadius) -> some View {
+    modifier(CepessaInstrumentStripModifier(radius: radius))
   }
 }

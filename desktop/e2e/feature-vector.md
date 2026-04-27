@@ -1,8 +1,8 @@
-# Omi Desktop App Feature Vector for Flow-Walker
+# Cepessa Sessions Desktop App Feature Vector for Flow-Walker
 ## Updated 2026-03-20
 
 ### Purpose
-Prioritized feature map to guide flow-walker E2E coverage of core Omi desktop macOS app flows. Uses the same two-dimensional scoring model as the mobile feature vector.
+Prioritized feature map to guide flow-walker E2E coverage of core Cepessa Sessions desktop macOS app flows. Uses the same two-dimensional scoring model as the mobile feature vector.
 
 ---
 
@@ -120,6 +120,6 @@ Prioritized feature map to guide flow-walker E2E coverage of core Omi desktop ma
 - Sidebar AX identifiers: `sidebar_dashboard`, `sidebar_chat`, `sidebar_memories`, `sidebar_tasks`, `sidebar_rewind`, `sidebar_apps`, `sidebar_settings`, `sidebar_refer_a_friend`, `sidebar_discord`
 - System tray menu items: `openOmiFromMenu`, `checkForUpdates`, `resetOnboarding`, `reportIssue`, `signOut`, `quitApp`
 - Keyboard shortcuts via View menu: Cmd+1 (Dashboard), Cmd+2 (Chat), Cmd+3 (Memories), Cmd+4 (Tasks), Cmd+5 (Rewind), Cmd+6 (Apps), Cmd+, (Settings)
-- Beta app bundle ID: `com.omi.computer-macos` (use for flow-walker runs)
-- Dev app bundle ID: `com.omi.desktop-dev` (skip unless dev-specific testing)
+- Beta app bundle ID: `me.cepessa.sessions.local` (use for flow-walker runs)
+- Dev app bundle ID: `me.cepessa.sessions.local` (skip unless dev-specific testing)
 - GUI user prefix required on SSH: `sudo launchctl asuser 501 sudo -u beastoinagents <cmd>`

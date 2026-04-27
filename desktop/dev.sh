@@ -1,9 +1,11 @@
 #!/bin/bash
 set -e
 
-BINARY_NAME="Omi Computer"  # Package.swift target — binary paths, pkill, CFBundleExecutable
-APP_NAME="Omi Dev"
-BUNDLE_ID="com.omi.desktop-dev"
+BINARY_NAME="CepessaSessions"  # Package.swift target — binary paths, pkill, CFBundleExecutable
+LOCAL_MODEL_RUNNER_NAME="CepessaLocalModelRunner"
+RESOURCE_BUNDLE_NAME="CepessaSessions_CepessaSessions.bundle"
+APP_NAME="Cepessa Sessions Dev"
+BUNDLE_ID="me.cepessa.sessions.local"
 BUILD_DIR="build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 BACKEND_DIR="$(dirname "$0")/Backend"
@@ -81,16 +83,27 @@ done
 
 # Build debug
 swift build -c debug --package-path Desktop
+swift build -c debug --package-path Desktop --product "$LOCAL_MODEL_RUNNER_NAME"
 
 # Clean old app bundles from build dir
-rm -rf "$BUILD_DIR/Omi Computer.app" "$BUILD_DIR/Omi Beta.app" 2>/dev/null
+rm -rf "$BUILD_DIR/Omi Computer.app" "$BUILD_DIR/Omi Beta.app" "$BUILD_DIR/Cepessa Sessions Dev.app" 2>/dev/null
 
 # Create app bundle
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 
 # Copy binary
 cp "Desktop/.build/debug/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
+if [ -f "Desktop/.build/debug/$LOCAL_MODEL_RUNNER_NAME" ]; then
+    cp "Desktop/.build/debug/$LOCAL_MODEL_RUNNER_NAME" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" 2>/dev/null || true
+fi
+
+LLAMA_FRAMEWORK="Desktop/.build/debug/llama.framework"
+if [ -d "$LLAMA_FRAMEWORK" ]; then
+    cp -R "$LLAMA_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
+fi
 
 # Copy and fix Info.plist
 cp Desktop/Info.plist "$APP_BUNDLE/Contents/Info.plist"
@@ -98,19 +111,28 @@ cp Desktop/Info.plist "$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $APP_NAME" "$APP_BUNDLE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 omi-computer-dev" "$APP_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 cepessa-sessions-dev" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
 
-# Copy GoogleService-Info.plist for Firebase
-cp Desktop/Sources/GoogleService-Info.plist "$APP_BUNDLE/Contents/Resources/"
+# Copy GoogleService-Info.plist for Firebase when this target includes one.
+if [ -f "Desktop/Sources/GoogleService-Info.plist" ]; then
+    cp Desktop/Sources/GoogleService-Info.plist "$APP_BUNDLE/Contents/Resources/"
+fi
 
 # Copy resource bundle (contains app assets like herologo.png, omi-with-rope-no-padding.webp, etc.)
 SWIFT_BUILD_DIR="Desktop/.build/debug"
-if [ -d "$SWIFT_BUILD_DIR/Omi Computer_Omi Computer.bundle" ]; then
-    cp -R "$SWIFT_BUILD_DIR/Omi Computer_Omi Computer.bundle" "$APP_BUNDLE/Contents/Resources/"
+if [ -d "$SWIFT_BUILD_DIR/$RESOURCE_BUNDLE_NAME" ]; then
+    cp -R "$SWIFT_BUILD_DIR/$RESOURCE_BUNDLE_NAME" "$APP_BUNDLE/Contents/Resources/"
     echo "Copied resource bundle"
 else
-    echo "Warning: Resource bundle not found at $SWIFT_BUILD_DIR/Omi Computer_Omi Computer.bundle"
+    echo "Warning: Resource bundle not found at $SWIFT_BUILD_DIR/$RESOURCE_BUNDLE_NAME"
 fi
+for SWIFT_RESOURCE_BUNDLE in "$SWIFT_BUILD_DIR"/*.bundle; do
+    [ -d "$SWIFT_RESOURCE_BUNDLE" ] || continue
+    BUNDLE_BASENAME="$(basename "$SWIFT_RESOURCE_BUNDLE")"
+    rm -rf "$APP_BUNDLE/Contents/Resources/$BUNDLE_BASENAME"
+    cp -R "$SWIFT_RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/"
+    echo "Copied SwiftPM resource bundle $BUNDLE_BASENAME"
+done
 
 # Copy .env.app (app runtime secrets only) and add API URL
 if [ -f ".env.app" ]; then
@@ -135,6 +157,14 @@ echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 # Sign app with a stable identity so TCC permissions persist across rebuilds.
 # Auto-detect: Developer ID > Apple Development > ad-hoc fallback.
 SIGN_IDENTITY="${OMI_SIGN_IDENTITY:-}"
+chmod -R u+w "$APP_BUNDLE"
+find "$APP_BUNDLE" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
+find "$APP_BUNDLE" -exec xattr -d 'com.apple.fileprovider.fpfs#P' {} \; 2>/dev/null || true
+SIGNING_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/cepessa-dev-signing.XXXXXX")
+SIGNING_APP_BUNDLE="$SIGNING_ROOT/$APP_NAME.app"
+ditto --norsrc --noextattr --noqtn --noacl "$APP_BUNDLE" "$SIGNING_APP_BUNDLE"
+chmod -R u+w "$SIGNING_APP_BUNDLE"
+APP_BUNDLE="$SIGNING_APP_BUNDLE"
 if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)"/\1/')
     if [ -z "$SIGN_IDENTITY" ]; then
@@ -143,7 +173,10 @@ if [ -z "$SIGN_IDENTITY" ]; then
 fi
 if [ -n "$SIGN_IDENTITY" ]; then
     echo "Signing with: $SIGN_IDENTITY"
-    codesign --force --options runtime --entitlements Desktop/Omi.entitlements --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+    if [ -d "$APP_BUNDLE/Contents/Frameworks/llama.framework" ]; then
+        codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/Frameworks/llama.framework"
+    fi
+    codesign --force --options runtime --entitlements Desktop/Cepessa.entitlements --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 else
     echo ""
     echo "ERROR: No signing identity found. Ad-hoc signing causes macOS to reset"

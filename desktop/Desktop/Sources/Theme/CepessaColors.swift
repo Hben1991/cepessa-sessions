@@ -4,34 +4,57 @@ import SwiftUI
 /// Shared adaptive palette for the native macOS app.
 /// Prefer system colors so the UI follows macOS contrast, vibrancy, and appearance settings.
 enum CepessaColors {
+  // MARK: - Lavender Glass Reference Palette
+  static let paper = Color(hex: 0xF7F3FF)
+  static let paperDeep = Color(hex: 0xEDE5FF)
+  static let paperRaised = Color(hex: 0xFFFDFE)
+  static let ink = Color(hex: 0x17152B)
+  static let graphite = Color(hex: 0xF0E9FF)
+  static let graphiteRaised = Color(hex: 0xF8F4FF)
+  static let graphiteLine = Color(hex: 0xD7CBF5)
+  static let copper = Color(hex: 0x7D52F4)
+  static let copperDeep = Color(hex: 0x5A33D6)
+  static let moss = Color(hex: 0x55C989)
+  static let mossDeep = Color(hex: 0x379A65)
+  static let signalRed = Color(hex: 0xFF4B55)
+  static let agedLine = Color(hex: 0xD9D0F3)
+  static let warmShadow = Color(hex: 0xA799D8)
+
+  static let capture = copper
+  static let captureDeep = copperDeep
+  static let processing = capture
+  static let ready = moss
+  static let lifted = paperRaised
+  static let hairline = agedLine
+
   // MARK: - Background Colors
-  static let backgroundPrimary = Color(nsColor: .windowBackgroundColor)
-  static let backgroundSecondary = Color(nsColor: .controlBackgroundColor)
-  static let backgroundTertiary = Color(nsColor: .underPageBackgroundColor)
-  static let backgroundQuaternary = Color(nsColor: .separatorColor)
-  static let backgroundRaised = Color(nsColor: .textBackgroundColor)
+  static let backgroundPrimary = paper
+  static let backgroundSecondary = Color(hex: 0xF1EAFE)
+  static let backgroundTertiary = paperDeep
+  static let backgroundQuaternary = agedLine
+  static let backgroundRaised = paperRaised
 
   // MARK: - Border Colors
-  static let border = Color(nsColor: .separatorColor)
+  static let border = agedLine
 
   // MARK: - Accent System
-  static let purplePrimary = Color.accentColor
-  static let purpleSecondary = Color(nsColor: .controlAccentColor)
-  static let purpleAccent = Color.accentColor
-  static let purpleLight = Color(nsColor: .selectedContentBackgroundColor)
+  static let purplePrimary = processing
+  static let purpleSecondary = copper.opacity(0.78)
+  static let purpleAccent = capture
+  static let purpleLight = copper.opacity(0.18)
 
   // MARK: - Text Colors
-  static let textPrimary = Color(nsColor: .labelColor)
-  static let textSecondary = Color(nsColor: .secondaryLabelColor)
-  static let textTertiary = Color(nsColor: .tertiaryLabelColor)
-  static let textQuaternary = Color(nsColor: .quaternaryLabelColor)
+  static let textPrimary = ink
+  static let textSecondary = Color(hex: 0x55506D)
+  static let textTertiary = Color(hex: 0x827AA3)
+  static let textQuaternary = Color(hex: 0xA79FC6)
 
   // MARK: - Status Colors
-  static let success = Color(nsColor: .systemGreen)
-  static let warning = Color(nsColor: .systemOrange)
-  static let error = Color(nsColor: .systemRed)
-  static let info = Color(nsColor: .systemBlue)
-  static let amber = Color(nsColor: .systemOrange)
+  static let success = ready
+  static let warning = Color(hex: 0xF2A33B)
+  static let error = signalRed
+  static let info = Color(hex: 0x5C7CFA)
+  static let amber = copper
 
   // MARK: - Mac Window Button Colors
   static let windowButtonClose = Color(hex: 0xFF5F57)
@@ -49,7 +72,7 @@ enum CepessaColors {
   ]
 
   /// User bubble color: richer than the page chrome, softer than a flat primary fill.
-  static let userBubble = Color(hex: 0x43389F)
+  static let userBubble = copper
 
   // MARK: - Gradients
   static let purpleGradient = LinearGradient(

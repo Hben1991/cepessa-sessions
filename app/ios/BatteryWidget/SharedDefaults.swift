@@ -25,9 +25,9 @@ struct DeviceBatteryInfo {
     /// Reads the latest device battery info from the shared App Group UserDefaults.
     static func fromSharedDefaults() -> DeviceBatteryInfo {
         let defaults = UserDefaults(suiteName: appGroupIdentifier)
-        let name = defaults?.string(forKey: BatteryWidgetKeys.deviceName) ?? "Omi"
+        let name = defaults?.string(forKey: BatteryWidgetKeys.deviceName) ?? "Cepessa"
         let battery = defaults?.integer(forKey: BatteryWidgetKeys.batteryLevel) ?? -1
-        let type = defaults?.string(forKey: BatteryWidgetKeys.deviceType) ?? "omi"
+        let type = defaults?.string(forKey: BatteryWidgetKeys.deviceType) ?? "cepessa"
         let connected = defaults?.bool(forKey: BatteryWidgetKeys.isConnected) ?? false
         let updated = defaults?.object(forKey: BatteryWidgetKeys.lastUpdated) as? Date ?? Date.distantPast
         let muted = defaults?.bool(forKey: BatteryWidgetKeys.isMuted) ?? false

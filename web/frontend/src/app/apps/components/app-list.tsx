@@ -109,8 +109,10 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
       {/* Fixed Header and Navigation */}
       <div
         ref={headerRef}
-        className={`fixed inset-x-0 top-12 z-40 transform-gpu bg-[#0B0F17] transition-all duration-300 ease-in-out ${
-          headerMinimized ? 'bg-[#0B0F17]/95 shadow-lg backdrop-blur-lg' : ''
+        className={`bg-[#11100d]/92 fixed inset-x-0 top-12 z-40 transform-gpu transition-all duration-300 ease-in-out ${
+          headerMinimized
+            ? 'border-b border-[rgba(248,244,234,0.09)] shadow-[0_18px_60px_rgba(0,0,0,0.35)] backdrop-blur-xl'
+            : ''
         }`}
       >
         <div
@@ -127,19 +129,19 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
                 }`}
               >
                 <h1
-                  className={`transform-gpu text-2xl font-bold text-[#6C8EEF] transition-all duration-300 ${
+                  className={`transform-gpu text-2xl font-bold tracking-[-0.04em] text-[var(--market-ink)] transition-all duration-300 ${
                     headerMinimized ? 'text-xl sm:text-2xl' : 'sm:text-3xl md:text-4xl'
                   }`}
                 >
-                  Omi App Store
+                  App store
                 </h1>
                 <div
                   className={`transform-gpu overflow-hidden transition-all duration-300 ${
                     headerMinimized ? 'h-0 opacity-0' : 'h-auto opacity-100'
                   }`}
                 >
-                  <p className="mt-1 text-sm text-gray-400 sm:mt-2 sm:text-base">
-                    Discover our most popular AI-powered applications
+                  <p className="mt-1 max-w-[26rem] text-sm leading-6 text-[var(--market-muted)] sm:mt-2 sm:text-base">
+                    Practical extensions for Omi, ranked by real usage and developer fit.
                   </p>
                 </div>
               </div>
@@ -159,7 +161,7 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
           </div>
         </div>
 
-        <div className="border-b border-white/5 bg-[#0B0F17]/80 backdrop-blur-sm">
+        <div className="border-b border-[rgba(248,244,234,0.08)] bg-[#15130f]/80 backdrop-blur-sm">
           <div className="container mx-auto px-3 sm:px-6 md:px-8">
             <div className="py-2 sm:py-2.5 md:py-3">
               <ScrollableCategoryNav currentCategory="" />
@@ -180,21 +182,31 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
           {/* Hero Section */}
           <div
             ref={heroRef}
-            className="relative mb-12 bg-gradient-to-b from-[#131A29] to-[#0B0F17] py-8 sm:py-10 md:py-12"
+            className="relative mb-14 overflow-hidden py-8 sm:py-10 md:py-16"
           >
+            <div className="absolute left-1/2 top-0 h-px w-[78vw] -translate-x-1/2 bg-gradient-to-r from-transparent via-[rgba(213,168,79,0.48)] to-transparent" />
             <div className="container mx-auto px-3 sm:px-6 md:px-8">
-              <div className="mb-6 flex items-center">
-                <Sparkles className="mr-2 h-5 w-5 text-[#6C8EEF]" />
-                <h2 className="text-lg font-bold text-white sm:text-xl md:text-2xl">
-                  Featured Applications
-                </h2>
+              <div className="mb-7 grid gap-5 md:grid-cols-[1.1fr_0.9fr] md:items-end">
+                <div>
+                  <p className="market-kicker flex items-center gap-2">
+                    <Sparkles className="h-4 w-4" />
+                    Curated shelf
+                  </p>
+                  <h2 className="mt-3 max-w-3xl text-4xl font-bold leading-[0.94] tracking-[-0.065em] text-[var(--market-ink)] sm:text-5xl md:text-7xl">
+                    The apps worth putting near your voice.
+                  </h2>
+                </div>
+                <p className="max-w-xl text-base leading-7 text-[var(--market-muted)] md:justify-self-end">
+                  Featured tools are pulled from high-install apps, then mixed so the
+                  first screen feels discovered rather than machine-sorted.
+                </p>
               </div>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="grid grid-cols-1 gap-4 md:auto-rows-[minmax(17rem,auto)] md:grid-cols-6">
                 {featuredApps.map((plugin) => (
                   <div
                     key={plugin.id}
-                    className="h-full transform transition-transform duration-300 hover:scale-[1.02]"
+                    className="h-full md:[&:first-child]:col-span-3 md:[&:first-child]:row-span-2 md:[&:nth-child(2)]:col-span-3 md:[&:nth-child(3)]:col-span-3"
                   >
                     <FeaturedPluginCard
                       plugin={plugin}
@@ -206,19 +218,18 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
             </div>
           </div>
 
-          <div className="container mx-auto px-3 py-3 sm:px-6 sm:py-4 md:px-8 md:py-6">
-            <div className="space-y-12 sm:space-y-16 md:space-y-20">
+          <div className="container mx-auto px-3 pb-20 pt-3 sm:px-6 sm:py-4 md:px-8 md:py-6">
+            <div className="space-y-14 sm:space-y-16 md:space-y-24">
               {/* Developer Banner */}
               <section className="mb-8">
                 <DeveloperBanner />
               </section>
               {/* Most Popular Section */}
-              <section className="relative rounded-xl p-4 sm:p-6 md:p-8">
-                <div className="absolute inset-0 -z-10 rounded-xl bg-gradient-to-r from-[#1A1F2E]/50 to-[#0B0F17] opacity-50"></div>
+              <section className="market-panel relative rounded-[2rem] p-4 sm:p-6 md:p-8">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center">
-                    <Trophy className="mr-2 h-5 w-5 text-amber-400" />
-                    <h2 className="text-xl font-bold text-white sm:text-2xl">
+                    <Trophy className="mr-2 h-5 w-5 text-[var(--market-accent)]" />
+                    <h2 className="text-xl font-bold tracking-[-0.03em] text-[var(--market-ink)] sm:text-2xl">
                       Most Popular
                     </h2>
                   </div>
@@ -239,7 +250,7 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
               {sortedCategories['productivity-and-organization'] && (
                 <section
                   id="productivity-and-organization"
-                  className="rounded-xl bg-[#0F1420]/50 p-4 sm:p-6 md:p-8"
+                  className="market-panel-subtle rounded-[2rem] p-4 sm:p-6 md:p-8"
                 >
                   <div className="flex items-center justify-between">
                     <CategoryHeader
@@ -249,7 +260,7 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
                     {sortedCategories['productivity-and-organization'].length > 4 && (
                       <a
                         href="/apps/category/productivity-and-organization"
-                        className="flex items-center gap-1 text-sm font-medium text-[#6C8EEF] hover:underline"
+                        className="market-link flex items-center gap-1 text-sm font-semibold"
                       >
                         See all
                         <ChevronRight className="h-4 w-4" />
@@ -273,15 +284,15 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
 
               {/* Integration Apps Section */}
               {integrationApps.length > 0 && (
-                <section className="rounded-xl bg-[#0F1420]/50 p-4 sm:p-6 md:p-8">
+                <section className="market-panel-subtle rounded-[2rem] p-4 sm:p-6 md:p-8">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-semibold text-white sm:text-xl">
+                    <h3 className="text-lg font-semibold tracking-[-0.025em] text-[var(--market-ink)] sm:text-xl">
                       Integration Apps
                     </h3>
                     {totalIntegrationApps > 9 && (
                       <a
                         href="/apps/category/integration"
-                        className="flex items-center gap-1 text-sm font-medium text-[#6C8EEF] hover:underline"
+                        className="market-link flex items-center gap-1 text-sm font-semibold"
                       >
                         See all
                         <ChevronRight className="h-4 w-4" />
@@ -308,10 +319,10 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
                   <section
                     key={category}
                     id={category}
-                    className={`rounded-xl ${
+                    className={`rounded-[2rem] ${
                       idx % 2 === 0
-                        ? 'bg-[#0F1420]/50'
-                        : 'bg-gradient-to-r from-[#131A29]/30 to-[#0B0F17]'
+                        ? 'market-panel-subtle'
+                        : 'market-panel bg-transparent'
                     } p-4 sm:p-6 md:p-8`}
                   >
                     <div className="flex items-center justify-between">
@@ -319,7 +330,7 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
                       {plugins.length > 9 && (
                         <a
                           href={`/apps/category/${category}`}
-                          className="flex items-center gap-1 text-sm font-medium text-[#6C8EEF] hover:underline"
+                          className="market-link flex items-center gap-1 text-sm font-semibold"
                         >
                           See all
                           <ChevronRight className="h-4 w-4" />
@@ -344,7 +355,7 @@ export default function AppList({ initialPlugins, initialStats }: AppListProps) 
           {/* Back to top button */}
           <button
             onClick={scrollToTop}
-            className="fixed bottom-6 right-6 z-50 flex h-10 w-10 items-center justify-center rounded-full bg-[#6C8EEF] text-white shadow-lg transition-all duration-300 hover:bg-[#5A7DD9]"
+            className="fixed bottom-6 right-6 z-50 flex h-11 w-11 items-center justify-center rounded-2xl border border-[rgba(248,244,234,0.16)] bg-[var(--market-accent)] text-[#17130b] shadow-[0_18px_48px_rgba(77,55,18,0.42)] transition-all duration-300 hover:-translate-y-1 hover:bg-[var(--market-accent-soft)] active:translate-y-0"
             aria-label="Back to top"
           >
             <ChevronUp className="h-5 w-5" />

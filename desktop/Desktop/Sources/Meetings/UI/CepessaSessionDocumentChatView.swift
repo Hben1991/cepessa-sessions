@@ -13,8 +13,6 @@ struct CepessaSessionDocumentChatView: View {
       chatHeader
 
       if let session {
-        chatMetrics(for: session)
-
         messageSurface(for: session)
 
         if let proposal = session.documentChat.pendingProposal {
@@ -32,7 +30,7 @@ struct CepessaSessionDocumentChatView: View {
       }
     }
     .padding(18)
-    .cepessaGlassPanel(radius: 14, fillOpacity: 0.50, strokeOpacity: 0.34, shadowOpacity: 0.035)
+    .cepessaPaper(radius: 18)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: session?.documentChat.status)
     .animation(
       reduceMotion ? nil : .easeOut(duration: 0.18),
@@ -42,27 +40,18 @@ struct CepessaSessionDocumentChatView: View {
   private var chatHeader: some View {
     HStack(alignment: .top, spacing: 12) {
       ZStack {
-        RoundedRectangle(cornerRadius: 9, style: .continuous)
-          .fill(
-            LinearGradient(
-              colors: [
-                Color.accentColor.opacity(0.24),
-                CepessaColors.backgroundRaised.opacity(0.82),
-              ],
-              startPoint: .topLeading,
-              endPoint: .bottomTrailing
-            )
-          )
+        Circle()
+          .stroke(CepessaColors.capture.opacity(0.58), lineWidth: 1)
           .frame(width: 36, height: 36)
 
         Image(systemName: "bubble.left.and.text.bubble.right.fill")
           .scaledFont(size: 14, weight: .semibold)
-          .foregroundColor(Color.accentColor)
+          .foregroundColor(CepessaColors.capture)
       }
 
       VStack(alignment: .leading, spacing: 4) {
-        Text("Session Chat")
-          .scaledFont(size: 18, weight: .semibold)
+        Text("Ask this session")
+          .scaledFont(size: 23, weight: .regular, design: .serif)
           .foregroundColor(CepessaColors.textPrimary)
 
         Text(headerSubtitle)
@@ -127,12 +116,8 @@ struct CepessaSessionDocumentChatView: View {
         .padding(12)
       }
       .frame(minHeight: 240, maxHeight: 420)
-      .background(CepessaColors.backgroundRaised.opacity(0.50))
-      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-      .overlay(
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .stroke(CepessaColors.border.opacity(0.16), lineWidth: 1)
-      )
+      .background(CepessaColors.paperRaised.opacity(0.38))
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
       .scrollIndicators(.hidden)
       .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: messages.count)
     }
@@ -143,7 +128,7 @@ struct CepessaSessionDocumentChatView: View {
       statusNotice(
         text: emptyPromptText(for: session),
         systemImage: "sparkles",
-        tint: Color.accentColor
+        tint: CepessaColors.capture
       )
 
       ScrollView(.horizontal) {
@@ -167,7 +152,7 @@ struct CepessaSessionDocumentChatView: View {
       HStack(spacing: 8) {
         Image(systemName: "arrow.turn.down.right")
           .scaledFont(size: 10, weight: .semibold)
-          .foregroundColor(Color.accentColor)
+          .foregroundColor(CepessaColors.capture)
 
         Text(text)
           .scaledFont(size: 12, weight: .semibold)
@@ -179,11 +164,11 @@ struct CepessaSessionDocumentChatView: View {
       .padding(.horizontal, 12)
       .padding(.vertical, 11)
       .frame(minWidth: 188, idealWidth: 220, maxWidth: 260, alignment: .leading)
-      .background(CepessaColors.backgroundRaised.opacity(0.78))
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .background(CepessaColors.paperDeep.opacity(0.46))
+      .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
       .overlay(
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-          .stroke(CepessaColors.border.opacity(0.16), lineWidth: 1)
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+          .stroke(CepessaColors.hairline.opacity(0.48), lineWidth: 1)
       )
     }
     .buttonStyle(CepessaPressStyle(scale: 0.985))
@@ -216,9 +201,9 @@ struct CepessaSessionDocumentChatView: View {
       HStack(alignment: .top, spacing: 10) {
         Image(systemName: "doc.badge.gearshape.fill")
           .scaledFont(size: 14, weight: .semibold)
-          .foregroundColor(Color.accentColor)
+          .foregroundColor(CepessaColors.capture)
           .frame(width: 28, height: 28)
-          .background(Color.accentColor.opacity(0.12))
+          .background(CepessaColors.capture.opacity(0.12))
           .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
         VStack(alignment: .leading, spacing: 4) {
@@ -268,7 +253,7 @@ struct CepessaSessionDocumentChatView: View {
     .background(
       LinearGradient(
         colors: [
-          Color.accentColor.opacity(0.10),
+          CepessaColors.capture.opacity(0.10),
           CepessaColors.backgroundRaised.opacity(0.76),
         ],
         startPoint: .topLeading,
@@ -278,7 +263,7 @@ struct CepessaSessionDocumentChatView: View {
     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     .overlay(
       RoundedRectangle(cornerRadius: 12, style: .continuous)
-        .stroke(Color.accentColor.opacity(0.18), lineWidth: 1)
+        .stroke(CepessaColors.capture.opacity(0.18), lineWidth: 1)
     )
   }
 
@@ -300,7 +285,8 @@ struct CepessaSessionDocumentChatView: View {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
             .stroke(
               isComposerFocused
-                ? Color.accentColor.opacity(0.34) : CepessaColors.border.opacity(0.18), lineWidth: 1
+                ? CepessaColors.capture.opacity(0.34) : CepessaColors.border.opacity(0.18),
+              lineWidth: 1
             )
         )
         .onSubmit {
@@ -318,7 +304,7 @@ struct CepessaSessionDocumentChatView: View {
             Circle()
               .fill(
                 trimmed.isEmpty || isSending
-                  ? CepessaColors.backgroundRaised.opacity(0.90) : Color.accentColor)
+                  ? CepessaColors.backgroundRaised.opacity(0.90) : CepessaColors.capture)
           )
           .overlay(
             Circle()
@@ -371,12 +357,13 @@ struct CepessaSessionDocumentChatView: View {
       Spacer(minLength: 0)
     }
     .padding(12)
-    .background(CepessaColors.backgroundRaised.opacity(0.60))
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    .overlay(
-      RoundedRectangle(cornerRadius: 12, style: .continuous)
-        .stroke(tint.opacity(0.14), lineWidth: 1)
-    )
+    .background(CepessaColors.paperRaised.opacity(0.42))
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .overlay(alignment: .top) {
+      Rectangle()
+        .fill(tint.opacity(0.28))
+        .frame(height: 1)
+    }
     .transition(.opacity.combined(with: .offset(y: 4)))
   }
 
@@ -406,7 +393,7 @@ struct CepessaSessionDocumentChatView: View {
       case .idle:
         return CepessaColors.success
       case .sending:
-        return Color.accentColor
+        return CepessaColors.processing
       case .failed:
         return CepessaColors.error
       }
@@ -523,8 +510,8 @@ private struct SessionDocumentChatBubble: View {
     LinearGradient(
       colors: isUser
         ? [
-          Color.accentColor.opacity(0.24),
-          Color.accentColor.opacity(0.12),
+          CepessaColors.capture.opacity(0.20),
+          CepessaColors.capture.opacity(0.10),
           CepessaColors.backgroundRaised.opacity(0.68),
         ]
         : [
@@ -537,6 +524,6 @@ private struct SessionDocumentChatBubble: View {
   }
 
   private var bubbleStroke: Color {
-    isUser ? Color.accentColor.opacity(0.22) : CepessaColors.border.opacity(0.18)
+    isUser ? CepessaColors.capture.opacity(0.22) : CepessaColors.border.opacity(0.18)
   }
 }

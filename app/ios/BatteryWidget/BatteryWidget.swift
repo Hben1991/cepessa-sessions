@@ -15,9 +15,9 @@ struct BatteryTimelineProvider: TimelineProvider {
         BatteryEntry(
             date: Date(),
             info: DeviceBatteryInfo(
-                deviceName: "Omi",
+                deviceName: "Cepessa",
                 batteryLevel: 85,
-                deviceType: "omi",
+                deviceType: "cepessa",
                 isConnected: true,
                 lastUpdated: Date(),
                 isMuted: false
@@ -41,8 +41,8 @@ struct BatteryTimelineProvider: TimelineProvider {
 
 // MARK: - Widget Definition
 
-struct OmiBatteryWidget: Widget {
-    let kind: String = "OmiBatteryWidget"
+struct CepessaBatteryWidget: Widget {
+    let kind: String = "CepessaBatteryWidget"
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: BatteryTimelineProvider()) { entry in
@@ -53,8 +53,8 @@ struct OmiBatteryWidget: Widget {
                 BatteryWidgetEntryView(entry: entry)
             }
         }
-        .configurationDisplayName("Omi Battery")
-        .description("Shows your Omi device battery level and mic state.")
+        .configurationDisplayName("Cepessa Battery")
+        .description("Shows your Cepessa device battery level and mic state.")
         .supportedFamilies([.accessoryRectangular, .accessoryInline])
     }
 }
@@ -82,8 +82,8 @@ struct AccessoryRectangularView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left — Omi logo
-            Image("omi-logo")
+            // Left — device logo
+            Image("cepessa-logo")
                 .resizable()
                 .renderingMode(.template)
                 .scaledToFit()
@@ -145,7 +145,7 @@ struct AccessoryInlineView: View {
     }
 
     private var displayName: String {
-        info.deviceName.isEmpty || info.deviceName == "Unknown" ? "Omi" : info.deviceName
+        info.deviceName.isEmpty || info.deviceName == "Unknown" ? "Cepessa" : info.deviceName
     }
 
     private var deviceIcon: String {
@@ -160,14 +160,14 @@ struct AccessoryInlineView: View {
 // MARK: - Previews
 
 #if DEBUG
-struct OmiBatteryWidget_Previews: PreviewProvider {
+struct CepessaBatteryWidget_Previews: PreviewProvider {
     static var previews: some View {
         let connected = BatteryEntry(
             date: Date(),
             info: DeviceBatteryInfo(
-                deviceName: "Omi DevKit",
+                deviceName: "Cepessa DevKit",
                 batteryLevel: 98,
-                deviceType: "omi",
+                deviceType: "cepessa",
                 isConnected: true,
                 lastUpdated: Date(),
                 isMuted: false
@@ -176,9 +176,9 @@ struct OmiBatteryWidget_Previews: PreviewProvider {
         let muted = BatteryEntry(
             date: Date(),
             info: DeviceBatteryInfo(
-                deviceName: "Omi",
+                deviceName: "Cepessa",
                 batteryLevel: 72,
-                deviceType: "omi",
+                deviceType: "cepessa",
                 isConnected: true,
                 lastUpdated: Date(),
                 isMuted: true
@@ -187,9 +187,9 @@ struct OmiBatteryWidget_Previews: PreviewProvider {
         let disconnected = BatteryEntry(
             date: Date(),
             info: DeviceBatteryInfo(
-                deviceName: "Omi",
+                deviceName: "Cepessa",
                 batteryLevel: -1,
-                deviceType: "omi",
+                deviceType: "cepessa",
                 isConnected: false,
                 lastUpdated: Date.distantPast,
                 isMuted: false

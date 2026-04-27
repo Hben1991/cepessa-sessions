@@ -3,7 +3,7 @@ import Image from 'next/image';
 
 export default function Footer() {
   return (
-    <footer className="footer w-full border-t border-solid border-zinc-800 bg-[#0B0F17] px-4 py-12 text-white md:px-12">
+    <footer className="footer w-full border-t border-solid border-[rgba(248,244,234,0.08)] bg-[#11100d] px-4 py-12 text-[var(--market-ink)] md:px-12">
       <div className="mx-auto flex max-w-screen-xl flex-wrap justify-between gap-12">
         <div>
           <Image
@@ -13,7 +13,7 @@ export default function Footer() {
             height={64}
             className="h-auto w-[70px]"
           />
-          <p className="mt-1 text-gray-500">Made in San Fransisco</p>
+          <p className="mt-1 text-[var(--market-muted)]">Made in San Francisco</p>
           <a href={'mailto:team@basedhardware.com>'} className="hover:underline">
             team@basedhardware.com
           </a>
@@ -68,7 +68,7 @@ export default function Footer() {
             <li className="font-bold">Products</li>
             <li>
               <a
-                className="text-zinc-400 hover:text-white hover:underline md:text-base"
+                className="text-[var(--market-muted)] hover:text-[var(--market-ink)] hover:underline md:text-base"
                 href={'https://www.omi.me/pages/openglass'}
                 target="_blank"
                 rel="noreferrer"
@@ -78,7 +78,7 @@ export default function Footer() {
             </li>
             <li>
               <a
-                className="text-zinc-400 hover:text-white hover:underline md:text-base"
+                className="text-[var(--market-muted)] hover:text-[var(--market-ink)] hover:underline md:text-base"
                 href={'https://www.omi.me/'}
                 target="_blank"
                 rel="noreferrer"
@@ -88,7 +88,7 @@ export default function Footer() {
             </li>
             <li>
               <a
-                className="text-zinc-400 hover:text-white hover:underline md:text-base"
+                className="text-[var(--market-muted)] hover:text-[var(--market-ink)] hover:underline md:text-base"
                 href={'https://www.omi.me/products/omi-dev-kit-2'}
                 target="_blank"
                 rel="noreferrer"
@@ -104,7 +104,7 @@ export default function Footer() {
                 href="https://airtable.com/appyGfrqMxoUaD1mg/shrswR2uD1LRoFkFX"
                 target={'_blank'}
                 rel={'noreferrer'}
-                className="text-zinc-400 hover:text-white hover:underline md:text-base"
+                className="text-[var(--market-muted)] hover:text-[var(--market-ink)] hover:underline md:text-base"
               >
                 Residency
               </a>
@@ -114,7 +114,7 @@ export default function Footer() {
                 href="https://affiliate.basedhardware.com/"
                 target={'_blank'}
                 rel={'noreferrer'}
-                className="text-zinc-400 hover:text-white hover:underline md:text-base"
+                className="text-[var(--market-muted)] hover:text-[var(--market-ink)] hover:underline md:text-base"
               >
                 Affiliate
               </a>
@@ -124,7 +124,7 @@ export default function Footer() {
                 href="https://www.omi.me/pages/privacy"
                 target={'_blank'}
                 rel={'noreferrer'}
-                className="text-zinc-400 hover:text-white hover:underline md:text-base"
+                className="text-[var(--market-muted)] hover:text-[var(--market-ink)] hover:underline md:text-base"
               >
                 Privacy
               </a>
@@ -134,7 +134,7 @@ export default function Footer() {
                 href="https://coda.io/@kodjima33/customizations"
                 target={'_blank'}
                 rel={'noreferrer'}
-                className="text-zinc-400 hover:text-white hover:underline md:text-base"
+                className="text-[var(--market-muted)] hover:text-[var(--market-ink)] hover:underline md:text-base"
               >
                 Customizations
               </a>
@@ -144,7 +144,7 @@ export default function Footer() {
                 href="https://discord.com/invite/8MP3b9ymvx"
                 target={'_blank'}
                 rel={'noreferrer'}
-                className="text-zinc-400 hover:text-white hover:underline md:text-base"
+                className="text-[var(--market-muted)] hover:text-[var(--market-ink)] hover:underline md:text-base"
               >
                 Discord
               </a>

@@ -177,20 +177,21 @@ export default function AppHeader({
       onClick: handleCreateAppAuth,
       className: `px-4 py-2 rounded-[0.5rem] font-semibold text-sm transition-all duration-200 flex items-center justify-center ${
         isProcessingAuth
-          ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
-          : 'bg-gradient-to-r from-blue-600 to-purple-600 text-white hover:from-blue-700 hover:to-purple-700 shadow-md hover:shadow-lg transform hover:-translate-y-px'
+          ? 'cursor-not-allowed bg-stone-800 text-stone-500'
+          : 'transform bg-[var(--market-accent)] text-[#17130b] shadow-[0_12px_34px_rgba(77,55,18,0.32)] hover:-translate-y-px hover:bg-[var(--market-accent-soft)]'
       }`,
     },
     {
       href: 'https://www.omi.me/products/omi-dev-kit-2',
       label: 'Order Now',
-      className: 'text-white hover:text-gray-300',
+      className: 'text-[var(--market-ink)] hover:text-[var(--market-accent-soft)]',
     },
     {
       href: 'https://omi.me/cart',
       label: 'Cart',
       icon: <CartIcon />,
-      className: 'flex items-center space-x-2 text-white hover:text-gray-300',
+      className:
+        'flex items-center space-x-2 text-[var(--market-ink)] hover:text-[var(--market-accent-soft)]',
     },
   ];
 
@@ -204,12 +205,12 @@ export default function AppHeader({
   return !dreamforcePage ? (
     <>
       <header
-        className={`fixed top-0 z-50 flex w-full items-center justify-between bg-[#0B0F17] p-4 px-4 text-white transition-all duration-500 md:px-12 ${
-          scrollPosition > 100 ? 'backdrop-blur-md md:!bg-black/40' : ''
+        className={`bg-[#11100d]/96 fixed top-0 z-50 flex w-full items-center justify-between border-b border-[rgba(248,244,234,0.08)] p-4 px-4 text-[var(--market-ink)] transition-all duration-500 md:px-12 ${
+          scrollPosition > 100 ? 'md:!bg-[#11100d]/72 backdrop-blur-md' : ''
         } ${className}`}
       >
         <h1 className="flex items-center gap-2 text-xl">
-          <Link href="/" className="text-2xl font-bold text-white">
+          <Link href="/" className="text-2xl font-bold text-[var(--market-ink)]">
             <Image
               src={customLogo.src}
               alt={customLogo.alt}
@@ -236,7 +237,10 @@ export default function AppHeader({
                 }
               }}
               disabled={item.id === 'create-app-button' && isProcessingAuth}
-              className={item.className || 'text-white hover:text-gray-300'}
+              className={
+                item.className ||
+                'text-[var(--market-ink)] hover:text-[var(--market-accent-soft)]'
+              }
             >
               {item.id === 'create-app-button' && isProcessingAuth ? (
                 <LoadingSpinner />
@@ -253,7 +257,7 @@ export default function AppHeader({
         <div className="md:hidden">
           <button
             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            className="text-white focus:outline-none"
+            className="text-[var(--market-ink)] focus:outline-none"
             aria-controls={mobileMenuId}
             aria-expanded={isMobileMenuOpen}
           >
@@ -292,7 +296,7 @@ export default function AppHeader({
 
       <div
         id={mobileMenuId}
-        className={`fixed inset-x-0 top-16 z-40 transform bg-[#0A0E17] p-4 transition-transform duration-300 ease-in-out md:hidden ${
+        className={`fixed inset-x-0 top-16 z-40 transform border-b border-[rgba(248,244,234,0.08)] bg-[#11100d] p-4 transition-transform duration-300 ease-in-out md:hidden ${
           isMobileMenuOpen ? 'translate-y-0' : '-translate-y-full'
         }`}
       >
@@ -315,7 +319,7 @@ export default function AppHeader({
               disabled={item.id === 'create-app-button' && isProcessingAuth}
               className={`flex w-full items-center justify-center space-x-2 rounded-md px-3 py-2.5 text-base font-medium ${
                 item.className
-              } ${item.id === 'create-app-button' ? '' : 'hover:bg-gray-700'}`}
+              } ${item.id === 'create-app-button' ? '' : 'hover:bg-white/5'}`}
             >
               {item.id === 'create-app-button' && isProcessingAuth ? (
                 <LoadingSpinner />
@@ -329,7 +333,7 @@ export default function AppHeader({
           ))}
         </nav>
         {showShareButton && (
-          <div className="mt-4 border-t border-gray-700 pt-4">
+          <div className="mt-4 border-t border-[rgba(248,244,234,0.08)] pt-4">
             <ShareButton />
           </div>
         )}

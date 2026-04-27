@@ -173,17 +173,17 @@ export function ProductBanner({
         return (
           <div
             className={cn(
-              'fixed bottom-6 right-6 z-50 mx-auto w-full max-w-[320px] overflow-hidden rounded-2xl bg-gradient-to-br from-[#1A1F2E] to-[#141824] p-1 shadow-xl transition-all duration-500',
+              'fixed bottom-6 right-6 z-50 mx-auto w-full max-w-[320px] overflow-hidden rounded-[1.5rem] border border-[rgba(248,244,234,0.1)] bg-[#1b1914] p-1 shadow-[0_26px_80px_rgba(77,55,18,0.38)] transition-all duration-500',
               isExiting && 'animate-slideOutBottom',
               isMounted && !isExiting && 'animate-slideInBottom opacity-100',
               !isMounted && 'opacity-0',
             )}
           >
-            <div className="animate-gradient-x absolute inset-0 bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-pink-500/10" />
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_0%,rgba(213,168,79,0.18),transparent_16rem)]" />
             <div className="relative backdrop-blur-sm backdrop-filter">
               <button
                 onClick={handleDismiss}
-                className="absolute right-2 top-2 rounded-full p-1.5 text-gray-400 transition-colors hover:bg-white/10 hover:text-white"
+                className="absolute right-2 top-2 rounded-xl p-1.5 text-[var(--market-muted)] transition-colors hover:bg-white/10 hover:text-[var(--market-ink)]"
                 aria-label="Dismiss banner"
               >
                 <X className="h-4 w-4" />
@@ -191,7 +191,7 @@ export function ProductBanner({
               <div className="p-4">
                 <div className="flex items-center gap-4">
                   <div className="group relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-xl">
-                    <div className="absolute -inset-0.5 rounded-xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 opacity-75 blur-sm transition-opacity duration-500 group-hover:opacity-100" />
+                    <div className="absolute -inset-0.5 rounded-xl bg-[var(--market-accent)] opacity-70 blur-sm transition-opacity duration-500 group-hover:opacity-100" />
                     <div className="relative h-full w-full overflow-hidden rounded-xl">
                       <Image
                         src={PRODUCT_INFO.images.primary}
@@ -202,12 +202,14 @@ export function ProductBanner({
                     </div>
                   </div>
                   <div className="min-w-0 flex-1">
-                    <h3 className="truncate text-lg font-bold text-white">
+                    <h3 className="truncate text-lg font-bold tracking-[-0.03em] text-[var(--market-ink)]">
                       {PRODUCT_INFO.name}
                     </h3>
                     <div className="flex items-center gap-2">
-                      <p className="text-sm text-gray-400">{PRODUCT_INFO.price}</p>
-                      <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-xs text-green-300">
+                      <p className="font-mono text-sm text-[var(--market-muted)]">
+                        {PRODUCT_INFO.price}
+                      </p>
+                      <span className="rounded-md bg-[rgba(213,168,79,0.12)] px-2 py-0.5 text-xs text-[var(--market-accent-soft)]">
                         Shipping Now
                       </span>
                     </div>
@@ -215,20 +217,20 @@ export function ProductBanner({
                 </div>
                 {/* Feature Badges */}
                 <div className="mt-3 flex items-center gap-2">
-                  <span className="inline-flex items-center gap-1 rounded-full bg-cyan-500/10 px-2 py-0.5 text-xs text-cyan-300">
+                  <span className="inline-flex items-center gap-1 rounded-md bg-white/5 px-2 py-0.5 text-xs text-[#d8d0c1]">
                     <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
                       <path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z" />
                       <path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z" />
                     </svg>
                     <span className="whitespace-nowrap">Second Brain</span>
                   </span>
-                  <span className="inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-xs text-purple-300">
+                  <span className="inline-flex items-center gap-1 rounded-md bg-white/5 px-2 py-0.5 text-xs text-[#d8d0c1]">
                     <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
                       <path d="M5.5 16a3.5 3.5 0 01-.369-6.98 4 4 0 117.753-1.977A4.5 4.5 0 1113.5 16h-8z" />
                     </svg>
                     <span className="whitespace-nowrap">Voice AI</span>
                   </span>
-                  <span className="inline-flex items-center gap-1 rounded-full bg-teal-500/10 px-2 py-0.5 text-xs text-teal-300">
+                  <span className="inline-flex items-center gap-1 rounded-md bg-white/5 px-2 py-0.5 text-xs text-[#d8d0c1]">
                     <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
                       <path
                         fillRule="evenodd"
@@ -243,9 +245,9 @@ export function ProductBanner({
                   href={PRODUCT_INFO.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="group relative mt-4 inline-flex w-full items-center justify-center overflow-hidden rounded-xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 transition-all duration-300 ease-out hover:scale-[1.02] hover:shadow-lg hover:shadow-indigo-500/25 active:scale-[0.98]"
+                  className="group relative mt-4 inline-flex w-full items-center justify-center overflow-hidden rounded-xl bg-[var(--market-accent)] transition-all duration-300 ease-out hover:-translate-y-0.5 hover:bg-[var(--market-accent-soft)] active:translate-y-0"
                 >
-                  <span className="relative inline-flex items-center gap-2 px-3 py-2 text-xs font-semibold text-white transition-all duration-300 sm:gap-2 sm:px-4 sm:py-2.5 sm:text-sm md:px-6 md:py-3 md:text-base">
+                  <span className="relative inline-flex items-center gap-2 px-3 py-2 text-xs font-bold text-[#17130b] transition-all duration-300 sm:gap-2 sm:px-4 sm:py-2.5 sm:text-sm md:px-6 md:py-3 md:text-base">
                     <span>Order Now</span>
                     <svg
                       className="h-3 w-3 transition-transform duration-300 group-hover:translate-x-1 sm:h-4 sm:w-4 md:h-5 md:w-5"

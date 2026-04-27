@@ -1,6 +1,6 @@
 # Desktop Auth Service (Auth-Python)
 
-**Origin:** Reverse-engineered from the production `omi-desktop-auth` Cloud Run container image. The original source was never committed to the repo — it was deployed manually, which caused friction when setting up local dev environments (no way to run auth locally). This extraction is a temporary measure to unblock local development. Will be removed once auth is properly integrated into the main codebase.
+**Origin:** Reverse-engineered from the production desktop auth Cloud Run container image. The original source was never committed to the repo — it was deployed manually, which caused friction when setting up local dev environments (no way to run auth locally). This extraction is a temporary measure to unblock local development. Will be removed once auth is properly integrated into the main codebase.
 
 ## What it does
 
@@ -10,7 +10,7 @@ OAuth broker for the desktop macOS app. Handles Google and Apple Sign-In:
 2. Service redirects browser to Google/Apple OAuth
 3. OAuth provider redirects back to `/v1/auth/callback/google` (or `/apple`)
 4. Service generates a Firebase custom token via `firebase_admin.auth.create_custom_token()`
-5. Browser redirects to the app via custom URL scheme (`omi-computer-dev://auth/callback`)
+5. Browser redirects to the app via custom URL scheme (`cepessa-sessions://auth/callback`)
 
 ## Running locally
 

@@ -1,25 +1,29 @@
 #!/bin/bash
 # Full cleanup script - removes app and all permissions/data
 
-BUNDLE_ID="com.omi.computer-macos"
-BUNDLE_ID_DEV="com.omi.desktop-dev"
+BUNDLE_ID="me.cepessa.sessions"
+BUNDLE_ID_DEV="me.cepessa.sessions.local"
 
-echo "=== Full Omi Cleanup ==="
+echo "=== Full Cepessa Sessions Cleanup ==="
 
 # Kill the app if running
 echo "Killing app..."
-pkill -9 "Omi Computer" 2>/dev/null || true
+pkill -9 "Cepessa Sessions" 2>/dev/null || true
 
 # Remove apps from Applications (all variants)
-for app in "/Applications/Omi Computer.app" "/Applications/Omi Beta.app" "/Applications/Omi Dev.app"; do
+for app in "/Applications/Cepessa Sessions.app" "/Applications/Cepessa Sessions Ready.app"; do
     if [ -d "$app" ]; then
         echo "Removing $app..."
         rm -rf "$app"
     fi
 done
 
-# Remove from build folder (all variants)
-for app in "build/Omi Computer.app" "build/Omi Beta.app" "build/Omi Dev.app"; do
+# Remove from build folders (all variants)
+for app in \
+    "build/Cepessa Sessions.app" \
+    "build/Cepessa Sessions Ready.app" \
+    "Desktop/Build/Cepessa Sessions.app" \
+    "Desktop/Build/Cepessa Sessions Ready.app"; do
     if [ -d "$app" ]; then
         echo "Removing $app..."
         rm -rf "$app"

@@ -309,8 +309,31 @@ extension CepessaSessionsWorkspaceView {
   }
 
   fileprivate var workspaceBackground: some View {
-    Color(nsColor: .windowBackgroundColor)
-      .ignoresSafeArea()
+    ZStack {
+      LinearGradient(
+        colors: [
+          CepessaColors.paperRaised,
+          CepessaColors.paper,
+          CepessaColors.paperDeep.opacity(0.72),
+        ],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+      )
+
+      GeometryReader { proxy in
+        Path { path in
+          let step: CGFloat = 96
+          var x: CGFloat = 0
+          while x < proxy.size.width {
+            path.move(to: CGPoint(x: x, y: 0))
+            path.addLine(to: CGPoint(x: x, y: proxy.size.height))
+            x += step
+          }
+        }
+        .stroke(CepessaColors.hairline.opacity(0.18), lineWidth: 0.6)
+      }
+    }
+    .ignoresSafeArea()
   }
 
   @ViewBuilder
@@ -332,12 +355,12 @@ extension CepessaSessionsWorkspaceView {
 
   fileprivate var workspaceTitleBlock: some View {
     VStack(alignment: .leading, spacing: 6) {
-      Text("Cepessa Sessions")
-        .scaledFont(size: 30, weight: .semibold)
+      Text("Session workspace")
+        .scaledFont(size: 22, weight: .regular, design: .serif)
         .foregroundColor(CepessaColors.textPrimary)
 
       Text(headerSummary)
-        .scaledFont(size: 13)
+        .scaledFont(size: 12)
         .foregroundColor(CepessaColors.textSecondary)
     }
   }
@@ -352,6 +375,7 @@ extension CepessaSessionsWorkspaceView {
       }
       .buttonStyle(.bordered)
       .controlSize(.large)
+      .tint(CepessaColors.capture)
       .help("Choose an existing audio file and transcribe it locally.")
 
       Button {
@@ -364,7 +388,7 @@ extension CepessaSessionsWorkspaceView {
       }
       .buttonStyle(.borderedProminent)
       .controlSize(.large)
-      .tint(model.isRecording ? CepessaColors.error : Color.accentColor)
+      .tint(model.isRecording ? CepessaColors.error : CepessaColors.capture)
       .help(
         model.isRecording ? "Stop the current recording session." : "Start a new local session.")
     }
@@ -380,7 +404,7 @@ extension CepessaSessionsWorkspaceView {
     case .wide:
       HStack(alignment: .top, spacing: 18) {
         sessionsRail
-          .frame(minWidth: 280, idealWidth: 300, maxWidth: 320)
+          .frame(minWidth: 250, idealWidth: 270, maxWidth: 292)
 
         centerWorkspace
           .frame(minWidth: 520, idealWidth: 720, maxWidth: .infinity)
@@ -425,7 +449,7 @@ extension CepessaSessionsWorkspaceView {
     VStack(alignment: .leading, spacing: 14) {
       railHeader(
         title: "Sessions",
-        subtitle: "Choose one recording to inspect."
+        subtitle: "Follow the local session line."
       )
 
       if model.sessions.isEmpty {
@@ -441,33 +465,33 @@ extension CepessaSessionsWorkspaceView {
               sessionCard(session)
             }
           }
+          .overlay(alignment: .leading) {
+            Rectangle()
+              .fill(CepessaColors.capture.opacity(0.32))
+              .frame(width: 1)
+              .padding(.leading, 8)
+              .padding(.vertical, 4)
+          }
         }
         .scrollIndicators(.hidden)
       }
     }
-    .padding(18)
+    .padding(.horizontal, 20)
+    .padding(.vertical, 18)
     .frame(maxHeight: .infinity, alignment: .top)
-    .cepessaPanel(
-      fill: CepessaColors.backgroundSecondary.opacity(0.78),
-      radius: 10,
-      stroke: CepessaColors.border.opacity(0.55),
-      shadowOpacity: 0.01,
-      shadowRadius: 2,
-      shadowY: 1
-    )
+    .background(CepessaColors.paper.opacity(0.58))
+    .overlay(alignment: .trailing) {
+      Rectangle()
+        .fill(CepessaColors.hairline.opacity(0.62))
+        .frame(width: 1)
+    }
   }
 
   fileprivate var centerWorkspace: some View {
     VStack(alignment: .leading, spacing: 0) {
       centerHeroPanel
 
-      Divider()
-        .overlay(CepessaColors.border.opacity(0.32))
-
       centerSectionTabs
-
-      Divider()
-        .overlay(CepessaColors.border.opacity(0.30))
 
       ScrollView {
         VStack(alignment: .leading, spacing: 16) {
@@ -482,14 +506,7 @@ extension CepessaSessionsWorkspaceView {
       .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: centerSection)
     }
     .frame(maxHeight: .infinity, alignment: .top)
-    .cepessaPanel(
-      fill: CepessaColors.backgroundSecondary.opacity(0.82),
-      radius: 10,
-      stroke: CepessaColors.border.opacity(0.55),
-      shadowOpacity: 0.01,
-      shadowRadius: 2,
-      shadowY: 1
-    )
+    .cepessaCanvas(radius: 24)
   }
 
   fileprivate var inspectorRail: some View {
@@ -523,14 +540,7 @@ extension CepessaSessionsWorkspaceView {
       }
     }
     .padding(16)
-    .background(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(CepessaColors.backgroundSecondary.opacity(0.82))
-    )
-    .overlay(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .stroke(CepessaColors.border.opacity(0.22), lineWidth: 1)
-    )
+    .cepessaPaper(radius: 18)
   }
 
   @ViewBuilder
@@ -583,13 +593,7 @@ extension CepessaSessionsWorkspaceView {
     }
     .padding(16)
     .frame(maxWidth: .infinity)
-    .cepessaGlassPanel(
-      radius: 10,
-      fill: dockFill,
-      fillOpacity: 0.80,
-      strokeOpacity: model.isRecording || model.isProcessingSession ? 0.46 : 0.34,
-      shadowOpacity: 0.045
-    )
+    .cepessaInstrumentStrip(radius: 24)
   }
 
   fileprivate var dockLead: some View {
@@ -660,32 +664,48 @@ extension CepessaSessionsWorkspaceView {
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.regular)
+        .tint(CepessaColors.capture)
         .help("Start a new local session.")
       }
     }
   }
 
   fileprivate var centerHeroPanel: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      HStack(alignment: .center, spacing: 10) {
-        statusBadge(for: heroStatus)
+    VStack(alignment: .leading, spacing: 20) {
+      HStack(alignment: .firstTextBaseline, spacing: 18) {
+        VStack(alignment: .leading, spacing: 6) {
+          Text(selectionMetaValue)
+            .scaledFont(size: 12, weight: .semibold)
+            .tracking(0.7)
+            .textCase(.uppercase)
+            .foregroundColor(statusBackground(for: heroStatus))
 
-        Text(selectionMetaValue)
-          .scaledFont(size: 12, weight: .semibold)
-          .foregroundColor(CepessaColors.textSecondary)
+          Text(heroTitle)
+            .scaledFont(size: 26, weight: .semibold, design: .rounded)
+            .foregroundColor(CepessaColors.textPrimary)
+            .lineLimit(2)
+        }
 
-        Spacer(minLength: 0)
+        Spacer(minLength: 24)
+
+        VStack(alignment: .trailing, spacing: 6) {
+          statusBadge(for: heroStatus)
+          Text(selectedSession?.startedAt.formatted(date: .abbreviated, time: .shortened) ?? "Today")
+            .scaledFont(size: 12)
+            .foregroundColor(CepessaColors.textSecondary)
+        }
       }
 
-      Text(heroTitle)
-        .scaledFont(size: 22, weight: .semibold)
-        .foregroundColor(CepessaColors.textPrimary)
-        .lineLimit(2)
+      Rectangle()
+        .fill(CepessaColors.hairline.opacity(0.72))
+        .frame(height: 1)
 
       Text(heroSubtitle)
         .scaledFont(size: 13)
+        .lineSpacing(4)
         .foregroundColor(CepessaColors.textSecondary)
         .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: 720, alignment: .leading)
 
       if let promptPackageURL = model.promptPackageMarkdownURL(),
         let sessionFolderURL = model.sessionFolderURL(),
@@ -702,8 +722,10 @@ extension CepessaSessionsWorkspaceView {
         }
       }
     }
-    .padding(18)
-    .background(CepessaColors.backgroundSecondary.opacity(0.92))
+    .padding(.horizontal, 32)
+    .padding(.top, 30)
+    .padding(.bottom, 24)
+    .background(CepessaColors.paperRaised.opacity(0.52))
   }
 
   fileprivate var recapCard: some View {
@@ -739,14 +761,7 @@ extension CepessaSessionsWorkspaceView {
       }
     }
     .padding(18)
-    .background(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(CepessaColors.backgroundSecondary.opacity(0.76))
-    )
-    .overlay(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .stroke(CepessaColors.border.opacity(0.26), lineWidth: 1)
-    )
+    .cepessaPaper(radius: 16)
   }
 
   fileprivate var centerSectionTabs: some View {
@@ -767,22 +782,16 @@ extension CepessaSessionsWorkspaceView {
           .foregroundColor(
             centerSection == section ? CepessaColors.textPrimary : CepessaColors.textSecondary
           )
-          .padding(.horizontal, 12)
-          .padding(.vertical, 7)
+          .padding(.horizontal, 6)
+          .padding(.vertical, 12)
           .background {
             if centerSection == section {
-              RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(Color.accentColor.opacity(0.14))
+              Rectangle()
+                .fill(CepessaColors.capture)
+                .frame(height: 2)
+                .frame(maxHeight: .infinity, alignment: .bottom)
                 .matchedGeometryEffect(id: "selectedCenterSection", in: centerTabNamespace)
             }
-          }
-          .overlay {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-              .stroke(
-                centerSection == section
-                  ? Color.accentColor.opacity(0.24) : Color.clear,
-                lineWidth: 1
-              )
           }
         }
         .buttonStyle(CepessaPressStyle(scale: 0.985))
@@ -791,9 +800,13 @@ extension CepessaSessionsWorkspaceView {
         .accessibilityAddTraits(centerSection == section ? [.isSelected] : [])
       }
     }
-    .padding(.horizontal, 18)
-    .padding(.vertical, 10)
-    .background(CepessaColors.backgroundSecondary.opacity(0.66))
+    .padding(.horizontal, 28)
+    .background(CepessaColors.paperRaised.opacity(0.46))
+    .overlay(alignment: .bottom) {
+      Rectangle()
+        .fill(CepessaColors.hairline.opacity(0.68))
+        .frame(height: 1)
+    }
   }
 
   @ViewBuilder
@@ -845,14 +858,7 @@ extension CepessaSessionsWorkspaceView {
       }
     }
     .padding(18)
-    .background(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(CepessaColors.backgroundSecondary.opacity(0.76))
-    )
-    .overlay(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .stroke(CepessaColors.border.opacity(0.26), lineWidth: 1)
-    )
+    .cepessaPaper(radius: 16)
   }
 
   fileprivate var captureStatusCard: some View {
@@ -939,14 +945,7 @@ extension CepessaSessionsWorkspaceView {
       }
     }
     .padding(16)
-    .background(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(CepessaColors.backgroundSecondary.opacity(0.82))
-    )
-    .overlay(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .stroke(CepessaColors.border.opacity(0.22), lineWidth: 1)
-    )
+    .cepessaPaper(radius: 18)
   }
 
   fileprivate var attachmentsCard: some View {
@@ -1022,14 +1021,7 @@ extension CepessaSessionsWorkspaceView {
       }
     }
     .padding(16)
-    .background(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(CepessaColors.backgroundSecondary.opacity(0.82))
-    )
-    .overlay(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .stroke(CepessaColors.border.opacity(0.22), lineWidth: 1)
-    )
+    .cepessaPaper(radius: 16)
   }
 
   fileprivate func sessionCard(_ session: LocalMeetingSession) -> some View {
@@ -1078,22 +1070,31 @@ extension CepessaSessionsWorkspaceView {
         }
       }
     }
-    .padding(13)
+    .padding(.leading, 24)
+    .padding(.trailing, 12)
+    .padding(.vertical, 13)
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     .background(
       RoundedRectangle(cornerRadius: 8, style: .continuous)
         .fill(
           isSelected
-            ? Color.accentColor.opacity(0.14) : CepessaColors.backgroundSecondary.opacity(0.76))
+            ? CepessaColors.capture.opacity(0.10)
+            : (isHovered ? CepessaColors.paperRaised.opacity(0.52) : Color.clear))
     )
     .overlay(
       RoundedRectangle(cornerRadius: 8, style: .continuous)
         .stroke(
-          isSelected ? Color.accentColor.opacity(0.28) : CepessaColors.border.opacity(0.22),
+          isSelected ? CepessaColors.capture.opacity(0.32) : Color.clear,
           lineWidth: 1
         )
     )
+    .overlay(alignment: .leading) {
+      Circle()
+        .fill(isSelected ? CepessaColors.capture : statusBackground(for: displayStatus(for: session)).opacity(0.72))
+        .frame(width: isSelected ? 11 : 9, height: isSelected ? 11 : 9)
+        .padding(.leading, 4)
+    }
     .shadow(
       color: Color.black.opacity(isSelected ? 0.03 : 0.0), radius: isSelected ? 3 : 0,
       y: isSelected ? 1 : 0
@@ -1284,13 +1285,12 @@ extension CepessaSessionsWorkspaceView {
         .lineLimit(1)
     }
     .frame(maxWidth: .infinity, alignment: .leading)
-    .padding(14)
-    .background(CepessaColors.backgroundRaised.opacity(0.82))
-    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    .overlay(
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .stroke(CepessaColors.border.opacity(0.16), lineWidth: 1)
-    )
+    .padding(.top, 10)
+    .overlay(alignment: .top) {
+      Rectangle()
+        .fill(CepessaColors.hairline.opacity(0.72))
+        .frame(height: 1)
+    }
   }
 
   fileprivate func memoryLine(icon: String, title: String, value: String) -> some View {
@@ -1351,7 +1351,7 @@ extension CepessaSessionsWorkspaceView {
     HStack(spacing: 6) {
       Text(title)
         .scaledFont(size: 11, weight: .medium)
-        .foregroundColor(CepessaColors.textSecondary)
+        .foregroundColor(CepessaColors.textTertiary)
 
       Text(value)
         .scaledFont(size: 12, weight: .semibold)
@@ -1359,7 +1359,7 @@ extension CepessaSessionsWorkspaceView {
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 9)
-    .background(CepessaColors.backgroundRaised.opacity(0.72))
+    .background(Color.white.opacity(0.46))
     .clipShape(Capsule())
   }
 
@@ -1397,7 +1397,7 @@ extension CepessaSessionsWorkspaceView {
   fileprivate func railHeader(title: String, subtitle: String) -> some View {
     VStack(alignment: .leading, spacing: 2) {
       Text(title)
-        .scaledFont(size: 16, weight: .semibold)
+        .scaledFont(size: 16, weight: .semibold, design: .rounded)
         .foregroundColor(CepessaColors.textPrimary)
 
       Text(subtitle)
@@ -1410,7 +1410,7 @@ extension CepessaSessionsWorkspaceView {
   fileprivate func rowHeader(title: String, subtitle: String) -> some View {
     VStack(alignment: .leading, spacing: 4) {
       Text(title)
-        .scaledFont(size: 18, weight: .semibold)
+        .scaledFont(size: 18, weight: .semibold, design: .rounded)
         .foregroundColor(CepessaColors.textPrimary)
 
       Text(subtitle)
@@ -1573,12 +1573,13 @@ extension CepessaSessionsWorkspaceView {
     }
     .frame(maxWidth: .infinity)
     .padding(24)
-    .background(CepessaColors.backgroundSecondary.opacity(0.72))
-    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-    .overlay(
-      RoundedRectangle(cornerRadius: 18, style: .continuous)
-        .stroke(CepessaColors.border.opacity(0.18), lineWidth: 1)
-    )
+    .background(CepessaColors.paperRaised.opacity(0.48))
+    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    .overlay(alignment: .top) {
+      Rectangle()
+        .fill(CepessaColors.hairline.opacity(0.58))
+        .frame(height: 1)
+    }
   }
 
   fileprivate func statusBadge(for status: LocalMeetingSessionStatus) -> some View {
@@ -1619,9 +1620,9 @@ extension CepessaSessionsWorkspaceView {
     case .recording:
       return CepessaColors.error
     case .transcribing:
-      return CepessaColors.purplePrimary
+      return CepessaColors.processing
     case .ready:
-      return CepessaColors.success
+      return CepessaColors.ready
     case .failed:
       return CepessaColors.warning
     }
@@ -1638,14 +1639,14 @@ extension CepessaSessionsWorkspaceView {
 
   fileprivate func meterFill(for value: Double) -> Color {
     if model.isRecording {
-      return CepessaColors.error.opacity(0.92)
+      return CepessaColors.capture.opacity(0.92)
     }
 
     if model.isProcessingSession {
-      return CepessaColors.purplePrimary.opacity(0.90)
+      return CepessaColors.processing.opacity(0.90)
     }
 
-    return CepessaColors.purplePrimary.opacity(0.82)
+    return CepessaColors.processing.opacity(0.82)
   }
 
   fileprivate func percentText(_ value: Double) -> String {
@@ -1959,7 +1960,7 @@ extension CepessaSessionsWorkspaceView {
     }
 
     if model.isProcessingSession {
-      return CepessaColors.purplePrimary
+      return CepessaColors.processing
     }
 
     return CepessaColors.textTertiary

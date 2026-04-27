@@ -7,10 +7,12 @@ set -e
 # This script mirrors reset-and-run.sh cleanup but uses production bundle ID
 ###############################################################################
 
-BINARY_NAME="Omi Computer"  # Package.swift target — binary paths, pkill, CFBundleExecutable
-APP_NAME="Omi Beta"
-BUNDLE_ID="com.omi.computer-macos"
-BUNDLE_ID_DEV="com.omi.desktop-dev"
+BINARY_NAME="CepessaSessions"  # Package.swift target — binary paths, pkill, CFBundleExecutable
+LOCAL_MODEL_RUNNER_NAME="CepessaLocalModelRunner"
+RESOURCE_BUNDLE_NAME="CepessaSessions_CepessaSessions.bundle"
+APP_NAME="Cepessa Sessions"
+BUNDLE_ID="me.cepessa.sessions"
+BUNDLE_ID_DEV="me.cepessa.sessions.local"
 BUILD_DIR="build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 APP_PATH="/Applications/$APP_NAME.app"
@@ -106,6 +108,7 @@ echo "[4/7] Resetting Launch Services database..."
 # Build release
 echo "[5/7] Building release binary..."
 swift build -c release --package-path Desktop
+swift build -c release --package-path Desktop --product "$LOCAL_MODEL_RUNNER_NAME"
 
 # Create app bundle
 echo "[6/7] Creating app bundle..."
@@ -116,24 +119,45 @@ mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 BINARY_PATH=$(swift build -c release --package-path Desktop --show-bin-path)/"$BINARY_NAME"
 cp "$BINARY_PATH" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 
+LOCAL_MODEL_RUNNER_PATH=$(swift build -c release --package-path Desktop --show-bin-path)/"$LOCAL_MODEL_RUNNER_NAME"
+if [ -f "$LOCAL_MODEL_RUNNER_PATH" ]; then
+    cp "$LOCAL_MODEL_RUNNER_PATH" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
+fi
+
 # Copy Sparkle framework
 SPARKLE_FRAMEWORK="$(swift build -c release --package-path Desktop --show-bin-path)/Sparkle.framework"
 if [ -d "$SPARKLE_FRAMEWORK" ]; then
     cp -R "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
 fi
 
+LLAMA_FRAMEWORK="$(swift build -c release --package-path Desktop --show-bin-path)/llama.framework"
+if [ -d "$LLAMA_FRAMEWORK" ]; then
+    cp -R "$LLAMA_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
+fi
+
 # Add rpath for Sparkle
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME" 2>/dev/null || true
+if [ -f "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" ]; then
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" 2>/dev/null || true
+fi
 
 # Copy resources
 cp Desktop/Info.plist "$APP_BUNDLE/Contents/Info.plist"
-cp Desktop/Sources/GoogleService-Info.plist "$APP_BUNDLE/Contents/Resources/"
+if [ -f "Desktop/Sources/GoogleService-Info.plist" ]; then
+    cp Desktop/Sources/GoogleService-Info.plist "$APP_BUNDLE/Contents/Resources/"
+fi
 
 # Copy resource bundle
 SWIFT_BUILD_DIR=$(swift build -c release --package-path Desktop --show-bin-path)
-if [ -d "$SWIFT_BUILD_DIR/Omi Computer_Omi Computer.bundle" ]; then
-    cp -R "$SWIFT_BUILD_DIR/Omi Computer_Omi Computer.bundle" "$APP_BUNDLE/Contents/Resources/"
+if [ -d "$SWIFT_BUILD_DIR/$RESOURCE_BUNDLE_NAME" ]; then
+    cp -R "$SWIFT_BUILD_DIR/$RESOURCE_BUNDLE_NAME" "$APP_BUNDLE/Contents/Resources/"
 fi
+for SWIFT_RESOURCE_BUNDLE in "$SWIFT_BUILD_DIR"/*.bundle; do
+    [ -d "$SWIFT_RESOURCE_BUNDLE" ] || continue
+    BUNDLE_BASENAME="$(basename "$SWIFT_RESOURCE_BUNDLE")"
+    rm -rf "$APP_BUNDLE/Contents/Resources/$BUNDLE_BASENAME"
+    cp -R "$SWIFT_RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/"
+done
 
 # Copy icon
 cp omi_icon.icns "$APP_BUNDLE/Contents/Resources/OmiIcon.icns" 2>/dev/null || true
@@ -155,10 +179,20 @@ echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
 # Strip extended attributes and sign
 echo "[7/7] Signing app..."
+chmod -R u+w "$APP_BUNDLE"
 xattr -cr "$APP_BUNDLE"
+find "$APP_BUNDLE" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
+find "$APP_BUNDLE" -exec xattr -d 'com.apple.fileprovider.fpfs#P' {} \; 2>/dev/null || true
+
+SIGNING_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/cepessa-prod-signing.XXXXXX")
+SIGNING_APP_BUNDLE="$SIGNING_ROOT/$APP_NAME.app"
+ditto --norsrc --noextattr --noqtn --noacl "$APP_BUNDLE" "$SIGNING_APP_BUNDLE"
+chmod -R u+w "$SIGNING_APP_BUNDLE"
+APP_BUNDLE="$SIGNING_APP_BUNDLE"
 
 # Sign Sparkle components
 SPARKLE_FW="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+LLAMA_FW="$APP_BUNDLE/Contents/Frameworks/llama.framework"
 if [ -d "$SPARKLE_FW" ]; then
     codesign --force --options runtime --sign "$SIGN_IDENTITY" \
         "$SPARKLE_FW/Versions/B/XPCServices/Downloader.xpc" 2>/dev/null || true
@@ -170,15 +204,21 @@ if [ -d "$SPARKLE_FW" ]; then
         "$SPARKLE_FW/Versions/B/Updater.app" 2>/dev/null || true
     codesign --force --options runtime --sign "$SIGN_IDENTITY" "$SPARKLE_FW"
 fi
+if [ -d "$LLAMA_FW" ]; then
+    codesign --force --options runtime --sign "$SIGN_IDENTITY" "$LLAMA_FW"
+fi
 
 # Sign main app with release entitlements
-codesign --force --options runtime --entitlements Desktop/Omi-Release.entitlements --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+codesign --force --options runtime --entitlements Desktop/Cepessa-Release.entitlements --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 
 # Install to /Applications
 echo ""
 echo "Installing to /Applications..."
 rm -rf "$APP_PATH"
 ditto "$APP_BUNDLE" "$APP_PATH"
+chmod -R u+w "$APP_PATH"
+find "$APP_PATH" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
+find "$APP_PATH" -exec xattr -d 'com.apple.fileprovider.fpfs#P' {} \; 2>/dev/null || true
 
 # Re-register with Launch Services
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_PATH"

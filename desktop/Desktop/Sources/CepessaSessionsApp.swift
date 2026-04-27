@@ -41,6 +41,7 @@ struct CepessaSessionsApp: App {
     WindowGroup("Cepessa Sessions") {
       CepessaSessionsRootView()
         .withFontScaling()
+        .tint(CepessaColors.capture)
         .frame(minWidth: 980, minHeight: 680)
     }
     .defaultSize(width: 1460, height: 920)
@@ -85,28 +86,48 @@ private struct CepessaSessionsRootView: View {
     ZStack {
       LinearGradient(
         colors: [
-          CepessaColors.backgroundSecondary.opacity(0.96),
-          CepessaColors.backgroundPrimary.opacity(0.92),
+          CepessaColors.paperDeep.opacity(0.92),
+          CepessaColors.paper.opacity(0.98),
+          Color(hex: 0xF9F4FF).opacity(0.96),
         ],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
       )
       .ignoresSafeArea()
 
-      VStack(alignment: .leading, spacing: 18) {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("Cepessa Sessions")
-            .scaledFont(size: 26, weight: .semibold)
+      VStack(alignment: .leading, spacing: 26) {
+        VStack(alignment: .leading, spacing: 18) {
+          ZStack {
+            UnevenRoundedRectangle(
+              topLeadingRadius: 16,
+              bottomLeadingRadius: 20,
+              bottomTrailingRadius: 7,
+              topTrailingRadius: 20,
+              style: .continuous
+            )
+            .fill(
+              LinearGradient(
+                colors: [Color.white.opacity(0.96), CepessaColors.capture.opacity(0.22)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+              )
+            )
+            .frame(width: 42, height: 42)
+            .shadow(color: CepessaColors.capture.opacity(0.22), radius: 14, x: 0, y: 8)
+            Text("C")
+              .scaledFont(size: 24, weight: .bold, design: .rounded)
+              .foregroundStyle(CepessaColors.capture)
+          }
+
+          Text("CEPESSA\nSESSIONS")
+            .scaledFont(size: 12, weight: .semibold)
+            .tracking(5)
+            .lineSpacing(5)
             .foregroundStyle(CepessaColors.textPrimary)
-
-          Text("A local workspace for recording, transcribing, and structuring sessions.")
-            .scaledFont(size: 12)
-            .foregroundStyle(CepessaColors.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.top, 10)
+        .padding(.top, 20)
 
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
           ForEach(CepessaDestination.allCases) { destination in
             sidebarButton(destination)
           }
@@ -114,31 +135,40 @@ private struct CepessaSessionsRootView: View {
 
         Spacer(minLength: 0)
 
-        VStack(alignment: .leading, spacing: 10) {
-          Text("Local-first")
-            .scaledFont(size: 11, weight: .semibold)
-            .foregroundStyle(CepessaColors.textSecondary)
+        VStack(alignment: .leading, spacing: 16) {
+          Rectangle()
+            .fill(CepessaColors.graphiteLine.opacity(0.76))
+            .frame(height: 1)
 
-          Text(
-            "Audio, transcript, recap, and attachments stay on this Mac unless you explicitly export them."
+          Text("COLLECTIONS")
+            .scaledFont(size: 10, weight: .semibold)
+            .tracking(1.2)
+            .foregroundStyle(CepessaColors.textTertiary)
+
+          HStack(spacing: 9) {
+            Circle()
+              .fill(CepessaColors.error)
+              .frame(width: 9, height: 9)
+            VStack(alignment: .leading, spacing: 2) {
+              Text("New Recording")
+                .scaledFont(size: 13, weight: .medium)
+            }
+          }
+          .foregroundStyle(CepessaColors.textPrimary)
+          .padding(.horizontal, 14)
+          .padding(.vertical, 12)
+          .background(Color.white.opacity(0.56))
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+          .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+              .stroke(Color.white.opacity(0.74), lineWidth: 1)
           )
-          .scaledFont(size: 11)
-          .foregroundStyle(CepessaColors.textSecondary)
-          .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(14)
-        .cepessaPanel(
-          fill: CepessaColors.backgroundSecondary.opacity(0.75),
-          radius: 8,
-          stroke: CepessaColors.border.opacity(0.45),
-          shadowOpacity: 0,
-          shadowRadius: 0,
-          shadowY: 0
-        )
       }
-      .padding(18)
+      .padding(.horizontal, 20)
+      .padding(.vertical, 16)
     }
-    .frame(minWidth: 280, idealWidth: 320)
+    .frame(minWidth: 224, idealWidth: 244)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: selection)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hoveredDestination)
   }
@@ -157,40 +187,35 @@ private struct CepessaSessionsRootView: View {
           .scaledFont(size: 14, weight: .semibold)
           .frame(width: 18)
 
-        VStack(alignment: .leading, spacing: 2) {
-          Text(destination.title)
-            .scaledFont(size: 13, weight: .semibold)
-          Text(destination.subtitle)
-            .scaledFont(size: 11)
-            .foregroundStyle(CepessaColors.textSecondary)
-        }
+        Text(destination.title)
+          .scaledFont(size: 15, weight: .medium, design: .serif)
 
         Spacer(minLength: 0)
 
         if isSelected {
-          Circle()
-            .fill(Color.accentColor.opacity(0.74))
-            .frame(width: 6, height: 6)
+          Capsule()
+            .fill(CepessaColors.capture)
+            .frame(width: 3, height: 30)
             .transition(.opacity.combined(with: .scale(scale: 0.86)))
         }
       }
-      .foregroundStyle(isSelected ? CepessaColors.textPrimary : CepessaColors.textSecondary)
-      .padding(.horizontal, 14)
-      .padding(.vertical, 12)
+      .foregroundStyle(isSelected ? CepessaColors.captureDeep : CepessaColors.textPrimary)
+      .padding(.horizontal, 16)
+      .padding(.vertical, 15)
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(
         RoundedRectangle(cornerRadius: 9, style: .continuous)
           .fill(
             isSelected
-              ? Color.accentColor.opacity(0.14)
-              : (isHovered ? CepessaColors.backgroundRaised.opacity(0.48) : Color.clear))
+              ? CepessaColors.paper.opacity(0.09)
+              : (isHovered ? Color.white.opacity(0.42) : Color.clear))
       )
       .overlay(
         RoundedRectangle(cornerRadius: 9, style: .continuous)
           .stroke(
             isSelected
-              ? Color.accentColor.opacity(0.22)
-              : (isHovered ? CepessaColors.border.opacity(0.18) : Color.clear),
+              ? CepessaColors.capture.opacity(0.28)
+              : (isHovered ? Color.white.opacity(0.66) : Color.clear),
             lineWidth: 1)
       )
       .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))

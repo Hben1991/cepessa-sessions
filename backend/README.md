@@ -1,6 +1,6 @@
-# Omi Backend Setup
+# Cepessa Sessions Backend Setup
 
-This README provides a quick setup guide for the Omi backend. For a comprehensive step-by-step guide with detailed explanations, please refer to the [Backend Setup Documentation](https://docs.omi.me/doc/developer/backend/Backend_Setup).
+This README provides a quick setup guide for the Cepessa Sessions backend. For a comprehensive step-by-step guide with detailed explanations, please refer to the [Backend Setup Documentation](../docs/doc/developer/backend/Backend_Setup).
 
 ## Quick Setup Steps
 
@@ -9,7 +9,7 @@ This README provides a quick setup guide for the Omi backend. For a comprehensiv
    - Windows: `choco install gcloudsdk`
    - Nix envdir: It should be pre-installed
 
-2. You will need to have your own Google Cloud Project with Firebase enabled. If you've already set up Firebase for the Omi app, you're good to go. If not, please refer to the [Firebase Setup Guide](https://firebase.google.com/docs/projects/learn-more).
+2. You will need to have your own Google Cloud Project with Firebase enabled. If you've already set up Firebase for the Cepessa Sessions app, you're good to go. If not, please refer to the [Firebase Setup Guide](https://firebase.google.com/docs/projects/learn-more).
    - **IMPORTANT:** Make sure you have the [`Cloud Resource Manager API`](https://console.cloud.google.com/apis/library/cloudresourcemanager.googleapis.com), [`Firebase Management API`](https://console.cloud.google.com/apis/library/firebase.googleapis.com), and [`Cloud Firestore API`](https://console.developers.google.com/apis/api/firestore.googleapis.com/overview) enabled in the [Google Cloud API Console](https://console.cloud.google.com/apis/dashboard) **before proceeding to the next steps**. Failure to enable these APIs will result in authentication errors.
    - **Firestore Composite Indexes:** You must create composite indexes for API key queries. Go to [Firebase Console](https://console.firebase.google.com/) → Firestore Database → Indexes, and create the following composite indexes:
      | Collection | Fields |
@@ -106,7 +106,7 @@ This README provides a quick setup guide for the Omi backend. For a comprehensiv
 
 17. Now try running the server again: `uvicorn main:app --reload --env-file .env`
 
-18. In your Omi app's environment, set `BASE_API_URL` to the URL provided by ngrok (e.g., `https://example.ngrok-free.app`)
+18. In your Cepessa Sessions app environment, set `BASE_API_URL` to the URL provided by ngrok (e.g., `https://example.ngrok-free.app`)
 
 19. Your app should now be using your local backend
 
@@ -117,6 +117,6 @@ This README provides a quick setup guide for the Omi backend. For a comprehensiv
 
 ## Additional Resources
 
-- [Full Backend Setup Documentation](https://docs.omi.me/developer/backend/Backend_Setup)
-- [Omi Documentation](https://docs.omi.me/)
-- [Community Support](http://discord.omi.me)
+- [Full Backend Setup Documentation](../docs/doc/developer/backend/Backend_Setup)
+- [Cepessa Sessions Documentation](../docs/)
+- [Community Support](https://github.com/Hben1991/cepessa-sessions)

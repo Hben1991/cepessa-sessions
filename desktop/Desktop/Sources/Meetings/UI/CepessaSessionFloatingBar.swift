@@ -985,8 +985,8 @@ private struct CepessaSessionFloatingBarView: View {
       .fill(
         LinearGradient(
           colors: [
-            CepessaColors.backgroundSecondary.opacity(0.95),
-            CepessaColors.backgroundRaised.opacity(0.9),
+            CepessaColors.paperRaised.opacity(0.78),
+            CepessaColors.paperDeep.opacity(0.84),
           ],
           startPoint: .topLeading,
           endPoint: .bottomTrailing
@@ -994,8 +994,14 @@ private struct CepessaSessionFloatingBarView: View {
       )
       .overlay(
         RoundedRectangle(cornerRadius: 24, style: .continuous)
-          .stroke(Color.white.opacity(0.08), lineWidth: 1)
+          .stroke(Color.white.opacity(0.76), lineWidth: 1)
       )
+      .overlay(
+        RoundedRectangle(cornerRadius: 24, style: .continuous)
+          .stroke(CepessaColors.border.opacity(0.54), lineWidth: 1)
+          .padding(0.5)
+      )
+      .shadow(color: CepessaColors.warmShadow.opacity(0.18), radius: 30, x: 0, y: 18)
   }
 
   private var noticeTextColor: Color {

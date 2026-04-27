@@ -1,12 +1,12 @@
 ---
 name: desktop-app-flows
-description: "Understand and explore the Omi desktop macOS app's UI flows, navigation patterns, and SwiftUI architecture. Use when developing features, fixing bugs, or verifying changes in desktop/ Swift files. Provides agent-swift commands to explore the live app, understand how screens connect, and verify your work."
+description: "Understand and explore the Cepessa Sessions desktop macOS app's UI flows, navigation patterns, and SwiftUI architecture. Use when developing features, fixing bugs, or verifying changes in desktop/ Swift files. Provides agent-swift commands to explore the live app, understand how screens connect, and verify your work."
 allowed-tools: Bash, Read, Glob, Grep
 ---
 
-# Omi Desktop App — Flows & Exploration
+# Cepessa Sessions Desktop App — Flows & Exploration
 
-This skill teaches you the Omi desktop macOS app's navigation structure, screen architecture, and SwiftUI patterns. Use it when developing features (to understand how the app works), fixing bugs (to navigate to the affected screen), or verifying changes (to confirm your code works in the live app).
+This skill teaches you the Cepessa Sessions desktop macOS app's navigation structure, screen architecture, and SwiftUI patterns. Use it when developing features (to understand how the app works), fixing bugs (to navigate to the affected screen), or verifying changes (to confirm your code works in the live app).
 
 ## How to Explore the App
 
@@ -16,7 +16,7 @@ You can interact with the running app via `agent-swift` — a CLI that clicks el
 ```bash
 # App must be running via ./run.sh from desktop/
 agent-swift doctor                                   # check Accessibility permission
-agent-swift connect --bundle-id com.omi.desktop-dev  # connect to Omi Dev
+agent-swift connect --bundle-id me.cepessa.sessions.local  # connect to Cepessa Sessions
 agent-swift snapshot -i --json                       # see what's on screen
 ```
 
@@ -68,7 +68,7 @@ Main Window
     └── About — version info
 
 System Tray Menu
-├── openOmi — Open Omi
+├── openOmi — Open Cepessa Sessions
 ├── checkFor — Check for Updates
 ├── resetOnb — Reset Onboarding
 ├── reportIs — Report Issue
@@ -125,7 +125,7 @@ Create `desktop/e2e/flows/<name>.yaml` in v2 format:
 version: 2
 name: my-flow
 description: What this flow covers
-app: com.omi.computer-macos
+app: me.cepessa.sessions.local
 covers:
   - desktop/Desktop/Sources/path/to/YourView.swift
 preconditions:
@@ -157,14 +157,14 @@ After making changes, verify them in the live app:
 | Element not found | Re-snapshot, try scrolling, check if on wrong screen |
 | Click doesn't navigate | Try `press` instead (Settings sidebar = `press`, main sidebar = `click`) |
 | Picker not responding | SwiftUI Picker `.menu` style may not expose as `popupbutton` — look for `button` with value label |
-| App seems frozen | Check `agent-swift status --json`, re-connect, check `/private/tmp/omi-dev.log` |
+| App seems frozen | Check `agent-swift status --json`, re-connect, check the local desktop dev log |
 
 ## Guard Conditions
 
 **NEVER:**
-- Kill or restart the production Omi app
+- Kill or restart the production Cepessa Sessions app
 - Use development env vars to bypass auth — test real auth flows
 - Set `hasCompletedOnboarding` to skip onboarding — test the real flow
 - Modify source code to make tests pass — report the failure instead
 
-**NOTE:** The beta app (`com.omi.computer-macos`) is the standard target for flow-walker E2E testing. The dev app (`com.omi.desktop-dev`) is for local development only.
+**NOTE:** The beta app (`me.cepessa.sessions.local`) is the standard target for flow-walker E2E testing. The dev app (`me.cepessa.sessions.local`) is for local development only.

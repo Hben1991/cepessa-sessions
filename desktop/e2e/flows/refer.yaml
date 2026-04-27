@@ -1,7 +1,7 @@
 version: 2
 name: refer
 description: Refer a Friend flow — navigate to referral page, verify referral link and sharing options
-app: com.omi.computer-macos
+app: me.cepessa.sessions.local
 covers:
   - desktop/Desktop/Sources/MainWindow/Pages/ReferPage.swift
 preconditions:

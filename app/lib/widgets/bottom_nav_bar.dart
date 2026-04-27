@@ -48,12 +48,12 @@ class BottomNavBar extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    // Home tab
+                    // Hearth tab
                     Expanded(
                       child: InkWell(
                         onTap: () {
                           HapticFeedback.mediumImpact();
-                          MixpanelManager().bottomNavigationTabClicked('Home');
+                          MixpanelManager().bottomNavigationTabClicked('Hearth');
                           primaryFocus?.unfocus();
                           onTabTap(0, home.selectedIndex == 0);
                         },
@@ -61,7 +61,7 @@ class BottomNavBar extends StatelessWidget {
                           height: 90,
                           child: Center(
                             child: Icon(
-                              FontAwesomeIcons.house,
+                              FontAwesomeIcons.solidHeart,
                               color: home.selectedIndex == 0 ? Colors.white : Colors.grey,
                               size: 26,
                             ),

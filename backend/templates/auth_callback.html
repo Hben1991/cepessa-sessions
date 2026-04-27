@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authentication Successful - Omi</title>
+    <title>Authentication Successful - Cepessa Sessions</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -109,7 +109,9 @@
             messageElement.textContent = 'Please close this window and try again.';
         } else if (code) {
             // Build the custom scheme redirect URL
-            let redirectUrl = 'omi://auth/callback?code=' + encodeURIComponent(code);
+            const redirectBase = "{{ redirect_uri if redirect_uri is defined else 'cepessa-sessions://auth/callback' }}";
+            const separator = redirectBase.includes('?') ? '&' : '?';
+            let redirectUrl = redirectBase + separator + 'code=' + encodeURIComponent(code);
             if (state) {
                 redirectUrl += '&state=' + encodeURIComponent(state);
             }

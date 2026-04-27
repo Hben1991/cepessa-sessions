@@ -269,7 +269,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
     // Navigate uri
     Uri? navigateToUri;
-    var pageAlias = "home";
+    var pageAlias = "hearth";
     var homePageIdx = 0;
     String? detailPageId;
 
@@ -285,6 +285,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       }
 
       switch (pageAlias) {
+        case "home":
+        case "hearth":
+          homePageIdx = 0;
+          break;
         case "action-items":
           homePageIdx = 1;
           break;
