@@ -8,6 +8,7 @@ enum EmbeddedLocalLanguageModelError: LocalizedError {
   case modelNotFound
   case runnerNotFound
   case runnerFailed(String)
+  case runnerTimedOut
   case emptyResponse
 
   var errorDescription: String? {
@@ -18,6 +19,8 @@ enum EmbeddedLocalLanguageModelError: LocalizedError {
       return "The bundled local model runner is missing."
     case .runnerFailed(let message):
       return message.isEmpty ? "The bundled local model runner failed." : message
+    case .runnerTimedOut:
+      return "The bundled local model runner timed out."
     case .emptyResponse:
       return "The bundled local model returned an empty response."
     }
@@ -33,7 +36,8 @@ enum EmbeddedLocalLanguageModelConfiguration {
     environment: [String: String] = ProcessInfo.processInfo.environment,
     fileManager: FileManager = .default
   ) -> URL? {
-    if let configuredPath = environment["CEPESSA_EMBEDDED_MODEL_PATH"] ?? environment["LOCAL_MODEL_PATH"],
+    if let configuredPath = environment["CEPESSA_EMBEDDED_MODEL_PATH"]
+      ?? environment["LOCAL_MODEL_PATH"],
       !configuredPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     {
       return URL(fileURLWithPath: configuredPath).standardizedFileURL
@@ -47,16 +51,19 @@ enum EmbeddedLocalLanguageModelConfiguration {
       return bundledURL
     }
 
-    guard let supportDirectory = try? fileManager.url(
-      for: .applicationSupportDirectory,
-      in: .userDomainMask,
-      appropriateFor: nil,
-      create: false
-    ) else {
+    guard
+      let supportDirectory = try? fileManager.url(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask,
+        appropriateFor: nil,
+        create: false
+      )
+    else {
       return nil
     }
 
-    let appOwnedModelURL = supportDirectory
+    let appOwnedModelURL =
+      supportDirectory
       .appendingPathComponent("Cepessa Sessions", isDirectory: true)
       .appendingPathComponent("Models", isDirectory: true)
       .appendingPathComponent("\(bundledModelFileName).\(bundledModelExtension)")
@@ -135,13 +142,24 @@ struct EmbeddedLocalLanguageModel: LocalSessionLanguageModelGenerating {
     }
     try? inputPipe.fileHandleForWriting.close()
 
+    let didExit = await process.waitUntilExit(timeout: 12)
+    if !didExit {
+      process.terminate()
+      try? await Task.sleep(nanoseconds: 300_000_000)
+      if process.isRunning {
+        process.interrupt()
+      }
+      throw EmbeddedLocalLanguageModelError.runnerTimedOut
+    }
+
     let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
     let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
 
-    let output = String(data: outputData, encoding: .utf8)?
+    let output =
+      String(data: outputData, encoding: .utf8)?
       .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    let error = String(data: errorData, encoding: .utf8)?
+    let error =
+      String(data: errorData, encoding: .utf8)?
       .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
     guard process.terminationStatus == 0 else {
@@ -152,5 +170,36 @@ struct EmbeddedLocalLanguageModel: LocalSessionLanguageModelGenerating {
     }
 
     return output
+  }
+}
+
+extension Process {
+  fileprivate func waitUntilExit(timeout: TimeInterval) async -> Bool {
+    await withCheckedContinuation { continuation in
+      let state = ProcessWaitState()
+
+      DispatchQueue.global(qos: .userInitiated).async {
+        self.waitUntilExit()
+        state.resumeIfNeeded(continuation, value: true)
+      }
+
+      DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) {
+        state.resumeIfNeeded(continuation, value: false)
+      }
+    }
+  }
+}
+
+private final class ProcessWaitState: @unchecked Sendable {
+  private let lock = NSLock()
+  private var didResume = false
+
+  func resumeIfNeeded(_ continuation: CheckedContinuation<Bool, Never>, value: Bool) {
+    lock.lock()
+    defer { lock.unlock() }
+
+    guard !didResume else { return }
+    didResume = true
+    continuation.resume(returning: value)
   }
 }

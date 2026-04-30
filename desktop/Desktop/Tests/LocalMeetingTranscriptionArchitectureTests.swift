@@ -60,6 +60,7 @@ final class LocalMeetingTranscriptionArchitectureTests: XCTestCase {
       fileLayout: layout,
       transcriptionService: transcriptionService,
       recapGenerator: recapGenerator,
+      contentClassifier: ImmediateArchitectureContentClassifier(),
       audioImportService: PassthroughLocalAudioImportService()
     )
 
@@ -90,7 +91,9 @@ final class LocalMeetingTranscriptionArchitectureTests: XCTestCase {
     await importTask.value
 
     await waitForArchitectureCondition("final transcript handed to recap") {
-      model.selectedSession?.transcriptText == "Final ASR text" && model.isGeneratingRecap
+      model.selectedSession?.transcriptText == "Final ASR text"
+        && model.isGeneratingRecap
+        && recapGenerator.receivedSessions.map(\.transcriptText) == ["Final ASR text"]
     }
 
     XCTAssertFalse(model.isTranscribing)
@@ -179,6 +182,16 @@ private struct PassthroughLocalAudioImportService: LocalSessionAudioImporting {
       withIntermediateDirectories: true
     )
     try Data("normalized audio".utf8).write(to: destinationWavURL)
+  }
+}
+
+private struct ImmediateArchitectureContentClassifier: LocalSessionContentClassifying {
+  func classifyContent(for session: LocalSession) async -> LocalSessionContentClassification {
+    LocalSessionContentClassification(
+      type: .generalTranscript,
+      confidence: 0.8,
+      rationale: "Test classification."
+    )
   }
 }
 

@@ -39,7 +39,7 @@ struct CepessaSessionsLibraryPage: View {
         startPoint: .topLeading,
         endPoint: .bottomTrailing
       )
-        .ignoresSafeArea()
+      .ignoresSafeArea()
 
       HStack(spacing: 18) {
         VStack(alignment: .leading, spacing: 18) {
@@ -323,6 +323,9 @@ private struct CepessaLibraryDetailPane: View {
   @ObservedObject var model: LocalMeetingAppModel
   let session: LocalMeetingSession?
   @State private var documentChatDraft = ""
+  @State private var isDocumentChatOpen = false
+  @AppStorage("cepessa.sessions.documentLanguage") private var documentLanguage =
+    LocalSessionDocumentLanguage.english.rawValue
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
@@ -361,7 +364,15 @@ private struct CepessaLibraryDetailPane: View {
                 subtitle:
                   "Read the generated document and use the local model to propose structured edits before anything is saved."
               ) {
-                LocalSessionRecapWorkspace(session: session)
+                LocalSessionRecapWorkspace(
+                  session: session,
+                  language: selectedDocumentLanguage,
+                  languageSelection: $documentLanguage,
+                  isRegenerating: model.isGeneratingRecap(for: session.id),
+                  onRegenerate: {
+                    model.regenerateRecap(for: session.id)
+                  }
+                )
               }
 
               detailBlock(
@@ -455,19 +466,31 @@ private struct CepessaLibraryDetailPane: View {
               }
             }
             .padding(24)
-            .padding(.bottom, 280)
+            .padding(.bottom, isDocumentChatOpen ? 220 : 76)
           }
 
-          CepessaSessionDocumentChatView(
-            model: model,
-            session: session,
-            draftText: $documentChatDraft
-          )
-          .id(session.id)
-          .frame(minWidth: 560, idealWidth: 760, maxWidth: 980)
-          .padding(.horizontal, 34)
-          .padding(.bottom, 22)
-          .transition(.opacity.combined(with: .offset(y: reduceMotion ? 0 : 10)))
+          if isDocumentChatOpen {
+            CepessaSessionDocumentChatView(
+              model: model,
+              session: session,
+              draftText: $documentChatDraft,
+              onClose: {
+                withAnimation(.easeOut(duration: 0.18)) {
+                  isDocumentChatOpen = false
+                }
+              }
+            )
+            .id(session.id)
+            .frame(minWidth: 440, idealWidth: 620, maxWidth: 760)
+            .padding(.horizontal, 34)
+            .padding(.bottom, 18)
+            .transition(.opacity.combined(with: .offset(y: reduceMotion ? 0 : 10)))
+          } else {
+            openChatButton
+              .padding(.horizontal, 34)
+              .padding(.bottom, 18)
+              .transition(.opacity.combined(with: .offset(y: reduceMotion ? 0 : 8)))
+          }
         }
       } else {
         VStack(spacing: 12) {
@@ -491,6 +514,11 @@ private struct CepessaLibraryDetailPane: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .cepessaCanvas(radius: 24)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: session?.id)
+    .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isDocumentChatOpen)
+    .onChange(of: session?.id) { _, _ in
+      documentChatDraft = ""
+      isDocumentChatOpen = false
+    }
   }
 
   private func detailBlock<Content: View>(
@@ -695,10 +723,45 @@ private struct CepessaLibraryDetailPane: View {
     let totalSeconds = max(0, Int(interval.rounded()))
     return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
   }
+
+  private var selectedDocumentLanguage: LocalSessionDocumentLanguage {
+    LocalSessionDocumentLanguage(rawValue: documentLanguage) ?? .english
+  }
+
+  private var openChatButton: some View {
+    HStack {
+      Spacer(minLength: 0)
+
+      Button {
+        withAnimation(.easeOut(duration: 0.18)) {
+          isDocumentChatOpen = true
+        }
+      } label: {
+        Label("Ask this session", systemImage: "bubble.left.and.text.bubble.right")
+          .scaledFont(size: 12, weight: .semibold)
+          .foregroundStyle(CepessaColors.textPrimary)
+          .padding(.horizontal, 14)
+          .padding(.vertical, 10)
+          .background(Color.white.opacity(0.86))
+          .clipShape(Capsule())
+          .overlay(
+            Capsule()
+              .stroke(CepessaColors.capture.opacity(0.22), lineWidth: 1)
+          )
+          .shadow(color: CepessaColors.warmShadow.opacity(0.10), radius: 14, x: 0, y: 8)
+      }
+      .buttonStyle(CepessaPressStyle(scale: 0.97, pressedBrightness: -0.02))
+      .accessibilityLabel("Open session chat")
+    }
+  }
 }
 
 private struct LocalSessionRecapWorkspace: View {
   let session: LocalMeetingSession
+  let language: LocalSessionDocumentLanguage
+  @Binding var languageSelection: String
+  let isRegenerating: Bool
+  let onRegenerate: () -> Void
 
   private var hasRecap: Bool {
     !session.recap.overview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -713,9 +776,46 @@ private struct LocalSessionRecapWorkspace: View {
   @ViewBuilder
   private var recapSurface: some View {
     if hasRecap {
-      LocalSessionMarkdownDocumentPreview(
-        markdown: LocalSessionRecapMarkdownDocument.markdown(for: session, includeTranscript: false)
-      )
+      VStack(alignment: .trailing, spacing: 12) {
+        HStack(spacing: 10) {
+          regenerateRecapButton
+          LocalSessionDocumentLanguageToggle(selection: $languageSelection)
+        }
+
+        if isRegenerating {
+          HStack(spacing: 8) {
+            ProgressView()
+              .controlSize(.small)
+              .scaleEffect(0.72)
+
+            Text(
+              "Rewriting the brief from the transcript. If the model is slow, a local fallback will finish it."
+            )
+            .scaledFont(size: 12)
+            .foregroundStyle(CepessaColors.textSecondary)
+
+            Spacer(minLength: 0)
+          }
+          .padding(.horizontal, 12)
+          .padding(.vertical, 10)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .background(CepessaColors.capture.opacity(0.08))
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+          .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+              .stroke(CepessaColors.capture.opacity(0.18), lineWidth: 1)
+          )
+        }
+
+        LocalSessionMarkdownDocumentPreview(
+          markdown: LocalSessionRecapMarkdownDocument.markdown(
+            for: session,
+            language: language,
+            includeTranscript: false
+          ),
+          language: language
+        )
+      }
     } else {
       Text("Recap is still being prepared.")
         .scaledFont(size: 13)
@@ -726,14 +826,30 @@ private struct LocalSessionRecapWorkspace: View {
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
   }
+
+  private var regenerateRecapButton: some View {
+    Button(action: onRegenerate) {
+      Label(isRegenerating ? "Refreshing" : "Rewrite brief", systemImage: "arrow.clockwise")
+        .scaledFont(size: 12, weight: .semibold)
+    }
+    .buttonStyle(.bordered)
+    .controlSize(.small)
+    .disabled(
+      isRegenerating
+        || session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    )
+    .help("Read the transcript again and create a new recap.")
+  }
 }
 
 struct LocalSessionMarkdownDocumentPreview: View, Equatable {
   let markdown: String
+  let language: LocalSessionDocumentLanguage
   private let markdownBlocks: [LocalSessionMarkdownBlock]
 
-  init(markdown: String) {
+  init(markdown: String, language: LocalSessionDocumentLanguage = .english) {
     self.markdown = markdown
+    self.language = language
     self.markdownBlocks = Self.blocks(from: markdown)
   }
 
@@ -742,47 +858,26 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
   )
     -> Bool
   {
-    lhs.markdown == rhs.markdown
+    lhs.markdown == rhs.markdown && lhs.language == rhs.language
   }
 
   var body: some View {
     VStack(alignment: .center, spacing: 0) {
-      VStack(alignment: .leading, spacing: 18) {
+      VStack(alignment: .leading, spacing: 20) {
         ForEach(Array(markdownBlocks.enumerated()), id: \.offset) { _, block in
           renderedBlock(block)
         }
       }
-      .padding(.horizontal, 52)
-      .padding(.vertical, 44)
-      .frame(maxWidth: 920, alignment: .topLeading)
-      .background(
-        CepessaColors.backgroundRaised.opacity(0.95),
-        in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+      .padding(.horizontal, 56)
+      .padding(.top, 40)
+      .padding(.bottom, 70)
+      .frame(maxWidth: 780, alignment: .topLeading)
+      .environment(
+        \.layoutDirection,
+        language == .hebrew ? .rightToLeft : .leftToRight
       )
-      .overlay(
-        RoundedRectangle(cornerRadius: 22, style: .continuous)
-          .stroke(CepessaColors.border.opacity(0.14), lineWidth: 1)
-      )
-      .shadow(color: .black.opacity(0.035), radius: 22, x: 0, y: 12)
     }
-    .padding(.horizontal, 20)
-    .padding(.vertical, 20)
     .frame(maxWidth: .infinity, alignment: .center)
-    .background(
-      LinearGradient(
-        colors: [
-          CepessaColors.backgroundSecondary.opacity(0.62),
-          CepessaColors.backgroundRaised.opacity(0.34),
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-      ),
-      in: RoundedRectangle(cornerRadius: 30, style: .continuous)
-    )
-    .overlay(
-      RoundedRectangle(cornerRadius: 30, style: .continuous)
-        .stroke(CepessaColors.border.opacity(0.12), lineWidth: 1)
-    )
   }
 
   @ViewBuilder
@@ -884,7 +979,7 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
 
   private func headingSize(for level: Int) -> CGFloat {
     switch level {
-    case 1: return 30
+    case 1: return 31
     case 2: return 22
     case 3: return 17
     default: return 15.5
@@ -1039,6 +1134,53 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
   private static func isHorizontalRule(_ line: String) -> Bool {
     let stripped = line.replacingOccurrences(of: " ", with: "")
     return stripped == "---" || stripped == "***" || stripped == "___"
+  }
+}
+
+struct LocalSessionDocumentLanguageToggle: View {
+  @Binding var selection: String
+
+  private var selectedLanguage: LocalSessionDocumentLanguage {
+    LocalSessionDocumentLanguage(rawValue: selection) ?? .english
+  }
+
+  var body: some View {
+    HStack(spacing: 4) {
+      ForEach(LocalSessionDocumentLanguage.allCases) { language in
+        Button {
+          selection = language.rawValue
+        } label: {
+          Text(language.displayTitle)
+            .scaledFont(size: 12, weight: .semibold)
+            .foregroundStyle(
+              selectedLanguage == language ? CepessaColors.textPrimary : CepessaColors.textSecondary
+            )
+            .frame(minWidth: 74)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background {
+              if selectedLanguage == language {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                  .fill(Color.white.opacity(0.84))
+                  .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                      .stroke(CepessaColors.capture.opacity(0.22), lineWidth: 1)
+                  )
+              }
+            }
+        }
+        .buttonStyle(CepessaPressStyle(scale: 0.97, pressedBrightness: -0.02))
+        .accessibilityLabel("Show document in \(language.displayTitle)")
+        .accessibilityAddTraits(selectedLanguage == language ? [.isSelected] : [])
+      }
+    }
+    .padding(4)
+    .background(CepessaColors.paperRaised.opacity(0.72))
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .overlay(
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .stroke(CepessaColors.border.opacity(0.16), lineWidth: 1)
+    )
   }
 }
 
@@ -1451,6 +1593,7 @@ struct CepessaSessionsSettingsPage: View {
     "Balanced"
   @AppStorage("cepessa.sessions.preferredRecapStyle") private var recapStyle = "Structured recap"
   @AppStorage("cepessa.sessions.floatingBarEnabled") private var floatingBarEnabled = false
+  @State private var openSettingsPickerTitle: String?
 
   var body: some View {
     ZStack {
@@ -1612,14 +1755,71 @@ struct CepessaSessionsSettingsPage: View {
 
       Spacer(minLength: 20)
 
-      Picker(title, selection: value) {
-        ForEach(options, id: \.self) { option in
-          Text(option).tag(option)
+      CepessaToolbarMenu(
+        isOpen: Binding(
+          get: { openSettingsPickerTitle == title },
+          set: { openSettingsPickerTitle = $0 ? title : nil }
+        ),
+        alignment: .trailing,
+        label: {
+          HStack(spacing: 8) {
+            Text(value.wrappedValue)
+              .scaledFont(size: 12, weight: .semibold)
+              .foregroundStyle(CepessaColors.textPrimary)
+              .lineLimit(1)
+
+            Image(systemName: "chevron.down")
+              .scaledFont(size: 8.5, weight: .bold)
+              .foregroundStyle(CepessaColors.textTertiary)
+          }
+          .padding(.horizontal, 12)
+          .frame(width: 180, height: 32, alignment: .trailing)
+          .background(CepessaColors.backgroundRaised.opacity(0.72))
+          .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+          .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+              .stroke(CepessaColors.border.opacity(0.18), lineWidth: 1)
+          }
+        },
+        content: {
+          VStack(spacing: 3) {
+            ForEach(options, id: \.self) { option in
+              settingsMenuOption(title: option, isSelected: value.wrappedValue == option) {
+                value.wrappedValue = option
+                openSettingsPickerTitle = nil
+              }
+            }
+          }
+          .frame(width: 210)
         }
-      }
-      .pickerStyle(.menu)
-      .frame(width: 180)
+      )
     }
+  }
+
+  private func settingsMenuOption(
+    title: String,
+    isSelected: Bool,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      HStack(spacing: 9) {
+        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+          .scaledFont(size: 12, weight: .semibold)
+          .foregroundStyle(isSelected ? CepessaColors.accentPrimary : CepessaColors.textTertiary)
+
+        Text(title)
+          .scaledFont(size: 12, weight: .semibold)
+          .foregroundStyle(CepessaColors.textPrimary)
+          .lineLimit(1)
+
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 8)
+      .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
+      .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+    .buttonStyle(CepessaPressStyle(scale: 0.985, pressedBrightness: -0.01))
   }
 
   private func permissionRow(title: String, isGranted: Bool) -> some View {

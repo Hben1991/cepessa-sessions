@@ -32,11 +32,13 @@ final class LocalSessionAppModel: ObservableObject {
   private let recorder: LocalMeetingRecorder
   private let transcriptionService: any LocalSessionTranscribing
   private let recapGenerator: any LocalSessionRecapGenerating
+  private let contentClassifier: any LocalSessionContentClassifying
   private let documentChatService: (any LocalSessionDocumentChatProviding)?
   private let audioImportService: any LocalSessionAudioImporting
   private let fileManager: FileManager
   private var activeImportSessionIDs: Set<LocalSession.ID> = []
   private var activeTranscriptionSessionIDs: Set<LocalSession.ID> = []
+  private var activeContentClassificationSessionIDs: Set<LocalSession.ID> = []
   private var activeRecapSessionIDs: Set<LocalSession.ID> = []
   private var warmedTranscriptionModelPath: String?
   private var cancellables: Set<AnyCancellable> = []
@@ -47,7 +49,9 @@ final class LocalSessionAppModel: ObservableObject {
     fileLayout: LocalSessionFileLayout? = nil,
     transcriptionService: any LocalSessionTranscribing = LocalMeetingTranscriptionService(),
     recapGenerator: any LocalSessionRecapGenerating = LocalSessionRecapGenerator(),
-    documentChatService: (any LocalSessionDocumentChatProviding)? = LocalSessionDocumentChatClient(),
+    contentClassifier: any LocalSessionContentClassifying = LocalSessionContentClassifier(),
+    documentChatService: (any LocalSessionDocumentChatProviding)? =
+      LocalSessionDocumentChatClient(),
     audioImportService: any LocalSessionAudioImporting = LocalSessionAudioImportService(),
     fileManager: FileManager = .default
   ) {
@@ -60,6 +64,7 @@ final class LocalSessionAppModel: ObservableObject {
     self.recorder = LocalMeetingRecorder(fileLayout: resolvedFileLayout)
     self.transcriptionService = transcriptionService
     self.recapGenerator = recapGenerator
+    self.contentClassifier = contentClassifier
     self.documentChatService = documentChatService
     self.audioImportService = audioImportService
     self.fileManager = fileManager
@@ -74,7 +79,7 @@ final class LocalSessionAppModel: ObservableObject {
   }
 
   var isProcessingSession: Bool {
-    isTranscribing || isGeneratingRecap
+    isTranscribing || isGeneratingRecap || !activeContentClassificationSessionIDs.isEmpty
   }
 
   var processingQueue: [LocalSessionProcessingSnapshot] {
@@ -211,7 +216,7 @@ final class LocalSessionAppModel: ObservableObject {
       progress: 0.02,
       logMessages: [
         "Source file: \(sourceURL.lastPathComponent)",
-        "Destination file: \(destinationURL.lastPathComponent)"
+        "Destination file: \(destinationURL.lastPathComponent)",
       ]
     )
 
@@ -412,7 +417,7 @@ final class LocalSessionAppModel: ObservableObject {
     guard let documentChatService else {
       _ = mutateSession(id: resolvedSessionID) { session in
         session.documentChat.status = .failed
-        session.documentChat.errorMessage = "Local model is unavailable."
+        session.documentChat.errorMessage = "Session chat is not configured in this build."
         session.documentChat.updatedAt = Date()
       }
       return
@@ -426,15 +431,17 @@ final class LocalSessionAppModel: ObservableObject {
     )
 
     guard
-      let preparedSession = mutateSession(id: resolvedSessionID, { session in
-        if session.documentChat.createdAt == nil {
-          session.documentChat.createdAt = Date()
-        }
-        session.documentChat.messages.append(userMessage)
-        session.documentChat.status = .sending
-        session.documentChat.errorMessage = nil
-        session.documentChat.updatedAt = Date()
-      })
+      let preparedSession = mutateSession(
+        id: resolvedSessionID,
+        { session in
+          if session.documentChat.createdAt == nil {
+            session.documentChat.createdAt = Date()
+          }
+          session.documentChat.messages.append(userMessage)
+          session.documentChat.status = .sending
+          session.documentChat.errorMessage = nil
+          session.documentChat.updatedAt = Date()
+        })
     else {
       return
     }
@@ -446,15 +453,19 @@ final class LocalSessionAppModel: ObservableObject {
           LocalSessionDocumentChatRequest(session: preparedSession, userMessage: prompt)
         )
         _ = self.mutateSession(id: resolvedSessionID) { session in
+          if proposal.hasEdits {
+            self.apply(proposal, to: &session)
+          }
+
           session.documentChat.messages.append(
             LocalSessionDocumentChatMessage(
               id: UUID(),
               role: .assistant,
-              text: proposal.assistantMessage,
+              text: self.assistantMessage(for: proposal),
               createdAt: Date()
             )
           )
-          session.documentChat.pendingProposal = proposal.hasEdits ? proposal : nil
+          session.documentChat.pendingProposal = nil
           session.documentChat.status = .idle
           session.documentChat.errorMessage = nil
           session.documentChat.updatedAt = Date()
@@ -462,11 +473,35 @@ final class LocalSessionAppModel: ObservableObject {
       } catch {
         _ = self.mutateSession(id: resolvedSessionID) { session in
           session.documentChat.status = .failed
-          session.documentChat.errorMessage = "Local model is unavailable."
+          session.documentChat.errorMessage = "Session chat could not finish."
           session.documentChat.updatedAt = Date()
         }
       }
     }
+  }
+
+  func regenerateRecap(for sessionID: LocalSession.ID? = nil) {
+    let resolvedSessionID = sessionID ?? selectedSessionID
+    guard let resolvedSessionID,
+      !activeContentClassificationSessionIDs.contains(resolvedSessionID),
+      !activeRecapSessionIDs.contains(resolvedSessionID),
+      let session = sessions.first(where: { $0.id == resolvedSessionID }),
+      !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else {
+      return
+    }
+
+    beginContentClassification(for: session)
+  }
+
+  private func assistantMessage(for proposal: LocalSessionDocumentEditProposal) -> String {
+    let trimmed = proposal.assistantMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmed.isEmpty {
+      return trimmed
+    }
+
+    return proposal.hasEdits
+      ? "Applied the requested document edits." : "No document edit was needed."
   }
 
   func applyPendingDocumentChatProposal(for sessionID: LocalSession.ID? = nil) {
@@ -577,7 +612,7 @@ final class LocalSessionAppModel: ObservableObject {
       progress: 0.03,
       logMessages: [
         "Audio file: \(resolvedAudioURL.lastPathComponent)",
-        "Model file: \(transcriptionPlan.modelURL.lastPathComponent)"
+        "Model file: \(transcriptionPlan.modelURL.lastPathComponent)",
       ]
     )
 
@@ -598,7 +633,7 @@ final class LocalSessionAppModel: ObservableObject {
       updatedSession.transcriptSegments = transcriptSegments(from: result, session: session)
       let transcriptReadySession = upsertSession(updatedSession)
       endTranscription(for: sessionID)
-      beginRecapGeneration(for: transcriptReadySession)
+      beginContentClassification(for: transcriptReadySession)
       return
     } catch {
       updatedSession.status = .failed
@@ -648,7 +683,7 @@ final class LocalSessionAppModel: ObservableObject {
         progress: 0.16,
         logMessages: [
           "Mapped \(chunks) optimized chunk\(chunks == 1 ? "" : "s")",
-          "Speech: \(speechMinutes)m, silence skipped: \(skippedMinutes)m"
+          "Speech: \(speechMinutes)m, silence skipped: \(skippedMinutes)m",
         ]
       )
     case .transcribing(let percent):
@@ -722,17 +757,49 @@ final class LocalSessionAppModel: ObservableObject {
     }
   }
 
-  private func beginRecapGeneration(for session: LocalSession) {
-    activeRecapSessionIDs.insert(session.id)
+  private func beginContentClassification(for session: LocalSession) {
+    activeContentClassificationSessionIDs.insert(session.id)
     syncActivityFlags()
     setProcessingSnapshot(
       for: session.id,
-      phase: .generatingRecap,
-      title: activeRecapSessionIDs.count > 1 ? "Generating recap" : "Generating recap",
-      detail: "Running the local recap model over the transcript and captured context.",
+      phase: .classifyingContent,
+      title: "Understanding content",
+      detail: "Detecting whether this transcript is a meeting, message, video commentary, or general transcript.",
       progress: nil,
       logMessages: [
-        "Recap input: transcript + captured context"
+        "Classification input: transcript + captured context"
+      ]
+    )
+
+    Task { [weak self] in
+      guard let self else { return }
+      let classification = await self.contentClassifier.classifyContent(for: session)
+      let classifiedSession = self.mutateSession(id: session.id) { currentSession in
+        currentSession.contentClassification = classification
+      }
+      self.finishContentClassification(for: session.id)
+      self.beginRecapGeneration(for: classifiedSession ?? session)
+    }
+  }
+
+  private func finishContentClassification(for sessionID: LocalSession.ID) {
+    activeContentClassificationSessionIDs.remove(sessionID)
+    syncActivityFlags()
+  }
+
+  private func beginRecapGeneration(for session: LocalSession) {
+    activeRecapSessionIDs.insert(session.id)
+    syncActivityFlags()
+    let contentTypeTitle = session.contentClassification?.type.displayTitle ?? "General transcript"
+    setProcessingSnapshot(
+      for: session.id,
+      phase: .generatingRecap,
+      title: "Generating \(contentTypeTitle.lowercased()) brief",
+      detail: "Running the local recap model with \(contentTypeTitle.lowercased()) instructions.",
+      progress: nil,
+      logMessages: [
+        "Detected content type: \(contentTypeTitle)",
+        "Recap input: transcript + captured context",
       ]
     )
 
@@ -757,11 +824,16 @@ final class LocalSessionAppModel: ObservableObject {
     from result: LocalSessionTranscriptionResult,
     session: LocalSession
   ) -> [LocalSessionTranscriptSegment] {
+    let sourceAttributor = sourceAttributor(for: session)
+
     if !result.segments.isEmpty {
       return result.segments.map { segment in
         LocalSessionTranscriptSegment(
           id: UUID(),
-          speaker: "Transcript",
+          speaker: sourceAttributor?.speaker(
+            startTime: segment.startTime,
+            endTime: segment.endTime
+          ) ?? "Speaker 1",
           text: segment.text,
           timestamp: session.startedAt.addingTimeInterval(segment.startTime)
         )
@@ -776,7 +848,7 @@ final class LocalSessionAppModel: ObservableObject {
     return [
       LocalSessionTranscriptSegment(
         id: UUID(),
-        speaker: "Transcript",
+        speaker: "Speaker 1",
         text: transcriptText,
         timestamp: session.startedAt
       )
@@ -791,11 +863,59 @@ final class LocalSessionAppModel: ObservableObject {
     return partialSegments.map { segment in
       LocalSessionTranscriptSegment(
         id: UUID(),
-        speaker: "Transcript",
+        speaker: "Speaker 1",
         text: segment.text,
         timestamp: session.startedAt.addingTimeInterval(segment.startTime)
       )
     }
+  }
+
+  private func sourceAttributor(for session: LocalSession) -> LocalSessionSourceAttributor? {
+    guard
+      let micURL = sourceAudioURL(
+        fileName: session.audioArtifacts.micFileName,
+        sessionID: session.id,
+        defaultFileName: "mic.wav"
+      ),
+      let systemURL = sourceAudioURL(
+        fileName: session.audioArtifacts.systemFileName,
+        sessionID: session.id,
+        defaultFileName: "system.wav"
+      )
+    else {
+      return nil
+    }
+
+    return LocalSessionSourceAttributor(
+      micURL: micURL,
+      systemURL: systemURL,
+      fileManager: fileManager
+    )
+  }
+
+  private func sourceAudioURL(
+    fileName: String?,
+    sessionID: LocalSession.ID,
+    defaultFileName: String
+  ) -> URL? {
+    let roots = [
+      fileLayout.sessionDirectory(for: sessionID),
+      fileLayout.legacySessionDirectory(for: sessionID),
+    ]
+    let orderedFileNames = [fileName, defaultFileName].compactMap { $0 }
+    var seenFileNames: Set<String> = []
+    let candidateFileNames = orderedFileNames.filter { seenFileNames.insert($0).inserted }
+
+    for root in roots {
+      for candidateFileName in candidateFileNames {
+        let candidateURL = root.appendingPathComponent(candidateFileName, isDirectory: false)
+        if fileManager.fileExists(atPath: candidateURL.path) {
+          return candidateURL
+        }
+      }
+    }
+
+    return nil
   }
 
   private func warmUpTranscriptionModelIfNeeded(plan: LocalSessionTranscriptionPlan? = nil) async {
@@ -873,8 +993,11 @@ final class LocalSessionAppModel: ObservableObject {
       mixedFileName: incomingSession.audioArtifacts.mixedFileName
         ?? existingSession.audioArtifacts.mixedFileName
     )
+    mergedSession.contentClassification =
+      incomingSession.contentClassification ?? existingSession.contentClassification
     mergedSession.documentChat =
-      incomingSession.documentChat == .empty ? existingSession.documentChat : incomingSession.documentChat
+      incomingSession.documentChat == .empty
+      ? existingSession.documentChat : incomingSession.documentChat
 
     return mergedSession
   }
@@ -906,7 +1029,8 @@ final class LocalSessionAppModel: ObservableObject {
 
     for patch in proposal.transcriptPatches {
       guard
-        let segmentIndex = session.transcriptSegments.firstIndex(where: { $0.id == patch.segmentID })
+        let segmentIndex = session.transcriptSegments.firstIndex(where: { $0.id == patch.segmentID }
+        )
       else {
         continue
       }
@@ -965,6 +1089,12 @@ final class LocalSessionAppModel: ObservableObject {
       normalizedSession.status = .failed
     case .ready, .failed:
       break
+    }
+
+    if normalizedSession.documentChat.errorMessage == "Local model is unavailable." {
+      normalizedSession.documentChat.status = .idle
+      normalizedSession.documentChat.errorMessage = nil
+      normalizedSession.documentChat.updatedAt = Date()
     }
 
     return normalizedSession
@@ -1041,7 +1171,9 @@ final class LocalSessionAppModel: ObservableObject {
   }
 
   private func syncActivityFlags() {
-    isTranscribing = !activeImportSessionIDs.isEmpty || !activeTranscriptionSessionIDs.isEmpty
+    isTranscribing =
+      !activeImportSessionIDs.isEmpty || !activeTranscriptionSessionIDs.isEmpty
+      || !activeContentClassificationSessionIDs.isEmpty
     isGeneratingRecap = !activeRecapSessionIDs.isEmpty
   }
 
@@ -1070,6 +1202,169 @@ final class LocalSessionAppModel: ObservableObject {
 
     return lhs.id.uuidString < rhs.id.uuidString
   }
+}
+
+private struct LocalSessionSourceAttributor {
+  private let micWave: LocalSessionPCM16Wave
+  private let systemWave: LocalSessionPCM16Wave
+  private let dominanceRatio = 1.35
+  private let silenceFloor = 40.0
+
+  init?(micURL: URL, systemURL: URL, fileManager: FileManager) {
+    guard fileManager.fileExists(atPath: micURL.path),
+      fileManager.fileExists(atPath: systemURL.path),
+      let micWave = try? LocalSessionPCM16Wave(url: micURL),
+      let systemWave = try? LocalSessionPCM16Wave(url: systemURL)
+    else {
+      return nil
+    }
+
+    self.micWave = micWave
+    self.systemWave = systemWave
+  }
+
+  func speaker(startTime: TimeInterval, endTime: TimeInterval) -> String {
+    let resolvedEndTime = max(endTime, startTime + 0.1)
+    let micEnergy = micWave.averageAbsoluteAmplitude(startTime: startTime, endTime: resolvedEndTime)
+    let systemEnergy = systemWave.averageAbsoluteAmplitude(
+      startTime: startTime,
+      endTime: resolvedEndTime
+    )
+
+    guard max(micEnergy, systemEnergy) > silenceFloor else {
+      return "Speaker 1"
+    }
+
+    if micEnergy >= systemEnergy * dominanceRatio {
+      return "You"
+    }
+
+    if systemEnergy >= micEnergy * dominanceRatio {
+      return "Remote speaker"
+    }
+
+    return "Speaker 1"
+  }
+}
+
+private struct LocalSessionPCM16Wave {
+  private let sampleRate: Int
+  private let channelCount: Int
+  private let pcmData: Data
+
+  init(url: URL) throws {
+    let data = try Data(contentsOf: url)
+    guard data.count >= 44,
+      String(data: data.prefix(4), encoding: .ascii) == "RIFF",
+      String(data: data[8..<12], encoding: .ascii) == "WAVE"
+    else {
+      throw LocalSessionPCM16WaveError.unsupportedFormat
+    }
+
+    var offset = 12
+    var audioFormat: UInt16?
+    var channelCount: UInt16?
+    var sampleRate: UInt32?
+    var bitsPerSample: UInt16?
+    var pcmData: Data?
+
+    while offset + 8 <= data.count {
+      let chunkID = String(data: data[offset..<(offset + 4)], encoding: .ascii) ?? ""
+      let chunkSize = Int(Self.readUInt32LE(from: data, at: offset + 4))
+      let chunkStart = offset + 8
+      let chunkEnd = chunkStart + chunkSize
+
+      guard chunkEnd <= data.count else {
+        throw LocalSessionPCM16WaveError.unsupportedFormat
+      }
+
+      switch chunkID {
+      case "fmt ":
+        audioFormat = Self.readUInt16LE(from: data, at: chunkStart)
+        channelCount = Self.readUInt16LE(from: data, at: chunkStart + 2)
+        sampleRate = Self.readUInt32LE(from: data, at: chunkStart + 4)
+        bitsPerSample = Self.readUInt16LE(from: data, at: chunkStart + 14)
+      case "data":
+        pcmData = Data(data[chunkStart..<chunkEnd])
+      default:
+        break
+      }
+
+      offset = chunkEnd + (chunkSize % 2)
+    }
+
+    guard audioFormat == 1,
+      let channelCount,
+      channelCount > 0,
+      let sampleRate,
+      sampleRate > 0,
+      bitsPerSample == 16,
+      let pcmData
+    else {
+      throw LocalSessionPCM16WaveError.unsupportedFormat
+    }
+
+    self.sampleRate = Int(sampleRate)
+    self.channelCount = Int(channelCount)
+    self.pcmData = pcmData
+  }
+
+  func averageAbsoluteAmplitude(startTime: TimeInterval, endTime: TimeInterval) -> Double {
+    let bytesPerFrame = channelCount * MemoryLayout<Int16>.size
+    let frameCount = pcmData.count / bytesPerFrame
+    guard frameCount > 0 else { return 0 }
+
+    let startFrame = max(
+      0,
+      min(frameCount, Int((startTime * Double(sampleRate)).rounded(.down)))
+    )
+    let endFrame = max(
+      startFrame,
+      min(frameCount, Int((endTime * Double(sampleRate)).rounded(.up)))
+    )
+    guard endFrame > startFrame else { return 0 }
+
+    return pcmData.withUnsafeBytes { rawBuffer in
+      let bytes = rawBuffer.bindMemory(to: UInt8.self)
+      var total = 0.0
+      var count = 0
+
+      for frame in startFrame..<endFrame {
+        for channel in 0..<channelCount {
+          let sampleOffset = (frame * channelCount + channel) * MemoryLayout<Int16>.size
+          guard sampleOffset + 1 < bytes.count else { continue }
+          let rawValue = UInt16(bytes[sampleOffset]) | (UInt16(bytes[sampleOffset + 1]) << 8)
+          let sample = Int16(bitPattern: rawValue)
+          total += abs(Double(sample))
+          count += 1
+        }
+      }
+
+      guard count > 0 else { return 0 }
+      return total / Double(count)
+    }
+  }
+
+  private static func readUInt16LE(from data: Data, at offset: Int) -> UInt16 {
+    data.withUnsafeBytes { rawBuffer in
+      let bytes = rawBuffer.bindMemory(to: UInt8.self)
+      return UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+    }
+  }
+
+  private static func readUInt32LE(from data: Data, at offset: Int) -> UInt32 {
+    data.withUnsafeBytes { rawBuffer in
+      let bytes = rawBuffer.bindMemory(to: UInt8.self)
+      return UInt32(bytes[offset])
+        | (UInt32(bytes[offset + 1]) << 8)
+        | (UInt32(bytes[offset + 2]) << 16)
+        | (UInt32(bytes[offset + 3]) << 24)
+    }
+  }
+}
+
+private enum LocalSessionPCM16WaveError: Error {
+  case unsupportedFormat
 }
 
 typealias LocalMeetingAppModel = LocalSessionAppModel

@@ -4,21 +4,23 @@ import SwiftUI
 /// Shared adaptive palette for the native macOS app.
 /// Prefer system colors so the UI follows macOS contrast, vibrancy, and appearance settings.
 enum CepessaColors {
-  // MARK: - Lavender Glass Reference Palette
-  static let paper = Color(hex: 0xF7F3FF)
-  static let paperDeep = Color(hex: 0xEDE5FF)
-  static let paperRaised = Color(hex: 0xFFFDFE)
-  static let ink = Color(hex: 0x17152B)
-  static let graphite = Color(hex: 0xF0E9FF)
-  static let graphiteRaised = Color(hex: 0xF8F4FF)
-  static let graphiteLine = Color(hex: 0xD7CBF5)
-  static let copper = Color(hex: 0x7D52F4)
-  static let copperDeep = Color(hex: 0x5A33D6)
-  static let moss = Color(hex: 0x55C989)
-  static let mossDeep = Color(hex: 0x379A65)
-  static let signalRed = Color(hex: 0xFF4B55)
-  static let agedLine = Color(hex: 0xD9D0F3)
-  static let warmShadow = Color(hex: 0xA799D8)
+  // MARK: - Apple Native Neutral Palette
+  static let paper = Color(hex: 0xFFFFFF)
+  static let paperDeep = Color(hex: 0xF5F5F7)
+  static let paperRaised = Color(hex: 0xFFFFFF)
+  static let ink = Color(hex: 0x1D1D1F)
+  static let graphite = Color(hex: 0xF2F2F7)
+  static let graphiteRaised = Color(hex: 0xFAFAFC)
+  static let graphiteLine = Color(hex: 0xDADAE0)
+  static let copper = Color(hex: 0x6E6E73)
+  static let copperDeep = Color(hex: 0x3A3A3C)
+  static let moss = Color(hex: 0x34C759)
+  static let mossDeep = Color(hex: 0x248A3D)
+  static let signalRed = Color(hex: 0xFF5F57)
+  static let agedLine = Color(hex: 0xE5E5EA)
+  static let warmShadow = Color(hex: 0x1D1D1F)
+  static let ambientGlass = Color(hex: 0xF8F8FA)
+  static let parchmentTint = Color(hex: 0xFFFFFF)
 
   static let capture = copper
   static let captureDeep = copperDeep
@@ -29,31 +31,37 @@ enum CepessaColors {
 
   // MARK: - Background Colors
   static let backgroundPrimary = paper
-  static let backgroundSecondary = Color(hex: 0xF1EAFE)
+  static let backgroundSecondary = paperDeep
   static let backgroundTertiary = paperDeep
-  static let backgroundQuaternary = agedLine
+  static let backgroundQuaternary = graphiteLine
   static let backgroundRaised = paperRaised
 
   // MARK: - Border Colors
   static let border = agedLine
 
   // MARK: - Accent System
-  static let purplePrimary = processing
-  static let purpleSecondary = copper.opacity(0.78)
-  static let purpleAccent = capture
-  static let purpleLight = copper.opacity(0.18)
+  static let accentPrimary = processing
+  static let accentSecondary = copper.opacity(0.78)
+  static let accent = capture
+  static let accentLight = copper.opacity(0.18)
+
+  // Legacy API aliases. These resolve to the neutral spatial palette above.
+  static let purplePrimary = accentPrimary
+  static let purpleSecondary = accentSecondary
+  static let purpleAccent = accent
+  static let purpleLight = accentLight
 
   // MARK: - Text Colors
   static let textPrimary = ink
-  static let textSecondary = Color(hex: 0x55506D)
-  static let textTertiary = Color(hex: 0x827AA3)
-  static let textQuaternary = Color(hex: 0xA79FC6)
+  static let textSecondary = Color(hex: 0x636366)
+  static let textTertiary = Color(hex: 0x8E8E93)
+  static let textQuaternary = Color(hex: 0xC7C7CC)
 
   // MARK: - Status Colors
   static let success = ready
-  static let warning = Color(hex: 0xF2A33B)
+  static let warning = Color(hex: 0xFF9F0A)
   static let error = signalRed
-  static let info = Color(hex: 0x5C7CFA)
+  static let info = Color(hex: 0x007AFF)
   static let amber = copper
 
   // MARK: - Mac Window Button Colors
@@ -63,12 +71,12 @@ enum CepessaColors {
 
   // MARK: - Speaker Colors (for transcript bubbles)
   static let speakerColors: [Color] = [
-    Color(hex: 0x2D3748),  // Dark blue-gray
-    Color(hex: 0x1E3A5F),  // Navy
-    Color(hex: 0x2D4A3E),  // Dark teal
-    Color(hex: 0x4A3728),  // Dark brown
-    Color(hex: 0x3D2E4A),  // Dark purple
-    Color(hex: 0x4A3A2D),  // Dark amber
+    Color(hex: 0x3A3A3C),
+    Color(hex: 0x48484A),
+    Color(hex: 0x636366),
+    Color(hex: 0x6E6E73),
+    Color(hex: 0x8E8E93),
+    Color(hex: 0x007AFF),
   ]
 
   /// User bubble color: richer than the page chrome, softer than a flat primary fill.
@@ -76,13 +84,13 @@ enum CepessaColors {
 
   // MARK: - Gradients
   static let purpleGradient = LinearGradient(
-    colors: [purplePrimary, purpleAccent],
+    colors: [Color(hex: 0x8E8E93), accent],
     startPoint: .topLeading,
     endPoint: .bottomTrailing
   )
 
   static let purpleLightGradient = LinearGradient(
-    colors: [purpleSecondary, purpleLight],
+    colors: [Color(hex: 0xFFFFFF), Color(hex: 0xF2F2F7)],
     startPoint: .topLeading,
     endPoint: .bottomTrailing
   )

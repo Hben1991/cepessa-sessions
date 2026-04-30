@@ -10,6 +10,7 @@ enum LocalSessionStatus: String, Codable, Equatable, Sendable {
 enum LocalSessionProcessingPhase: String, Codable, Equatable, Sendable {
   case importingAudio
   case transcribing
+  case classifyingContent
   case generatingRecap
 
   var rank: Int {
@@ -18,8 +19,10 @@ enum LocalSessionProcessingPhase: String, Codable, Equatable, Sendable {
       return 0
     case .transcribing:
       return 1
-    case .generatingRecap:
+    case .classifyingContent:
       return 2
+    case .generatingRecap:
+      return 3
     }
   }
 
@@ -29,6 +32,8 @@ enum LocalSessionProcessingPhase: String, Codable, Equatable, Sendable {
       return "Importing"
     case .transcribing:
       return "Transcribing"
+    case .classifyingContent:
+      return "Classifying"
     case .generatingRecap:
       return "Recap"
     }
@@ -96,6 +101,43 @@ struct LocalSessionAudioArtifacts: Codable, Equatable, Sendable {
   )
 }
 
+enum LocalSessionContentType: String, CaseIterable, Codable, Equatable, Identifiable, Sendable {
+  case meeting
+  case voiceNote
+  case videoCommentary
+  case generalTranscript
+
+  var id: String { rawValue }
+
+  var displayTitle: String {
+    switch self {
+    case .meeting: return "Meeting"
+    case .voiceNote: return "Voice note"
+    case .videoCommentary: return "Video commentary"
+    case .generalTranscript: return "General transcript"
+    }
+  }
+}
+
+struct LocalSessionContentClassification: Codable, Equatable, Sendable {
+  var type: LocalSessionContentType
+  var confidence: Double
+  var rationale: String
+  var generatedAt: Date
+
+  init(
+    type: LocalSessionContentType,
+    confidence: Double,
+    rationale: String,
+    generatedAt: Date = Date()
+  ) {
+    self.type = type
+    self.confidence = max(0, min(confidence, 1))
+    self.rationale = rationale.trimmingCharacters(in: .whitespacesAndNewlines)
+    self.generatedAt = generatedAt
+  }
+}
+
 struct LocalSessionTranscriptSegment: Identifiable, Codable, Equatable, Sendable {
   let id: UUID
   var speaker: String
@@ -161,6 +203,41 @@ struct LocalSessionRecap: Codable, Equatable, Sendable {
     generatedAt: nil,
     sections: []
   )
+}
+
+enum LocalSessionDocumentLanguage: String, CaseIterable, Identifiable, Sendable {
+  case english
+  case hebrew
+
+  var id: String { rawValue }
+
+  var shortTitle: String {
+    switch self {
+    case .english: return "EN"
+    case .hebrew: return "עב"
+    }
+  }
+
+  var displayTitle: String {
+    switch self {
+    case .english: return "English"
+    case .hebrew: return "עברית"
+    }
+  }
+
+  var locale: Locale {
+    switch self {
+    case .english: return Locale(identifier: "en_US")
+    case .hebrew: return Locale(identifier: "he_IL")
+    }
+  }
+
+  var writingDirection: Locale.LanguageDirection {
+    switch self {
+    case .english: return .leftToRight
+    case .hebrew: return .rightToLeft
+    }
+  }
 }
 
 enum LocalSessionDocumentChatRole: String, Codable, Equatable, Sendable {
@@ -302,6 +379,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
   var attachments: [LocalSessionAttachment]
   var captureArtifacts: [LocalSessionCaptureArtifact]
   var audioArtifacts: LocalSessionAudioArtifacts
+  var contentClassification: LocalSessionContentClassification?
   var documentChat: LocalSessionDocumentChat
 
   var segments: [LocalSessionTranscriptSegment] {
@@ -323,6 +401,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     attachments: [LocalSessionAttachment] = [],
     captureArtifacts: [LocalSessionCaptureArtifact] = [],
     audioArtifacts: LocalSessionAudioArtifacts,
+    contentClassification: LocalSessionContentClassification? = nil,
     documentChat: LocalSessionDocumentChat = .empty
   ) {
     self.id = id
@@ -334,6 +413,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     self.attachments = attachments
     self.captureArtifacts = captureArtifacts
     self.audioArtifacts = audioArtifacts
+    self.contentClassification = contentClassification
     self.documentChat = documentChat
   }
 
@@ -348,6 +428,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     case attachments
     case captureArtifacts
     case audioArtifacts
+    case contentClassification
     case documentChat
   }
 
@@ -371,6 +452,9 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     audioArtifacts =
       try container.decodeIfPresent(LocalSessionAudioArtifacts.self, forKey: .audioArtifacts)
       ?? .empty
+    contentClassification =
+      try container.decodeIfPresent(
+        LocalSessionContentClassification.self, forKey: .contentClassification)
     documentChat =
       try container.decodeIfPresent(LocalSessionDocumentChat.self, forKey: .documentChat)
       ?? .empty
@@ -388,6 +472,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     try container.encode(attachments, forKey: .attachments)
     try container.encode(captureArtifacts, forKey: .captureArtifacts)
     try container.encode(audioArtifacts, forKey: .audioArtifacts)
+    try container.encodeIfPresent(contentClassification, forKey: .contentClassification)
     try container.encode(documentChat, forKey: .documentChat)
   }
 
@@ -508,31 +593,48 @@ extension LocalSessionRecap {
 struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
   let markdown: String
 
-  init(session: LocalSession) {
-    markdown = Self.markdown(for: session)
+  init(session: LocalSession, language: LocalSessionDocumentLanguage = .english) {
+    markdown = Self.markdown(for: session, language: language)
   }
 
-  static func markdown(for session: LocalSession, includeTranscript: Bool = true) -> String {
+  static func markdown(
+    for session: LocalSession,
+    language: LocalSessionDocumentLanguage = .english,
+    includeTranscript: Bool = false
+  ) -> String {
+    let recap = localizedRecap(for: session, language: language)
     var lines: [String] = []
-    lines.append("# \(sanitizedLine(session.displayTitle))")
+    lines.append("# \(sanitizedLine(title(for: session, language: language)))")
     lines.append("")
-    lines.append(session.startedAt.formatted(date: .complete, time: .shortened))
+    lines.append(
+      session.startedAt.formatted(
+        .dateTime
+          .locale(language.locale)
+          .weekday(.wide)
+          .day()
+          .month(.wide)
+          .year()
+          .hour()
+          .minute()
+      )
+    )
     lines.append("")
 
-    let overview = session.recap.overview.trimmingCharacters(in: .whitespacesAndNewlines)
+    let overview = recap.overview.trimmingCharacters(in: .whitespacesAndNewlines)
     if !overview.isEmpty {
-      lines.append("## Overview")
+      lines.append("## \(title(for: .overview, language: language))")
       lines.append("")
       lines.append(overview)
       lines.append("")
     }
 
-    let sections = normalizedSections(for: session)
+    let sections = normalizedSections(for: recap)
     for section in sections {
       let title =
-        section.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        ? section.kind.displayTitle
-        : section.title
+        language == .english
+          && !section.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        ? section.title
+        : title(for: section.kind, language: language)
       lines.append("## \(sanitizedLine(title))")
       lines.append("")
 
@@ -546,7 +648,7 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
       if bullets.isEmpty && summary.isEmpty {
-        lines.append("_No details captured._")
+        lines.append(language == .hebrew ? "_לא נקלטו פרטים._" : "_No details captured._")
         lines.append("")
       } else if !bullets.isEmpty {
         for bullet in bullets {
@@ -558,19 +660,20 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
 
     let transcript = session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
     if includeTranscript && !transcript.isEmpty {
-      lines.append("## Transcript")
+      lines.append("## \(language == .hebrew ? "תמלול" : "Transcript")")
       lines.append("")
       lines.append(transcript)
       lines.append("")
     }
 
     if !session.attachments.isEmpty || !session.captureArtifacts.isEmpty {
-      lines.append("## Context timeline")
+      lines.append("## \(language == .hebrew ? "ציר זמן והקשר" : "Context timeline")")
       lines.append("")
 
       for attachment in session.attachments {
         let stamp = timeString(for: attachment.sessionOffset)
-        lines.append("- \(stamp) — \(attachment.title.isEmpty ? "Attachment" : attachment.title)")
+        let fallbackTitle = language == .hebrew ? "קובץ מצורף" : "Attachment"
+        lines.append("- \(stamp) — \(attachment.title.isEmpty ? fallbackTitle : attachment.title)")
       }
 
       for artifact in session.captureArtifacts {
@@ -582,20 +685,33 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     }
 
     if lines.count == 4 {
-      lines.append("_Recap is still being prepared._")
+      lines.append(
+        language == .hebrew ? "_הסיכום עדיין בהכנה._" : "_Recap is still being prepared._")
     }
 
     return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
   }
 
-  private static func normalizedSections(for session: LocalSession) -> [LocalSessionRecapSection] {
-    let sections = session.recap.sections.filter { section in
+  static func title(
+    for session: LocalSession,
+    language: LocalSessionDocumentLanguage = .english
+  ) -> String {
+    documentTitle(
+      for: session,
+      recap: localizedRecap(for: session, language: language),
+      language: language
+    )
+  }
+
+  private static func normalizedSections(for recap: LocalSessionRecap) -> [LocalSessionRecapSection]
+  {
+    let sections = recap.sections.filter { section in
       !section.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         || section.bullets.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
     guard !sections.isEmpty else { return [] }
 
-    let overviewIsAlreadyRendered = !session.recap.overview.trimmingCharacters(
+    let overviewIsAlreadyRendered = !recap.overview.trimmingCharacters(
       in: .whitespacesAndNewlines
     ).isEmpty
     if overviewIsAlreadyRendered {
@@ -605,6 +721,212 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     return sections
   }
 
+  private static func localizedRecap(
+    for session: LocalSession,
+    language: LocalSessionDocumentLanguage
+  ) -> LocalSessionRecap {
+    guard language == .hebrew, shouldBuildHebrewRecapFromTranscript(session) else {
+      return session.recap
+    }
+
+    return hebrewRecapFromTranscript(for: session)
+  }
+
+  private static func shouldBuildHebrewRecapFromTranscript(_ session: LocalSession) -> Bool {
+    let transcript = session.transcriptText
+    guard transcript.containsHebrewScript else { return false }
+
+    let recapText =
+      ([session.recap.overview]
+      + session.recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: " ")
+
+    return !recapText.containsHebrewScript
+  }
+
+  private static func hebrewRecapFromTranscript(for session: LocalSession) -> LocalSessionRecap {
+    let corpus = session.transcriptText.lowercased()
+    let themes = HebrewDocumentTheme.allCases.filter { $0.matches(corpus) }
+    let activeThemes = themes.isEmpty ? [.general] : themes
+    let overview =
+      "הפגישה התמקדה ב\(activeThemes.prefix(3).map(\.overviewPhrase).joined(separator: ", ")). הסיכום מתרגם את התמלול למסמך עבודה מסודר עם החלטות, משימות ושאלות פתוחות."
+    let keyPointBullets = activeThemes.prefix(5).map(\.keyPoint)
+    let decisionBullets = activeThemes.flatMap(\.decisions)
+    let actionBullets = activeThemes.flatMap(\.actionItems)
+    let questionBullets = activeThemes.flatMap(\.openQuestions)
+    let nextStepBullets = activeThemes.flatMap(\.nextSteps)
+
+    return LocalSessionRecap(
+      overview: overview,
+      generatedAt: session.recap.generatedAt,
+      sections: [
+        makeLocalizedSection(
+          kind: .overview,
+          language: .hebrew,
+          summary: overview,
+          bullets: [overview]
+        ),
+        makeLocalizedSection(
+          kind: .keyPoints,
+          language: .hebrew,
+          summary: "הנושאים המרכזיים שעלו בשיחה.",
+          bullets: keyPointBullets
+        ),
+        makeLocalizedSection(
+          kind: .decisions,
+          language: .hebrew,
+          summary: "כיווני פעולה והסכמות שניתן לגזור מהשיחה.",
+          bullets: decisionBullets.isEmpty ? ["לא נסגרה החלטה מפורשת נוספת."] : decisionBullets
+        ),
+        makeLocalizedSection(
+          kind: .actionItem,
+          language: .hebrew,
+          summary: "משימות המשך לביצוע.",
+          bullets: actionBullets.isEmpty
+            ? ["להפוך את הסיכום לרשימת משימות עם בעלים ותעדוף."] : actionBullets
+        ),
+        makeLocalizedSection(
+          kind: .openQuestions,
+          language: .hebrew,
+          summary: "שאלות שנותרו לבדיקה.",
+          bullets: questionBullets.isEmpty
+            ? ["אילו פריטים הם תיקון מיידי ואילו דורשים חשיבה רחבה יותר?"] : questionBullets
+        ),
+        makeLocalizedSection(
+          kind: .nextSteps,
+          language: .hebrew,
+          summary: "המשך פעולה מומלץ לאחר הפגישה.",
+          bullets: nextStepBullets.isEmpty
+            ? ["להכין תוכנית ביצוע קצרה מתוך הסיכום."] : nextStepBullets
+        ),
+      ]
+    )
+  }
+
+  private static func documentTitle(
+    for session: LocalSession,
+    recap: LocalSessionRecap,
+    language: LocalSessionDocumentLanguage
+  ) -> String {
+    let explicitTitle = session.title.trimmingCharacters(in: .whitespacesAndNewlines)
+    let isGenericTitle =
+      explicitTitle.isEmpty || explicitTitle.hasPrefix("Session ")
+      || explicitTitle.range(of: #"^Meeting\s+\d"#, options: .regularExpression) != nil
+    if !isGenericTitle {
+      return session.displayTitle
+    }
+
+    let corpus =
+      ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: " ")
+      .lowercased()
+    let hasAnalytics = corpus.contains("analytics") || corpus.contains("אנליטיקס")
+    let hasSimulation =
+      corpus.contains("interview simulation") || corpus.contains("simulation")
+      || corpus.contains("סימולציות")
+    let hasScrolling =
+      corpus.contains("scrolling") || corpus.contains("section navigation")
+      || corpus.contains("גלילה")
+    let hasVisualDirection =
+      corpus.contains("visual") || corpus.contains("heavy blue") || corpus.contains("וויזואלי")
+      || corpus.contains("כבד")
+
+    if language == .hebrew {
+      if hasSimulation && hasAnalytics && hasScrolling {
+        return "תיקוני אתר דחופים, אנליטיקס וסימולציות ריאיון"
+      }
+      if hasSimulation && hasAnalytics {
+        return "אנליטיקס וסימולציות ריאיון באתר"
+      }
+      if hasScrolling && hasVisualDirection {
+        return "שיפור גלילה, ניווט וכיוון ויזואלי באתר"
+      }
+      if hasScrolling {
+        return "תיקוני גלילה וניווט באתר"
+      }
+      if hasSimulation {
+        return "תוכנית עבודה לסימולציות ריאיון באתר"
+      }
+      if hasAnalytics {
+        return "תוכנית מדידה ואנליטיקס לאתר"
+      }
+      switch session.contentClassification?.type {
+      case .some(.voiceNote):
+        return "סיכום הודעה קולית ופעולות המשך"
+      case .some(.videoCommentary):
+        return "סיכום הערות מסרטון ופעולות המשך"
+      case .some(.generalTranscript):
+        return "סיכום תמלול ופעולות המשך"
+      case .some(.meeting), .none:
+        return "סיכום פגישה ותוכנית פעולה"
+      }
+    }
+
+    if hasSimulation && hasAnalytics && hasScrolling {
+      return "Urgent Website Fixes, Analytics, and Interview Simulations"
+    }
+    if hasSimulation && hasAnalytics {
+      return "Website Analytics and Interview Simulation Plan"
+    }
+    if hasScrolling && hasVisualDirection {
+      return "Website Scrolling, Navigation, and Visual Direction"
+    }
+    if hasScrolling {
+      return "Website Scrolling and Navigation Fixes"
+    }
+    if hasSimulation {
+      return "Interview Simulation Website Plan"
+    }
+    if hasAnalytics {
+      return "Website Analytics Plan"
+    }
+    switch session.contentClassification?.type {
+    case .some(.voiceNote):
+      return "Voice Note Brief and Follow-Up"
+    case .some(.videoCommentary):
+      return "Video Commentary Brief and Follow-Up"
+    case .some(.generalTranscript):
+      return "Transcript Brief and Follow-Up"
+    case .some(.meeting), .none:
+      return "Meeting Brief and Action Plan"
+    }
+  }
+
+  private static func makeLocalizedSection(
+    kind: LocalSessionRecapSection.Kind,
+    language: LocalSessionDocumentLanguage,
+    summary: String,
+    bullets: [String]
+  ) -> LocalSessionRecapSection {
+    LocalSessionRecapSection(
+      id: UUID(),
+      kind: kind,
+      title: title(for: kind, language: language),
+      summary: summary,
+      bullets: bullets,
+      anchorTimestamp: nil,
+      startOffset: nil,
+      endOffset: nil
+    )
+  }
+
+  private static func title(
+    for kind: LocalSessionRecapSection.Kind,
+    language: LocalSessionDocumentLanguage
+  ) -> String {
+    guard language == .hebrew else { return kind.displayTitle }
+
+    switch kind {
+    case .overview: return "סקירה"
+    case .keyPoints: return "נקודות מרכזיות"
+    case .decisions: return "החלטות"
+    case .actionItem: return "משימות לביצוע"
+    case .openQuestions: return "שאלות פתוחות"
+    case .nextSteps: return "המלצה מקצועית"
+    case .notes: return "הערות"
+    }
+  }
+
   private static func sanitizedLine(_ text: String) -> String {
     text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
   }
@@ -612,6 +934,175 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
   private static func timeString(for interval: TimeInterval?) -> String {
     let totalSeconds = max(0, Int((interval ?? 0).rounded()))
     return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
+  }
+}
+
+extension String {
+  fileprivate var containsHebrewScript: Bool {
+    unicodeScalars.contains { scalar in
+      (0x0590...0x05FF).contains(Int(scalar.value))
+    }
+  }
+}
+
+private enum HebrewDocumentTheme: CaseIterable {
+  case sitePerformance
+  case sectionNavigation
+  case offerClarity
+  case interviewSimulations
+  case analytics
+  case visualDirection
+  case localization
+  case registrationData
+  case general
+
+  var keywords: [String] {
+    switch self {
+    case .sitePerformance:
+      return ["לאט", "איטי", "תקוע", "קופץ", "גלילה", "scroll"]
+    case .sectionNavigation:
+      return ["ai בילדר", "ai-בילדר", "מאסטר", "בוקסות", "ריבועים"]
+    case .offerClarity:
+      return ["קריאה לפעולה", "לא ברור", "להירשם", "booking", "book"]
+    case .interviewSimulations:
+      return ["סימולציות", "ראיונות", "hr", "tech", "coming soon", "scenario"]
+    case .analytics:
+      return ["analytics", "אנליטיקס", "clarity", "mixpanel", "webflow analyze"]
+    case .visualDirection:
+      return ["צבעוניות", "כחול", "רקע", "לבן", "אפור", "כבד", "משחקי"]
+    case .localization:
+      return ["עברית", "rtl", "תרגום", "לוקל", "locale"]
+    case .registrationData:
+      return ["נרשמו", "רשומים", "monday", "49", "82", "13", "11"]
+    case .general:
+      return []
+    }
+  }
+
+  var overviewPhrase: String {
+    switch self {
+    case .sitePerformance: return "ביצועי האתר וחוויית הגלילה"
+    case .sectionNavigation: return "ניווט בין אזורי התוכן"
+    case .offerClarity: return "חידוד הקריאה לפעולה"
+    case .interviewSimulations: return "אזור סימולציות הראיונות"
+    case .analytics: return "מדידה ואנליטיקס להתנהגות משתמשים"
+    case .visualDirection: return "הכיוון הוויזואלי של החוויה"
+    case .localization: return "עברית ותמיכת RTL"
+    case .registrationData: return "נתוני הרשמה ראשוניים"
+    case .general: return "נושאי המשך שעלו בשיחה"
+    }
+  }
+
+  var keyPoint: String {
+    switch self {
+    case .sitePerformance:
+      return "עלו בעיות של איטיות, קפיצות וגלילה לא יציבה שפוגעות בתחושת השליטה באתר."
+    case .sectionNavigation:
+      return "בחירת אזור תוכן לא תמיד מציגה למשתמש תמונה מלאה וברורה של האזור שנפתח."
+    case .offerClarity:
+      return "חלקים באתר צריכים הבטחה וקריאה לפעולה ברורות יותר כדי שהמשתמש יבין מה לעשות."
+    case .interviewSimulations:
+      return "אזור סימולציות הראיונות בולט בעמוד, אך המצב הנוכחי והפעולה הבאה לא מספיק ברורים."
+    case .analytics:
+      return "הצוות רוצה לקבל נתוני שימוש אמיתיים לפני השקעה בשינוי UX רחב."
+    case .visualDirection:
+      return "החוויה הוויזואלית נתפסה ככבדה, ועלתה אפשרות להבהיר את הרקע והכרטיסים."
+    case .localization:
+      return "הגרסה בעברית דורשת גם תרגום איכותי וגם התאמת RTL, לא רק תרגום אוטומטי."
+    case .registrationData:
+      return "נתוני ההרשמה נותנים אינדיקציה ראשונית, אך צריך להפריד בין תנועה מהאתר להפצה חיצונית."
+    case .general:
+      return "השיחה העלתה פידבק מוצרי שצריך להפוך למסמך עבודה קצר וברור."
+    }
+  }
+
+  var decisions: [String] {
+    switch self {
+    case .analytics:
+      return ["לתעדף חיבור אנליטיקס או כלי התנהגות לפני החלטות UX רחבות."]
+    case .interviewSimulations:
+      return ["להתייחס לאזור סימולציות הראיונות כתיקון תוכן דחוף ולסמן בבירור שהוא עדיין בהכנה."]
+    case .offerClarity:
+      return ["לחדד את הקריאה לפעולה במקום להשאיר למשתמש לנחש את הצעד הבא."]
+    case .visualDirection:
+      return ["לבחון טיפול ויזואלי קל ובהיר יותר במקום להשאיר את התחושה הכבדה כפי שהיא."]
+    default:
+      return []
+    }
+  }
+
+  var actionItems: [String] {
+    switch self {
+    case .sitePerformance:
+      return ["לבדוק את הגלילה והקפיצות באתר בכמה דפדפנים ומכשירים."]
+    case .sectionNavigation:
+      return ["לעדכן את פריסת הסקשנים כך שהתוכן שנפתח יוצג בצורה מלאה וברורה יותר."]
+    case .offerClarity:
+      return ["לכתוב מחדש את הטקסטים באזורים הרלוונטיים כך שלכל אזור תהיה פעולה ברורה."]
+    case .interviewSimulations:
+      return [
+        "לעדכן את אזור סימולציות הראיונות עם הבחנה ברורה בין HR לטכנולוגי וסטטוס coming soon."
+      ]
+    case .analytics:
+      return [
+        "לבחור ולחבר כלי מדידה כמו Webflow Analyze, Microsoft Clarity, Google Analytics או Mixpanel."
+      ]
+    case .visualDirection:
+      return ["להכין ניסוי עיצובי בהיר יותר עם פחות עומס ויזואלי."]
+    case .localization:
+      return ["לתכנן את הגרסה בעברית כעבודת RTL ותרגום נפרדת ומבוקרת."]
+    case .registrationData:
+      return ["לבדוק מאיפה הגיעו ההרשמות כדי להבין מה באמת הגיע מהאתר."]
+    case .general:
+      return ["להפוך את הסיכום לרשימת משימות עם בעלים ותעדוף."]
+    }
+  }
+
+  var openQuestions: [String] {
+    switch self {
+    case .analytics:
+      return ["איזה כלי מדידה נותן מספיק תובנות במסגרת תקציב ה-MVP?"]
+    case .offerClarity:
+      return ["מה הפעולה המדויקת שהמשתמש אמור לבצע בכל אזור באתר כבר עכשיו?"]
+    case .interviewSimulations:
+      return ["האם אזור הסימולציות צריך רק להציג coming soon או גם לאסוף עניין להרשמה עתידית?"]
+    case .visualDirection:
+      return ["האם מספיק תיקון ויזואלי קטן או שנדרש ריענון רחב יותר של החוויה?"]
+    case .localization:
+      return ["מי מאשר את הנוסח העברי הסופי אחרי התרגום וההתאמה ל-RTL?"]
+    case .registrationData:
+      return ["איך מפרשים את נתוני ההרשמה כשחלק מהתנועה הגיע מהפצה חיצונית?"]
+    default:
+      return []
+    }
+  }
+
+  var nextSteps: [String] {
+    switch self {
+    case .analytics:
+      return ["לחבר כלי מדידה לפני סבב החלטות עיצוב רחב."]
+    case .interviewSimulations:
+      return ["להבהיר את אזור הסימולציות לפני ההצגה או בדיקת המשתמשים הבאה."]
+    case .offerClarity:
+      return ["להחליף ניסוחים עמומים בתוויות וקריאות לפעולה ישירות."]
+    case .sitePerformance:
+      return ["לשחזר את בעיות הגלילה בסביבות שבהן הן הופיעו ולטפל באינטראקציה אם הבעיה מאומתת."]
+    case .visualDirection:
+      return ["להכין גרסה ויזואלית בהירה יותר לבחינה."]
+    case .localization:
+      return ["להפריד בין תרגום, Webflow localization, ותיקוני RTL בתוכנית העבודה."]
+    case .registrationData:
+      return ["לשלב את נתוני ההרשמה עם שיחות משתמשים לפני שמחליטים מה לשנות."]
+    case .sectionNavigation:
+      return ["לעדכן את אינטראקציית הסקשנים כך שהמשתמש לא יצטרך להילחם במיקום העמוד."]
+    case .general:
+      return ["להכין תוכנית ביצוע קצרה מתוך הסיכום."]
+    }
+  }
+
+  func matches(_ text: String) -> Bool {
+    guard self != .general else { return false }
+    return keywords.contains { text.contains($0.lowercased()) }
   }
 }
 

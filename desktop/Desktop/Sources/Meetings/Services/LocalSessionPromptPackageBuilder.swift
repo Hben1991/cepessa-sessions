@@ -64,6 +64,9 @@ struct LocalSessionPromptPackageBuilder {
         - Session ID: \(session.id.uuidString)
         - Started at: \(session.startedAt.formatted(date: .complete, time: .standard))
         - Status: \(session.status.rawValue)
+        - Content type: \(contentTypeLine(for: session))
+        - Classification confidence: \(classificationConfidenceLine(for: session))
+        - Classification rationale: \(classificationRationaleLine(for: session))
 
         ## Reusable AI Prompt
         Use the transcript, recap, attachments, and source audio references below as context for downstream AI work. Keep mixed Hebrew/English phrasing when it reflects the original session.
@@ -91,6 +94,7 @@ struct LocalSessionPromptPackageBuilder {
             title: session.displayTitle,
             startedAt: session.startedAt,
             status: session.status.rawValue,
+            contentClassification: session.contentClassification,
             transcriptText: session.transcriptText,
             transcriptSegments: session.transcriptSegments,
             recap: session.recap,
@@ -144,6 +148,23 @@ struct LocalSessionPromptPackageBuilder {
         }.joined(separator: "\n")
     }
 
+    private func contentTypeLine(for session: LocalSession) -> String {
+        session.contentClassification?.type.displayTitle ?? "Unclassified"
+    }
+
+    private func classificationConfidenceLine(for session: LocalSession) -> String {
+        guard let confidence = session.contentClassification?.confidence else {
+            return "Not available"
+        }
+
+        return "\(Int((confidence * 100).rounded()))%"
+    }
+
+    private func classificationRationaleLine(for session: LocalSession) -> String {
+        let rationale = session.contentClassification?.rationale.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return rationale.isEmpty ? "Not available" : rationale
+    }
+
     private func packageFile(named fileName: String?, for session: LocalSession, defaultURL: URL) -> LocalSessionPromptPackageManifest.PackageFile? {
         guard let fileName else { return nil }
         return .init(fileName: fileName, path: defaultURL.path)
@@ -180,6 +201,7 @@ private struct LocalSessionPromptPackageManifest: Codable {
     let title: String
     let startedAt: Date
     let status: String
+    let contentClassification: LocalSessionContentClassification?
     let transcriptText: String
     let transcriptSegments: [LocalSessionTranscriptSegment]
     let recap: LocalSessionRecap

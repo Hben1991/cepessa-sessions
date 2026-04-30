@@ -260,8 +260,15 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
     XCTAssertTrue(markdown.contains("# Session Markdown"))
     XCTAssertTrue(markdown.contains("## Overview"))
     XCTAssertTrue(markdown.contains("- Send the recording"))
-    XCTAssertTrue(markdown.contains("## Transcript"))
-    XCTAssertTrue(markdown.contains("Original transcript line."))
+    XCTAssertFalse(markdown.contains("## Transcript"))
+    XCTAssertFalse(markdown.contains("Original transcript line."))
+
+    let transcriptMarkdown = LocalSessionRecapMarkdownDocument.markdown(
+      for: sessionWithRecap,
+      includeTranscript: true
+    )
+    XCTAssertTrue(transcriptMarkdown.contains("## Transcript"))
+    XCTAssertTrue(transcriptMarkdown.contains("Original transcript line."))
   }
 
   func testRecapMarkdownDocumentCanOmitTranscriptForPreview() {
@@ -303,6 +310,116 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
     XCTAssertTrue(markdown.contains("Use recap-only rendering for the preview document."))
     XCTAssertFalse(markdown.contains("## Transcript"))
     XCTAssertFalse(markdown.contains("Very long transcript line"))
+  }
+
+  func testRecapMarkdownDocumentRendersHebrewVersionFromHebrewTranscript() {
+    let session = makeSession(
+      id: UUID(uuidString: "94F0CF37-1B5C-47F4-B204-8A99A7CC81C5")!,
+      startedAt: Date(timeIntervalSince1970: 2_100),
+      status: .ready,
+      title: "Hebrew Recap",
+      segments: [
+        .init(
+          id: UUID(uuidString: "97801AE7-931D-4F48-AE2E-2DB89AF80B85")!,
+          speaker: "You",
+          text: "אני רוצה לבדוק שהמסמך מסכם את הפגישה.",
+          timestamp: Date(timeIntervalSince1970: 2_120)),
+        .init(
+          id: UUID(uuidString: "43752C97-E62F-4DDE-A0D5-0552EAB91802")!,
+          speaker: "You",
+          text: "אם יש סיכום זו הצלחה.",
+          timestamp: Date(timeIntervalSince1970: 2_124)),
+      ]
+    )
+    var sessionWithEnglishRecap = session
+    sessionWithEnglishRecap.recap = LocalSessionRecap(
+      overview: "This is an English-only recap.",
+      generatedAt: Date(timeIntervalSince1970: 2_200),
+      sections: [
+        LocalSessionRecapSection(
+          id: UUID(uuidString: "B2B75EDB-F4BD-45BD-8D44-13ECA5C9A7C6")!,
+          kind: .keyPoints,
+          title: "Key points",
+          summary: "English summary.",
+          bullets: ["English bullet."],
+          anchorTimestamp: nil,
+          startOffset: nil,
+          endOffset: nil
+        )
+      ]
+    )
+
+    let hebrewMarkdown = LocalSessionRecapMarkdownDocument.markdown(
+      for: sessionWithEnglishRecap,
+      language: .hebrew,
+      includeTranscript: false
+    )
+    let englishMarkdown = LocalSessionRecapMarkdownDocument.markdown(
+      for: sessionWithEnglishRecap,
+      language: .english,
+      includeTranscript: false
+    )
+
+    XCTAssertTrue(hebrewMarkdown.contains("## סקירה"))
+    XCTAssertTrue(hebrewMarkdown.contains("## נקודות מרכזיות"))
+    XCTAssertTrue(hebrewMarkdown.contains("## המלצה מקצועית"))
+    XCTAssertTrue(hebrewMarkdown.contains("מסמך עבודה מסודר"))
+    XCTAssertFalse(hebrewMarkdown.contains("אני רוצה לבדוק שהמסמך מסכם את הפגישה."))
+    XCTAssertFalse(hebrewMarkdown.contains("This is an English-only recap."))
+    XCTAssertTrue(englishMarkdown.contains("## Overview"))
+    XCTAssertTrue(englishMarkdown.contains("This is an English-only recap."))
+  }
+
+  func testRecapMarkdownDocumentUsesTopicTitleForGenericSessionName() {
+    let session = makeSession(
+      id: UUID(uuidString: "5B1D8FEB-AE89-4F6C-9C6E-3867AE44E3D5")!,
+      startedAt: Date(timeIntervalSince1970: 2_400),
+      status: .ready,
+      title: "Session 29 Apr 2026 at 11:11",
+      segments: []
+    )
+    var sessionWithRecap = session
+    sessionWithRecap.recap = LocalSessionRecap(
+      overview:
+        "The session focused on scrolling issues, analytics, and interview simulation UX.",
+      generatedAt: Date(timeIntervalSince1970: 2_500),
+      sections: []
+    )
+
+    let markdown = LocalSessionRecapMarkdownDocument.markdown(
+      for: sessionWithRecap,
+      language: .english,
+      includeTranscript: false
+    )
+
+    XCTAssertTrue(
+      markdown.hasPrefix("# Urgent Website Fixes, Analytics, and Interview Simulations"))
+    XCTAssertFalse(markdown.hasPrefix("# Session 29 Apr 2026 at 11:11"))
+  }
+
+  func testRecapMarkdownDocumentUsesSpecificHebrewTopicTitleForGenericSessionName() {
+    let session = makeSession(
+      id: UUID(uuidString: "6336F7D9-88A1-48A6-8C7A-ED90FD00FD78")!,
+      startedAt: Date(timeIntervalSince1970: 2_600),
+      status: .ready,
+      title: "Session 29 Apr 2026 at 11:11",
+      segments: []
+    )
+    var sessionWithRecap = session
+    sessionWithRecap.recap = LocalSessionRecap(
+      overview: "הפגישה עסקה בגלילה באתר, אנליטיקס וסימולציות ריאיון.",
+      generatedAt: Date(timeIntervalSince1970: 2_700),
+      sections: []
+    )
+
+    let markdown = LocalSessionRecapMarkdownDocument.markdown(
+      for: sessionWithRecap,
+      language: .hebrew,
+      includeTranscript: false
+    )
+
+    XCTAssertTrue(markdown.hasPrefix("# תיקוני אתר דחופים, אנליטיקס וסימולציות ריאיון"))
+    XCTAssertFalse(markdown.hasPrefix("# Session 29 Apr 2026 at 11:11"))
   }
 
   func testExistingAudioURLFallsBackToLegacyMixedTrack() throws {
@@ -359,7 +476,7 @@ final class LocalMeetingSessionStoreTests: XCTestCase {
     let layout = LocalMeetingFileLayout(
       baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
-    let olderSession = makeSession(
+    var olderSession = makeSession(
       id: UUID(uuidString: "1BDE4D8A-7C44-4C1F-9F73-45A2D6D75D47")!,
       startedAt: Date(timeIntervalSince1970: 100),
       status: .recording,
@@ -374,6 +491,12 @@ final class LocalMeetingSessionStoreTests: XCTestCase {
       ],
       audioArtifacts: .init(
         micFileName: "mic.wav", systemFileName: "system.wav", mixedFileName: "mixed.wav")
+    )
+    olderSession.contentClassification = LocalSessionContentClassification(
+      type: .voiceNote,
+      confidence: 0.84,
+      rationale: "Single-speaker dictated update.",
+      generatedAt: Date(timeIntervalSince1970: 125)
     )
     let newerSession = makeSession(
       id: UUID(uuidString: "B5482A63-B5A6-4F64-8A3B-3BC0F4E0AC48")!,
@@ -400,8 +523,26 @@ final class LocalMeetingSessionStoreTests: XCTestCase {
     XCTAssertEqual(sessions.first?.status, .transcribing)
     XCTAssertEqual(sessions.last?.transcriptText, "First line\nSecond line")
     XCTAssertEqual(sessions.last?.audioArtifacts.mixedFileName, "mixed.wav")
+    XCTAssertEqual(sessions.last?.contentClassification?.type, .voiceNote)
     XCTAssertTrue(fileManager.fileExists(atPath: layout.metadataURL(for: olderSession.id).path))
     XCTAssertTrue(fileManager.fileExists(atPath: layout.metadataURL(for: newerSession.id).path))
+
+    let promptPackageMarkdown = try String(
+      contentsOf: layout.promptPackageMarkdownURL(for: olderSession.id),
+      encoding: .utf8
+    )
+    XCTAssertTrue(promptPackageMarkdown.contains("- Content type: Voice note"))
+    XCTAssertTrue(
+      promptPackageMarkdown.contains("- Classification rationale: Single-speaker dictated update."))
+
+    let promptPackageData = try Data(contentsOf: layout.promptPackageJSONURL(for: olderSession.id))
+    let promptPackageObject = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: promptPackageData) as? [String: Any]
+    )
+    let classificationObject = try XCTUnwrap(
+      promptPackageObject["contentClassification"] as? [String: Any]
+    )
+    XCTAssertEqual(classificationObject["type"] as? String, "voiceNote")
   }
 
   func testLoadSessionsSkipsDirectoriesWithoutMetadata() throws {
@@ -838,14 +979,19 @@ final class LocalMeetingAppModelTests: XCTestCase {
       fileLayout: layout,
       transcriptionService: transcriptionService,
       recapGenerator: recapGenerator,
+      contentClassifier: ImmediateContentClassifier(type: .meeting),
       audioImportService: importService
     )
 
     await model.importExistingRecording(from: sourceURL, title: "Imported sync")
 
+    await waitUntil("import reaches recap generation") {
+      model.isGeneratingRecap
+    }
+
     XCTAssertFalse(model.isTranscribing)
     XCTAssertTrue(model.isGeneratingRecap)
-    XCTAssertEqual(model.processingStatusTitle, "Generating recap")
+    XCTAssertEqual(model.processingStatusTitle, "Generating meeting brief")
     XCTAssertEqual(model.selectedSession?.title, "Imported sync")
     XCTAssertEqual(model.selectedSession?.status, .ready)
     XCTAssertEqual(model.selectedSession?.transcriptText, "Imported transcript")
@@ -858,7 +1004,9 @@ final class LocalMeetingAppModelTests: XCTestCase {
         ?? false
     )
     XCTAssertTrue(
-      model.processingQueue.first?.logEntries.contains(where: { $0.message.contains("Imported.m4a") })
+      model.processingQueue.first?.logEntries.contains(where: {
+        $0.message.contains("Imported.m4a")
+      })
         ?? false
     )
     XCTAssertEqual(model.selectedSession?.audioArtifacts.mixedFileName, "mixed.wav")
@@ -915,6 +1063,7 @@ final class LocalMeetingAppModelTests: XCTestCase {
       fileLayout: layout,
       transcriptionService: transcriptionService,
       recapGenerator: recapGenerator,
+      contentClassifier: ImmediateContentClassifier(type: .generalTranscript),
       audioImportService: importService
     )
 
@@ -950,11 +1099,17 @@ final class LocalMeetingAppModelTests: XCTestCase {
       fileLayout: layout,
       transcriptionService: transcriptionService,
       recapGenerator: recapGenerator,
+      contentClassifier: ImmediateContentClassifier(type: .meeting),
       audioImportService: importService
     )
 
     await model.importExistingRecording(from: sourceOne, title: "Imported one")
     await model.importExistingRecording(from: sourceTwo, title: "Imported two")
+
+    await waitUntil("concurrent imports reach recap generation") {
+      model.processingQueue.count == 2
+        && Set(model.processingQueue.map(\.phase)) == [.generatingRecap]
+    }
 
     XCTAssertEqual(model.processingQueue.count, 2)
     XCTAssertEqual(Set(model.processingQueue.map(\.phase)), [.generatingRecap])
@@ -962,6 +1117,78 @@ final class LocalMeetingAppModelTests: XCTestCase {
 
     recapGenerator.finishNext(with: .empty)
     recapGenerator.finishNext(with: .empty)
+  }
+
+  func testImportClassifiesTranscriptBeforeGeneratingRecap() async throws {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let sourceURL = tempRootURL.appendingPathComponent("Voice-Note.m4a", isDirectory: false)
+    try Data("original-audio".utf8).write(to: sourceURL)
+    let startedAt = Date(timeIntervalSince1970: 6_500)
+    let transcriptionService = StubLocalSessionTranscriptionService(
+      result: LocalSessionTranscriptionResult(
+        text: "Tell Dana that the export is ready and I will review it tomorrow.",
+        detectedLanguage: "en",
+        segments: [
+          .init(
+            startTime: 0,
+            endTime: 5,
+            text: "Tell Dana that the export is ready and I will review it tomorrow."
+          )
+        ],
+        modelPath: "/tmp/model.bin"
+      )
+    )
+    let contentClassifier = BlockingContentClassifier(
+      classification: LocalSessionContentClassification(
+        type: .voiceNote,
+        confidence: 0.89,
+        rationale: "Single-speaker dictated message.",
+        generatedAt: startedAt
+      )
+    )
+    let recapGenerator = BlockingRecapGenerator()
+    let importService = StubLocalSessionAudioImportService()
+    let model = LocalMeetingAppModel(
+      store: store,
+      fileLayout: layout,
+      transcriptionService: transcriptionService,
+      recapGenerator: recapGenerator,
+      contentClassifier: contentClassifier,
+      audioImportService: importService
+    )
+
+    await model.importExistingRecording(from: sourceURL, title: "Voice note")
+
+    await waitUntil("content classification is active") {
+      model.processingQueue.first?.phase == .classifyingContent
+    }
+
+    XCTAssertEqual(
+      model.selectedSession?.transcriptText,
+      "Tell Dana that the export is ready and I will review it tomorrow.")
+
+    await waitUntil("classifier receives transcript-ready session") {
+      contentClassifier.receivedSessions.first?.title == "Voice note"
+    }
+
+    contentClassifier.finish()
+
+    await waitUntil("recap generation starts after classification") {
+      guard let selectedSessionID = model.selectedSessionID else { return false }
+      return model.isGeneratingRecap(for: selectedSessionID)
+    }
+
+    XCTAssertEqual(model.selectedSession?.contentClassification?.type, .voiceNote)
+
+    await waitUntil("recap generator receives classified session") {
+      recapGenerator.receivedSessions.first?.contentClassification?.type == .voiceNote
+    }
+
+    XCTAssertEqual(recapGenerator.receivedSessions.first?.contentClassification?.type, .voiceNote)
+
+    recapGenerator.finish(with: .empty)
   }
 
   func testRetranscribeExistingSessionUsesSavedMixedAudio() async throws {
@@ -1005,7 +1232,8 @@ final class LocalMeetingAppModelTests: XCTestCase {
       store: store,
       fileLayout: layout,
       transcriptionService: transcriptionService,
-      recapGenerator: recapGenerator
+      recapGenerator: recapGenerator,
+      contentClassifier: ImmediateContentClassifier(type: .meeting)
     )
 
     model.retranscribeSession(id: sessionID)
@@ -1022,6 +1250,68 @@ final class LocalMeetingAppModelTests: XCTestCase {
     XCTAssertEqual(transcriptionService.receivedAudioURLs, [layout.mixedAudioURL(for: sessionID)])
 
     recapGenerator.finish(with: .empty)
+  }
+
+  func testRetranscriptionLabelsSegmentsFromMicAndSystemEnergy() async throws {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let sessionID = UUID(uuidString: "D4D4363B-7693-4EAA-A9F4-CB82636FD1B7")!
+    let originalSession = makeSession(
+      id: sessionID,
+      startedAt: Date(timeIntervalSince1970: 4_200),
+      status: .failed,
+      title: "Speaker recovery",
+      audioArtifacts: .init(
+        micFileName: "mic.wav",
+        systemFileName: "system.wav",
+        mixedFileName: "mixed.wav"
+      )
+    )
+    try store.save(originalSession)
+    try fileManager.createDirectory(
+      at: layout.sessionDirectory(for: sessionID),
+      withIntermediateDirectories: true
+    )
+    try writeMonoPCM16Wav(
+      to: layout.micAudioURL(for: sessionID),
+      samples: makeDominantSourceSamples(firstSecondAmplitude: 12_000, secondSecondAmplitude: 120)
+    )
+    try writeMonoPCM16Wav(
+      to: layout.systemAudioURL(for: sessionID),
+      samples: makeDominantSourceSamples(firstSecondAmplitude: 120, secondSecondAmplitude: 12_000)
+    )
+    try writeMonoPCM16Wav(
+      to: layout.mixedAudioURL(for: sessionID),
+      samples: makeDominantSourceSamples(firstSecondAmplitude: 8_000, secondSecondAmplitude: 8_000)
+    )
+
+    let transcriptionService = StubLocalSessionTranscriptionService(
+      result: LocalSessionTranscriptionResult(
+        text: "Local speaker. Remote speaker.",
+        detectedLanguage: "en",
+        segments: [
+          .init(startTime: 0.1, endTime: 0.8, text: "Local speaker."),
+          .init(startTime: 1.1, endTime: 1.8, text: "Remote speaker."),
+        ],
+        modelPath: "/tmp/model.bin"
+      )
+    )
+    let model = LocalMeetingAppModel(
+      store: store,
+      fileLayout: layout,
+      transcriptionService: transcriptionService,
+      recapGenerator: ImmediateRecapGenerator()
+    )
+
+    model.retranscribeSession(id: sessionID)
+
+    await waitUntil("source-aware speakers are applied") {
+      model.selectedSession?.transcriptSegments.count == 2
+    }
+
+    XCTAssertEqual(
+      model.selectedSession?.transcriptSegments.map(\.speaker), ["You", "Remote speaker"])
   }
 
   func testDocumentChatProposalDecodesStrictJSONAndFallsBackForInvalidJSON() throws {
@@ -1044,6 +1334,8 @@ final class LocalMeetingAppModelTests: XCTestCase {
         ],
         "warnings": ["Check the correction against audio."]
       }
+      Human: retry this
+      {"assistantMessage":"Wrong trailing object","recapPatch":null,"transcriptPatches":[],"speakerRenames":[],"warnings":[]}
       """
 
     let proposal = LocalSessionDocumentChatClient.decodeProposal(from: raw)
@@ -1057,15 +1349,64 @@ final class LocalMeetingAppModelTests: XCTestCase {
 
     let fallback = LocalSessionDocumentChatClient.decodeProposal(from: "not json")
 
-    XCTAssertEqual(fallback.assistantMessage, "not json")
+    XCTAssertEqual(
+      fallback.assistantMessage, "I could not produce a clean document edit from the local model.")
     XCTAssertFalse(fallback.hasEdits)
     XCTAssertEqual(
       fallback.warnings,
-      ["The local model returned invalid JSON, so no editable changes are pending."]
+      ["The local model returned an invalid edit shape, so nothing was applied."]
     )
   }
 
-  func testDocumentChatApplyPersistsRecapTranscriptAndSpeakerEdits() async throws {
+  func testDocumentChatProposalDoesNotExposeContractLeaksAsAssistantText() throws {
+    let raw = """
+      Only the final answer. Use empty arrays and null recapPatch only for pure question-answer requests.
+      {
+        "assistantMessage": "Return only valid JSON matching the contract.",
+        "recapPatch": {
+          "overview": "Useful overview.",
+          "sections": [
+            {"kind":"keyPoints|decisions|actionItem|openQuestions|nextSteps|notes|overview","title":"Summary","summary":"Bad schema echo.","bullets":["Bad schema echo."]}
+          ]
+        },
+        "transcriptPatches": [],
+        "speakerRenames": [],
+        "warnings": []
+      }
+      """
+
+    let proposal = LocalSessionDocumentChatClient.decodeProposal(from: raw)
+
+    XCTAssertEqual(proposal.assistantMessage, "")
+    XCTAssertEqual(proposal.recapPatch?.overview, "Useful overview.")
+    XCTAssertTrue(proposal.recapPatch?.sections.isEmpty == true)
+  }
+
+  func testDocumentChatProposalDropsPlaceholderRecapEdits() throws {
+    let raw = """
+      {
+        "assistantMessage": "...",
+        "recapPatch": {
+          "overview": "...",
+          "sections": [
+            {"kind":"actionItem","title":"...","summary":"...","bullets":["..."]}
+          ]
+        },
+        "transcriptPatches": [],
+        "speakerRenames": [],
+        "warnings": ["..."]
+      }
+      """
+
+    let proposal = LocalSessionDocumentChatClient.decodeProposal(from: raw)
+
+    XCTAssertEqual(proposal.assistantMessage, "")
+    XCTAssertNil(proposal.recapPatch)
+    XCTAssertFalse(proposal.hasEdits)
+    XCTAssertTrue(proposal.warnings.isEmpty)
+  }
+
+  func testDocumentChatAutoAppliesRecapTranscriptAndSpeakerEdits() async throws {
     let layout = LocalMeetingFileLayout(
       baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
@@ -1101,7 +1442,7 @@ final class LocalMeetingAppModelTests: XCTestCase {
             kind: .keyPoints,
             title: "Key points",
             summary: "Updated summary.",
-            bullets: ["Launch gate is ready."]
+            bullets: ["Launch gate correction is reflected in the brief."]
           )
         ]
       ),
@@ -1122,23 +1463,28 @@ final class LocalMeetingAppModelTests: XCTestCase {
 
     model.sendDocumentChatMessage("Fix launch gate", for: sessionID)
 
-    await waitUntil("document chat proposal is stored") {
-      model.selectedSession?.documentChat.pendingProposal != nil
+    await waitUntil("document chat edits are applied") {
+      model.selectedSession?.recap.overview == "New overview."
     }
 
-    model.applyPendingDocumentChatProposal(for: sessionID)
-
     XCTAssertEqual(model.selectedSession?.recap.overview, "New overview.")
-    XCTAssertEqual(model.selectedSession?.recap.section(kind: .keyPoints)?.summary, "Updated summary.")
+    XCTAssertEqual(
+      model.selectedSession?.recap.section(kind: .keyPoints)?.summary, "Updated summary.")
     XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.text, "Launch gate is ready.")
     XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Ben")
     XCTAssertNil(model.selectedSession?.documentChat.pendingProposal)
+    XCTAssertEqual(model.selectedSession?.documentChat.messages.last?.text, "Prepared edits.")
 
     let reloaded = try XCTUnwrap(store.loadSessions().first)
     XCTAssertEqual(reloaded.recap.overview, "New overview.")
     XCTAssertEqual(reloaded.transcriptSegments.first?.speaker, "Ben")
+    XCTAssertFalse(
+      LocalSessionRecapMarkdownDocument(session: reloaded).markdown.contains(
+        "Launch gate is ready.")
+    )
     XCTAssertTrue(
-      LocalSessionRecapMarkdownDocument(session: reloaded).markdown.contains("Launch gate is ready.")
+      LocalSessionRecapMarkdownDocument.markdown(for: reloaded, includeTranscript: true).contains(
+        "Launch gate is ready.")
     )
   }
 
@@ -1174,11 +1520,48 @@ final class LocalMeetingAppModelTests: XCTestCase {
 
     let reloadedModel = LocalMeetingAppModel(store: store, fileLayout: layout)
 
-    XCTAssertEqual(reloadedModel.selectedSession?.documentChat.messages.map(\.role), [.user, .assistant])
-    XCTAssertEqual(reloadedModel.selectedSession?.documentChat.messages.last?.text, "No edit needed.")
+    XCTAssertEqual(
+      reloadedModel.selectedSession?.documentChat.messages.map(\.role), [.user, .assistant])
+    XCTAssertEqual(
+      reloadedModel.selectedSession?.documentChat.messages.last?.text, "No edit needed.")
   }
 
-  func testDocumentChatDiscardAndOfflineErrorStates() async throws {
+  func testStoredDocumentChatClearsStaleLocalModelUnavailableError() throws {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let sessionID = UUID(uuidString: "54D6E78C-B469-4A87-8769-BF9372D120E2")!
+    var session = makeSession(
+      id: sessionID,
+      startedAt: Date(timeIntervalSince1970: 6_500),
+      status: .ready,
+      title: "Stale chat state"
+    )
+    session.documentChat = LocalSessionDocumentChat(
+      messages: [
+        .init(
+          id: UUID(uuidString: "B1976B5B-10E7-40F8-8B49-A9B2B9577B5B")!,
+          role: .assistant,
+          text: "I could not produce a clean document edit from the local model.",
+          createdAt: Date(timeIntervalSince1970: 6_510)
+        )
+      ],
+      pendingProposal: nil,
+      status: .failed,
+      errorMessage: "Local model is unavailable.",
+      createdAt: Date(timeIntervalSince1970: 6_505),
+      updatedAt: Date(timeIntervalSince1970: 6_515)
+    )
+    try store.save(session)
+
+    let model = LocalMeetingAppModel(store: store, fileLayout: layout)
+
+    XCTAssertEqual(model.selectedSession?.documentChat.status, .idle)
+    XCTAssertNil(model.selectedSession?.documentChat.errorMessage)
+    XCTAssertEqual(model.selectedSession?.documentChat.messages.count, 1)
+  }
+
+  func testDocumentChatAutoApplyAndOfflineErrorStates() async throws {
     let layout = LocalMeetingFileLayout(
       baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
@@ -1205,11 +1588,11 @@ final class LocalMeetingAppModelTests: XCTestCase {
     )
 
     model.sendDocumentChatMessage("Draft", for: sessionID)
-    await waitUntil("pending proposal exists") {
-      model.selectedSession?.documentChat.pendingProposal != nil
+    await waitUntil("proposal applies directly to document") {
+      model.selectedSession?.recap.overview == "Draft."
     }
-    model.discardPendingDocumentChatProposal(for: sessionID)
     XCTAssertNil(model.selectedSession?.documentChat.pendingProposal)
+    XCTAssertEqual(model.selectedSession?.recap.overview, "Draft.")
 
     let failingModel = LocalMeetingAppModel(
       store: store,
@@ -1223,6 +1606,75 @@ final class LocalMeetingAppModelTests: XCTestCase {
     }
 
     XCTAssertNotNil(failingModel.selectedSession?.documentChat.errorMessage)
+  }
+
+  func testRegenerateRecapRewritesBriefFromExistingTranscript() async throws {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let sessionID = UUID(uuidString: "3B9308EB-C297-4B37-809B-F6E9068F3EC9")!
+    var session = makeSession(
+      id: sessionID,
+      startedAt: Date(timeIntervalSince1970: 8_000),
+      status: .ready,
+      title: "Rewrite recap",
+      segments: [
+        .init(
+          id: UUID(uuidString: "7F32663B-AC38-4533-B756-7D26905B49C9")!,
+          speaker: "You",
+          text: "Regenerate the brief from this transcript.",
+          timestamp: Date(timeIntervalSince1970: 8_020)
+        )
+      ]
+    )
+    session.recap = LocalSessionRecap(
+      overview: "Old brief.",
+      generatedAt: Date(timeIntervalSince1970: 8_030),
+      sections: []
+    )
+    try store.save(session)
+
+    let recapGenerator = BlockingRecapGenerator()
+    let model = LocalMeetingAppModel(
+      store: store,
+      fileLayout: layout,
+      recapGenerator: recapGenerator,
+      contentClassifier: ImmediateContentClassifier(type: .generalTranscript)
+    )
+    model.selectSession(id: sessionID)
+
+    model.regenerateRecap(for: sessionID)
+
+    await waitUntil("recap regeneration starts") {
+      model.isGeneratingRecap(for: sessionID)
+    }
+
+    recapGenerator.finish(
+      with: LocalSessionRecap(
+        overview: "Fresh brief.",
+        generatedAt: Date(timeIntervalSince1970: 8_040),
+        sections: [
+          LocalSessionRecapSection(
+            id: UUID(uuidString: "AB00E760-D42D-43DC-B429-81E2CC551156")!,
+            kind: .keyPoints,
+            title: "Key points",
+            summary: "New summary.",
+            bullets: ["New bullet."],
+            anchorTimestamp: nil,
+            startOffset: nil,
+            endOffset: nil
+          )
+        ]
+      )
+    )
+
+    await waitUntil("recap regeneration finishes") {
+      model.selectedSession?.recap.overview == "Fresh brief."
+    }
+
+    XCTAssertFalse(model.isGeneratingRecap(for: sessionID))
+    XCTAssertEqual(model.selectedSession?.recap.section(kind: .keyPoints)?.summary, "New summary.")
+    XCTAssertEqual(store.loadSessions().first?.recap.overview, "Fresh brief.")
   }
 }
 
@@ -1260,8 +1712,11 @@ private final class StubLocalSessionTranscriptionService: @unchecked Sendable,
 private final class BlockingRecapGenerator: @unchecked Sendable, LocalSessionRecapGenerating {
   private var continuation: CheckedContinuation<LocalSessionRecap, Never>?
   private var pendingRecap: LocalSessionRecap?
+  private(set) var receivedSessions: [LocalSession] = []
 
   func generateRecap(for session: LocalSession) async -> LocalSessionRecap {
+    receivedSessions.append(session)
+
     if let pendingRecap {
       self.pendingRecap = nil
       return pendingRecap
@@ -1279,6 +1734,51 @@ private final class BlockingRecapGenerator: @unchecked Sendable, LocalSessionRec
     } else {
       pendingRecap = recap
     }
+  }
+}
+
+@MainActor
+private final class BlockingContentClassifier: @unchecked Sendable, LocalSessionContentClassifying {
+  private let classification: LocalSessionContentClassification
+  private var continuation: CheckedContinuation<LocalSessionContentClassification, Never>?
+  private var shouldFinishImmediately = false
+  private(set) var receivedSessions: [LocalSession] = []
+
+  init(classification: LocalSessionContentClassification) {
+    self.classification = classification
+  }
+
+  func classifyContent(for session: LocalSession) async -> LocalSessionContentClassification {
+    receivedSessions.append(session)
+
+    if shouldFinishImmediately {
+      return classification
+    }
+
+    return await withCheckedContinuation { continuation in
+      self.continuation = continuation
+    }
+  }
+
+  func finish() {
+    if let continuation {
+      self.continuation = nil
+      continuation.resume(returning: classification)
+    } else {
+      shouldFinishImmediately = true
+    }
+  }
+}
+
+private struct ImmediateContentClassifier: LocalSessionContentClassifying {
+  var type: LocalSessionContentType
+
+  func classifyContent(for session: LocalSession) async -> LocalSessionContentClassification {
+    LocalSessionContentClassification(
+      type: type,
+      confidence: 0.8,
+      rationale: "Test classification."
+    )
   }
 }
 
@@ -1375,4 +1875,54 @@ private func makeSession(
     transcriptSegments: segments,
     audioArtifacts: audioArtifacts
   )
+}
+
+private func makeDominantSourceSamples(
+  firstSecondAmplitude: Int16,
+  secondSecondAmplitude: Int16,
+  sampleRate: Int = 16_000
+) -> [Int16] {
+  let first = Array(repeating: firstSecondAmplitude, count: sampleRate)
+  let second = Array(repeating: secondSecondAmplitude, count: sampleRate)
+  return first + second
+}
+
+private func writeMonoPCM16Wav(to url: URL, samples: [Int16], sampleRate: Int = 16_000) throws {
+  var data = Data()
+  let byteRate = sampleRate * 2
+  let blockAlign: UInt16 = 2
+  let dataByteCount = samples.count * 2
+  appendASCII("RIFF", to: &data)
+  appendUInt32LE(UInt32(36 + dataByteCount), to: &data)
+  appendASCII("WAVE", to: &data)
+  appendASCII("fmt ", to: &data)
+  appendUInt32LE(16, to: &data)
+  appendUInt16LE(1, to: &data)
+  appendUInt16LE(1, to: &data)
+  appendUInt32LE(UInt32(sampleRate), to: &data)
+  appendUInt32LE(UInt32(byteRate), to: &data)
+  appendUInt16LE(blockAlign, to: &data)
+  appendUInt16LE(16, to: &data)
+  appendASCII("data", to: &data)
+  appendUInt32LE(UInt32(dataByteCount), to: &data)
+  for sample in samples {
+    appendUInt16LE(UInt16(bitPattern: sample), to: &data)
+  }
+  try data.write(to: url)
+}
+
+private func appendASCII(_ string: String, to data: inout Data) {
+  data.append(contentsOf: string.utf8)
+}
+
+private func appendUInt16LE(_ value: UInt16, to data: inout Data) {
+  data.append(UInt8(value & 0x00FF))
+  data.append(UInt8((value & 0xFF00) >> 8))
+}
+
+private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
+  data.append(UInt8(value & 0x0000_00FF))
+  data.append(UInt8((value & 0x0000_FF00) >> 8))
+  data.append(UInt8((value & 0x00FF_0000) >> 16))
+  data.append(UInt8((value & 0xFF00_0000) >> 24))
 }

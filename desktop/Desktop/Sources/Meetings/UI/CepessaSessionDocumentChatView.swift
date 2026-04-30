@@ -4,12 +4,25 @@ struct CepessaSessionDocumentChatView: View {
   @ObservedObject var model: LocalMeetingAppModel
   let session: LocalMeetingSession?
   @Binding var draftText: String
+  let onClose: (() -> Void)?
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @FocusState private var isComposerFocused: Bool
 
+  init(
+    model: LocalMeetingAppModel,
+    session: LocalMeetingSession?,
+    draftText: Binding<String>,
+    onClose: (() -> Void)? = nil
+  ) {
+    self.model = model
+    self.session = session
+    self._draftText = draftText
+    self.onClose = onClose
+  }
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 14) {
+    VStack(alignment: .leading, spacing: 10) {
       chatHeader
 
       if let session {
@@ -29,51 +42,129 @@ struct CepessaSessionDocumentChatView: View {
         emptySelectionState
       }
     }
-    .padding(18)
-    .cepessaPaper(radius: 18)
+    .padding(12)
+    .background {
+      strongChatGlassPanel
+    }
+    .overlay {
+      RoundedRectangle(cornerRadius: 18, style: .continuous)
+        .stroke(Color.white.opacity(0.92), lineWidth: 1)
+    }
+    .overlay {
+      RoundedRectangle(cornerRadius: 18, style: .continuous)
+        .stroke(CepessaColors.capture.opacity(0.16), lineWidth: 1)
+        .padding(1)
+    }
+    .shadow(color: .white.opacity(0.72), radius: 1, x: 0, y: -1)
+    .shadow(color: CepessaColors.warmShadow.opacity(0.12), radius: 18, x: 0, y: 10)
+    .shadow(color: .black.opacity(0.06), radius: 8, x: 0, y: 3)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: session?.documentChat.status)
     .animation(
       reduceMotion ? nil : .easeOut(duration: 0.18),
       value: session?.documentChat.pendingProposal)
   }
 
+  @ViewBuilder
+  private var strongChatGlassPanel: some View {
+    if #available(macOS 26.0, *) {
+      RoundedRectangle(cornerRadius: 18, style: .continuous)
+        .fill(Color.white.opacity(0.74))
+        .glassEffect(
+          .regular.tint(CepessaColors.capture.opacity(0.18)),
+          in: .rect(cornerRadius: 18)
+        )
+        .overlay(
+          RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(
+              LinearGradient(
+                colors: [
+                  Color.white.opacity(0.78),
+                  CepessaColors.paperRaised.opacity(0.62),
+                  CepessaColors.capture.opacity(0.10),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+              )
+            )
+        )
+    } else {
+      RoundedRectangle(cornerRadius: 18, style: .continuous)
+        .fill(.regularMaterial)
+        .overlay(
+          RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(
+              LinearGradient(
+                colors: [
+                  Color.white.opacity(0.92),
+                  CepessaColors.paperRaised.opacity(0.82),
+                  CepessaColors.capture.opacity(0.08),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+              )
+            )
+        )
+    }
+  }
+
   private var chatHeader: some View {
-    HStack(alignment: .top, spacing: 12) {
+    HStack(alignment: .center, spacing: 9) {
       ZStack {
         Circle()
           .stroke(CepessaColors.capture.opacity(0.58), lineWidth: 1)
-          .frame(width: 36, height: 36)
+          .frame(width: 24, height: 24)
 
         Image(systemName: "bubble.left.and.text.bubble.right.fill")
-          .scaledFont(size: 14, weight: .semibold)
+          .scaledFont(size: 11, weight: .semibold)
           .foregroundColor(CepessaColors.capture)
       }
 
-      VStack(alignment: .leading, spacing: 4) {
+      VStack(alignment: .leading, spacing: 2) {
         Text("Ask this session")
-          .scaledFont(size: 23, weight: .regular, design: .serif)
+          .scaledFont(size: 16, weight: .semibold, design: .rounded)
           .foregroundColor(CepessaColors.textPrimary)
 
         Text(headerSubtitle)
-          .scaledFont(size: 12)
+          .scaledFont(size: 11)
           .foregroundColor(CepessaColors.textSecondary)
+          .lineLimit(1)
           .fixedSize(horizontal: false, vertical: true)
       }
 
       Spacer(minLength: 0)
 
-      if let session {
-        chatStatusBadge(for: session.documentChat.status)
+      HStack(spacing: 8) {
+        if let session {
+          chatStatusBadge(for: session.documentChat.status)
+        }
+
+        if let onClose {
+          Button(action: onClose) {
+            Image(systemName: "xmark")
+              .scaledFont(size: 11, weight: .semibold)
+              .foregroundColor(CepessaColors.textSecondary)
+              .frame(width: 28, height: 28)
+              .background(CepessaColors.backgroundRaised.opacity(0.82))
+              .clipShape(Circle())
+              .overlay(
+                Circle()
+                  .stroke(CepessaColors.border.opacity(0.16), lineWidth: 1)
+              )
+          }
+          .buttonStyle(CepessaPressStyle(scale: 0.94, pressedBrightness: -0.02))
+          .help("Close chat")
+          .accessibilityLabel("Close chat")
+        }
       }
     }
   }
 
   private var headerSubtitle: String {
     if session == nil {
-      return "Choose a session to ask about its transcript, recap, speakers, and retained files."
+      return "Choose a session to ask about its document."
     }
 
-    return "Ask for answers, cleanup, rewrites, and edits grounded in the selected session."
+    return "Answers and edits grounded in this session."
   }
 
   private func chatMetrics(for session: LocalMeetingSession) -> some View {
@@ -91,7 +182,7 @@ struct CepessaSessionDocumentChatView: View {
 
   @ViewBuilder
   private func messageSurface(for session: LocalMeetingSession) -> some View {
-    let messages = Array(session.documentChat.messages.suffix(20))
+    let messages = Array(session.documentChat.messages.suffix(10))
 
     if messages.isEmpty {
       promptSuggestions(for: session)
@@ -115,9 +206,22 @@ struct CepessaSessionDocumentChatView: View {
         }
         .padding(12)
       }
-      .frame(minHeight: 240, maxHeight: 420)
-      .background(CepessaColors.paperRaised.opacity(0.38))
+      .frame(minHeight: 118, maxHeight: 260)
+      .background(
+        LinearGradient(
+          colors: [
+            Color.white.opacity(0.78),
+            CepessaColors.paperRaised.opacity(0.74),
+          ],
+          startPoint: .topLeading,
+          endPoint: .bottomTrailing
+        )
+      )
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .overlay(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .stroke(Color.white.opacity(0.58), lineWidth: 1)
+      )
       .scrollIndicators(.hidden)
       .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: messages.count)
     }
@@ -132,7 +236,7 @@ struct CepessaSessionDocumentChatView: View {
       )
 
       ScrollView(.horizontal) {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
           suggestionButton("What decisions were made?")
           suggestionButton("Turn this into action items.")
           suggestionButton("Clean up the recap.")
@@ -161,9 +265,9 @@ struct CepessaSessionDocumentChatView: View {
 
         Spacer(minLength: 0)
       }
-      .padding(.horizontal, 12)
-      .padding(.vertical, 11)
-      .frame(minWidth: 188, idealWidth: 220, maxWidth: 260, alignment: .leading)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 8)
+      .frame(minWidth: 150, idealWidth: 172, maxWidth: 220, alignment: .leading)
       .background(CepessaColors.paperDeep.opacity(0.46))
       .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
       .overlay(
@@ -275,11 +379,13 @@ struct CepessaSessionDocumentChatView: View {
       TextField("Ask about this session...", text: $draftText, axis: .vertical)
         .textFieldStyle(.plain)
         .scaledFont(size: 13)
+        .foregroundColor(CepessaColors.textPrimary)
+        .tint(CepessaColors.capture)
         .lineLimit(1...4)
         .focused($isComposerFocused)
-        .padding(.horizontal, 13)
-        .padding(.vertical, 11)
-        .background(CepessaColors.backgroundRaised.opacity(0.84))
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(Color.white.opacity(0.88))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
           RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -299,7 +405,7 @@ struct CepessaSessionDocumentChatView: View {
         Image(systemName: isSending ? "hourglass" : "arrow.up")
           .scaledFont(size: 13, weight: .bold)
           .foregroundColor(trimmed.isEmpty || isSending ? CepessaColors.textTertiary : .white)
-          .frame(width: 36, height: 36)
+          .frame(width: 32, height: 32)
           .background(
             Circle()
               .fill(
@@ -478,8 +584,8 @@ private struct SessionDocumentChatBubble: View {
           .foregroundColor(CepessaColors.textPrimary)
           .lineSpacing(2)
           .textSelection(.enabled)
-          .padding(.horizontal, 13)
-          .padding(.vertical, 11)
+          .padding(.horizontal, 11)
+          .padding(.vertical, 9)
           .background(bubbleFill)
           .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
           .overlay(
@@ -494,7 +600,7 @@ private struct SessionDocumentChatBubble: View {
         .foregroundColor(CepessaColors.textTertiary)
         .padding(.horizontal, 4)
       }
-      .frame(maxWidth: 560, alignment: isUser ? .trailing : .leading)
+      .frame(maxWidth: 430, alignment: isUser ? .trailing : .leading)
 
       if !isUser {
         Spacer(minLength: 48)
@@ -503,7 +609,11 @@ private struct SessionDocumentChatBubble: View {
   }
 
   private var messageText: String {
-    message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.looksLikeChatContractLeak else {
+      return "I couldn't produce a clean document edit from the local model."
+    }
+    return trimmed
   }
 
   private var bubbleFill: some ShapeStyle {
@@ -525,5 +635,19 @@ private struct SessionDocumentChatBubble: View {
 
   private var bubbleStroke: Color {
     isUser ? CepessaColors.capture.opacity(0.22) : CepessaColors.border.opacity(0.18)
+  }
+}
+
+extension String {
+  fileprivate var looksLikeChatContractLeak: Bool {
+    let lowercased = lowercased()
+    return lowercased.contains("\"recappatch\"")
+      || lowercased.contains("\"transcriptpatches\"")
+      || lowercased.contains("\"speakerrenames\"")
+      || lowercased.contains("\"kind\":\"keypoints|")
+      || lowercased.contains("return only valid json")
+      || lowercased.contains("the json object must match")
+      || lowercased.contains("use empty arrays and null recappatch")
+      || lowercased.contains("segmentid=")
   }
 }

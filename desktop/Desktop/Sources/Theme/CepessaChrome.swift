@@ -1,14 +1,14 @@
 import SwiftUI
 
 enum CepessaChrome {
-  static let windowRadius: CGFloat = 28
-  static let canvasRadius: CGFloat = 28
-  static let cardRadius: CGFloat = 18
-  static let sectionRadius: CGFloat = 14
-  static let controlRadius: CGFloat = 12
+  static let windowRadius: CGFloat = 34
+  static let canvasRadius: CGFloat = 36
+  static let cardRadius: CGFloat = 28
+  static let sectionRadius: CGFloat = 22
+  static let controlRadius: CGFloat = 18
   static let chipRadius: CGFloat = 999
-  static let paperRadius: CGFloat = 8
-  static let instrumentRadius: CGFloat = 24
+  static let paperRadius: CGFloat = 26
+  static let instrumentRadius: CGFloat = 30
   static let stripRadius: CGFloat = 999
 }
 
@@ -20,6 +20,7 @@ private struct CepessaPanelModifier: ViewModifier {
   let shadowRadius: CGFloat
   let shadowY: CGFloat
 
+  @ViewBuilder
   func body(content: Content) -> some View {
     content
       .background(
@@ -32,9 +33,10 @@ private struct CepessaPanelModifier: ViewModifier {
             .stroke(stroke, lineWidth: 1)
         }
       }
+      .shadow(color: .white.opacity(0.18), radius: 1, x: 0, y: -1)
       .shadow(
-        color: .black.opacity(min(shadowOpacity, 0.04)), radius: min(shadowRadius, 6), x: 0,
-        y: min(shadowY, 2))
+        color: CepessaColors.warmShadow.opacity(min(shadowOpacity, 0.035)),
+        radius: min(shadowRadius, 8), x: 0, y: min(shadowY, 4))
   }
 }
 
@@ -45,39 +47,83 @@ private struct CepessaGlassPanelModifier: ViewModifier {
   let strokeOpacity: Double
   let shadowOpacity: Double
 
+  @ViewBuilder
   func body(content: Content) -> some View {
-    content
-      .background {
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .fill(.ultraThinMaterial)
-
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .fill(fill.opacity(fillOpacity))
-
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .fill(
-            LinearGradient(
-              colors: [
-                Color.white.opacity(0.28),
-                Color.white.opacity(0.08),
-                Color.black.opacity(0.015),
-              ],
-              startPoint: .topLeading,
-              endPoint: .bottomTrailing
+    if #available(macOS 26.0, *) {
+      content
+        .background {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.white.opacity(0.74))
+            .glassEffect(
+              .regular.tint(CepessaColors.ambientGlass.opacity(0.035)),
+              in: .rect(cornerRadius: radius)
             )
-          )
-      }
-      .overlay {
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .stroke(Color.white.opacity(strokeOpacity), lineWidth: 0.8)
-          .padding(0.5)
-      }
-      .overlay {
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .stroke(CepessaColors.border.opacity(0.20), lineWidth: 1)
-      }
-      .shadow(color: .white.opacity(0.25), radius: 1, x: 0, y: -1)
-      .shadow(color: .black.opacity(shadowOpacity), radius: 18, x: 0, y: 10)
+
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.white.opacity(0.72))
+
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(
+              LinearGradient(
+                colors: [
+                  Color.white.opacity(0.60),
+                  CepessaColors.backgroundSecondary.opacity(0.18),
+                  Color.white.opacity(0.44),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+              )
+            )
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(Color.white.opacity(strokeOpacity), lineWidth: 0.7)
+            .padding(0.5)
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(CepessaColors.hairline.opacity(0.26), lineWidth: 0.7)
+        }
+        .shadow(color: .white.opacity(0.45), radius: 1, x: 0, y: -1)
+        .shadow(
+          color: CepessaColors.warmShadow.opacity(shadowOpacity + 0.012),
+          radius: 18, x: 0, y: 9)
+    } else {
+      content
+        .background {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(.ultraThinMaterial)
+
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(fill.opacity(fillOpacity))
+
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(
+              LinearGradient(
+                colors: [
+                  Color.white.opacity(0.34),
+                  CepessaColors.backgroundSecondary.opacity(0.14),
+                  Color.white.opacity(0.26),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+              )
+            )
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(Color.white.opacity(strokeOpacity), lineWidth: 0.8)
+            .padding(0.5)
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(CepessaColors.border.opacity(0.20), lineWidth: 1)
+        }
+        .shadow(color: .white.opacity(0.30), radius: 1, x: 0, y: -1)
+        .shadow(
+          color: CepessaColors.warmShadow.opacity(shadowOpacity + 0.014),
+          radius: 16, x: 0, y: 8)
+    }
   }
 }
 
@@ -100,64 +146,182 @@ struct CepessaPressStyle: ButtonStyle {
 private struct CepessaCanvasModifier: ViewModifier {
   let radius: CGFloat
 
+  @ViewBuilder
   func body(content: Content) -> some View {
-    content
-      .background(
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .fill(CepessaColors.paper.opacity(0.96))
-      )
-      .overlay {
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .stroke(CepessaColors.hairline.opacity(0.72), lineWidth: 1)
-      }
-      .shadow(color: CepessaColors.warmShadow.opacity(0.08), radius: 28, x: 0, y: 18)
+    if #available(macOS 26.0, *) {
+      content
+        .background {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.white.opacity(0.80))
+            .glassEffect(
+              .regular.tint(CepessaColors.ambientGlass.opacity(0.035)),
+              in: .rect(cornerRadius: radius)
+            )
+
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.white.opacity(0.82))
+
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(
+              LinearGradient(
+                colors: [
+                  Color.white.opacity(0.64),
+                  CepessaColors.backgroundSecondary.opacity(0.16),
+                  Color.white.opacity(0.52),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+              )
+            )
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(Color.white.opacity(0.68), lineWidth: 0.8)
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(CepessaColors.hairline.opacity(0.30), lineWidth: 0.7)
+            .padding(0.5)
+        }
+        .shadow(color: CepessaColors.warmShadow.opacity(0.055), radius: 24, x: 0, y: 12)
+    } else {
+      content
+        .background {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(.thinMaterial)
+
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(CepessaColors.paperRaised.opacity(0.70))
+
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(
+              LinearGradient(
+                colors: [
+                  Color.white.opacity(0.42),
+                  CepessaColors.backgroundSecondary.opacity(0.12),
+                  Color.white.opacity(0.24),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+              )
+            )
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(Color.white.opacity(0.74), lineWidth: 0.8)
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(CepessaColors.hairline.opacity(0.46), lineWidth: 1)
+            .padding(0.5)
+        }
+        .shadow(color: CepessaColors.warmShadow.opacity(0.06), radius: 22, x: 0, y: 11)
+    }
   }
 }
 
 private struct CepessaPaperModifier: ViewModifier {
   let radius: CGFloat
 
+  @ViewBuilder
   func body(content: Content) -> some View {
-    content
-      .background(
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .fill(CepessaColors.paperRaised.opacity(0.88))
-      )
-      .overlay {
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .stroke(CepessaColors.hairline.opacity(0.58), lineWidth: 1)
-      }
+    if #available(macOS 26.0, *) {
+      content
+        .background {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.white.opacity(0.78))
+            .glassEffect(
+              .regular.tint(CepessaColors.ambientGlass.opacity(0.03)),
+              in: .rect(cornerRadius: radius)
+            )
+
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.white.opacity(0.82))
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(Color.white.opacity(0.66), lineWidth: 0.8)
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(CepessaColors.hairline.opacity(0.24), lineWidth: 0.7)
+            .padding(0.5)
+        }
+        .shadow(color: CepessaColors.warmShadow.opacity(0.035), radius: 14, x: 0, y: 7)
+    } else {
+      content
+        .background(
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(CepessaColors.paperRaised.opacity(0.76))
+        )
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(Color.white.opacity(0.70), lineWidth: 0.8)
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(CepessaColors.hairline.opacity(0.38), lineWidth: 1)
+            .padding(0.5)
+        }
+        .shadow(color: CepessaColors.warmShadow.opacity(0.04), radius: 12, x: 0, y: 6)
+    }
   }
 }
 
 private struct CepessaInstrumentStripModifier: ViewModifier {
   let radius: CGFloat
 
+  @ViewBuilder
   func body(content: Content) -> some View {
-    content
-      .background(
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .fill(
-            LinearGradient(
-              colors: [
-                CepessaColors.paperRaised.opacity(0.72),
-                CepessaColors.graphite.opacity(0.88),
-              ],
-              startPoint: .topLeading,
-              endPoint: .bottomTrailing
+    if #available(macOS 26.0, *) {
+      content
+        .background {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.white.opacity(0.78))
+            .glassEffect(
+              .regular.tint(CepessaColors.ambientGlass.opacity(0.03)),
+              in: .rect(cornerRadius: radius)
             )
-          )
-      )
-      .overlay {
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .stroke(Color.white.opacity(0.70), lineWidth: 1)
-      }
-      .overlay {
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-          .stroke(CepessaColors.border.opacity(0.48), lineWidth: 1)
-          .padding(0.5)
-      }
-      .shadow(color: CepessaColors.warmShadow.opacity(0.16), radius: 28, x: 0, y: 16)
+
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.white.opacity(0.78))
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(Color.white.opacity(0.70), lineWidth: 0.8)
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(CepessaColors.hairline.opacity(0.24), lineWidth: 0.7)
+            .padding(0.5)
+        }
+        .shadow(color: CepessaColors.warmShadow.opacity(0.045), radius: 18, x: 0, y: 9)
+    } else {
+      content
+        .background(
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(
+              LinearGradient(
+                colors: [
+                  CepessaColors.paperRaised.opacity(0.76),
+                  CepessaColors.backgroundSecondary.opacity(0.72),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+              )
+            )
+        )
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(Color.white.opacity(0.66), lineWidth: 0.8)
+        }
+        .overlay {
+          RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(CepessaColors.border.opacity(0.48), lineWidth: 1)
+            .padding(0.5)
+        }
+        .shadow(color: CepessaColors.warmShadow.opacity(0.05), radius: 16, x: 0, y: 8)
+    }
   }
 }
 
