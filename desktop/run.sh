@@ -91,6 +91,18 @@ substep() {
     printf "[%6.1fs]   ├─ %s\n" "$total_elapsed" "$1"
 }
 
+fix_local_model_runner_linkage() {
+    local runner_path="$1"
+    [ -f "$runner_path" ] || return 0
+
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$runner_path" 2>/dev/null || true
+    install_name_tool -add_rpath "@loader_path/../Frameworks" "$runner_path" 2>/dev/null || true
+    install_name_tool \
+        -change "@rpath/llama.framework/Versions/Current/llama" \
+        "@loader_path/../Frameworks/llama.framework/Versions/Current/llama" \
+        "$runner_path" 2>/dev/null || true
+}
+
 # App configuration
 BINARY_NAME="CepessaSessions"  # Package.swift target — binary paths, pkill, CFBundleExecutable
 LOCAL_MODEL_RUNNER_NAME="CepessaLocalModelRunner"
@@ -117,13 +129,14 @@ else
 fi
 
 BUNDLE_ID="${OMI_BUNDLE_ID:-$EXPECTED_BUNDLE_ID}"
-BUILD_DIR="build"
+BUILD_DIR="${OMI_BUILD_DIR:-build}"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 APP_PATH="/Applications/$APP_NAME.app"
 APP_DESKTOP_PATH="$HOME/Desktop/$APP_NAME.app"
 APP_DOWNLOADS_PATH="$HOME/Downloads/$APP_NAME.app"
 SIGN_IDENTITY="${OMI_SIGN_IDENTITY:-}"
 URL_SCHEME="${OMI_URL_SCHEME:-$EXPECTED_URL_SCHEME}"
+SWIFT_SCRATCH_PATH="${OMI_SWIFT_SCRATCH_PATH:-${TMPDIR:-/tmp}/cepessa-sessions-run-build}"
 
 if [ "$BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]; then
     echo "ERROR: APP_NAME '$APP_NAME' must use bundle ID '$EXPECTED_BUNDLE_ID' (got '$BUNDLE_ID')"
@@ -400,7 +413,9 @@ fi
 
 step "Building acp-bridge (npm install + tsc)..."
 ACP_BRIDGE_DIR="$(dirname "$0")/acp-bridge"
-if [ -d "$ACP_BRIDGE_DIR" ]; then
+if [ "${OMI_SKIP_ACP_BRIDGE:-0}" = "1" ]; then
+    substep "Skipping acp-bridge build (OMI_SKIP_ACP_BRIDGE=1)"
+elif [ -d "$ACP_BRIDGE_DIR" ]; then
     cd "$ACP_BRIDGE_DIR"
     if [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules/.package-lock.json" ]; then
         substep "Installing npm dependencies"
@@ -419,8 +434,10 @@ if [ -f scripts/check_schema_docs.sh ]; then
 fi
 
 step "Building Swift app (swift build -c debug)..."
-xcrun swift build -c debug --package-path Desktop
-xcrun swift build -c debug --package-path Desktop --product "$LOCAL_MODEL_RUNNER_NAME"
+mkdir -p "$SWIFT_SCRATCH_PATH"
+xcrun swift build -c debug --package-path Desktop --scratch-path "$SWIFT_SCRATCH_PATH"
+xcrun swift build -c debug --package-path Desktop --scratch-path "$SWIFT_SCRATCH_PATH" --product "$LOCAL_MODEL_RUNNER_NAME"
+SWIFT_BUILD_DIR="$(xcrun swift build -c debug --package-path Desktop --scratch-path "$SWIFT_SCRATCH_PATH" --show-bin-path)"
 
 auth_debug "AFTER swift build: auth_isSignedIn=$(defaults read "$BUNDLE_ID" auth_isSignedIn 2>&1 || true)"
 
@@ -430,29 +447,29 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 
-substep "Copying binary ($(du -h "Desktop/.build/debug/$BINARY_NAME" 2>/dev/null | cut -f1))"
-cp -f "Desktop/.build/debug/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
+substep "Copying binary ($(du -h "$SWIFT_BUILD_DIR/$BINARY_NAME" 2>/dev/null | cut -f1))"
+cp -f "$SWIFT_BUILD_DIR/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 
-if [ -f "Desktop/.build/debug/$LOCAL_MODEL_RUNNER_NAME" ]; then
+if [ -f "$SWIFT_BUILD_DIR/$LOCAL_MODEL_RUNNER_NAME" ]; then
     substep "Copying local model runner"
-    cp -f "Desktop/.build/debug/$LOCAL_MODEL_RUNNER_NAME" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
+    cp -f "$SWIFT_BUILD_DIR/$LOCAL_MODEL_RUNNER_NAME" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
 fi
 
 substep "Adding rpath for Frameworks"
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME" 2>/dev/null || true
 if [ -f "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" ]; then
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" 2>/dev/null || true
+    fix_local_model_runner_linkage "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
 fi
 
 # Copy Sparkle framework
-SPARKLE_FRAMEWORK="Desktop/.build/arm64-apple-macosx/debug/Sparkle.framework"
+SPARKLE_FRAMEWORK="$SWIFT_BUILD_DIR/Sparkle.framework"
 if [ -d "$SPARKLE_FRAMEWORK" ]; then
     substep "Copying Sparkle framework ($(du -sh "$SPARKLE_FRAMEWORK" 2>/dev/null | cut -f1))"
     rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
     cp -R "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
 fi
 
-LLAMA_FRAMEWORK="Desktop/.build/arm64-apple-macosx/debug/llama.framework"
+LLAMA_FRAMEWORK="$SWIFT_BUILD_DIR/llama.framework"
 if [ -d "$LLAMA_FRAMEWORK" ]; then
     substep "Copying llama framework"
     rm -rf "$APP_BUNDLE/Contents/Frameworks/llama.framework"
@@ -460,13 +477,13 @@ if [ -d "$LLAMA_FRAMEWORK" ]; then
 fi
 
 # Copy HeapSwiftCore framework and its dependency CSSwiftProtobuf
-HEAP_FRAMEWORK="Desktop/.build/artifacts/heap-swift-core-sdk/HeapSwiftCore/HeapSwiftCore.xcframework/macos-arm64_x86_64/HeapSwiftCore.framework"
+HEAP_FRAMEWORK="$SWIFT_SCRATCH_PATH/artifacts/heap-swift-core-sdk/HeapSwiftCore/HeapSwiftCore.xcframework/macos-arm64_x86_64/HeapSwiftCore.framework"
 if [ -d "$HEAP_FRAMEWORK" ]; then
     substep "Copying HeapSwiftCore framework"
     rm -rf "$APP_BUNDLE/Contents/Frameworks/HeapSwiftCore.framework"
     cp -R "$HEAP_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
 fi
-CSPROTOBUF_FRAMEWORK="Desktop/.build/artifacts/csswiftprotobuf/CSSwiftProtobuf/CSSwiftProtobuf.xcframework/macos-arm64_x86_64/CSSwiftProtobuf.framework"
+CSPROTOBUF_FRAMEWORK="$SWIFT_SCRATCH_PATH/artifacts/csswiftprotobuf/CSSwiftProtobuf/CSSwiftProtobuf.xcframework/macos-arm64_x86_64/CSSwiftProtobuf.framework"
 if [ -d "$CSPROTOBUF_FRAMEWORK" ]; then
     substep "Copying CSSwiftProtobuf framework"
     rm -rf "$APP_BUNDLE/Contents/Frameworks/CSSwiftProtobuf.framework"
@@ -494,7 +511,6 @@ if [ -f "$APP_BUNDLE/Contents/Resources/GoogleService-Info.plist" ]; then
 fi
 
 # Copy resource bundle (contains app assets like permissions.gif, herologo.png, etc.)
-SWIFT_BUILD_DIR="Desktop/.build/arm64-apple-macosx/debug"
 RESOURCE_BUNDLE="$SWIFT_BUILD_DIR/$RESOURCE_BUNDLE_NAME"
 if [ -d "$RESOURCE_BUNDLE" ]; then
     substep "Copying resource bundle ($(du -sh "$RESOURCE_BUNDLE" 2>/dev/null | cut -f1))"
@@ -521,11 +537,20 @@ for GGML_RESOURCE_DIR in \
 done
 
 substep "Copying acp-bridge"
-if [ -d "$ACP_BRIDGE_DIR/dist" ]; then
+if [ "${OMI_SKIP_ACP_BRIDGE:-0}" = "1" ]; then
+    substep "Skipping acp-bridge copy (OMI_SKIP_ACP_BRIDGE=1)"
+elif [ -d "$ACP_BRIDGE_DIR/dist" ]; then
     mkdir -p "$APP_BUNDLE/Contents/Resources/acp-bridge"
     cp -Rf "$ACP_BRIDGE_DIR/dist" "$APP_BUNDLE/Contents/Resources/acp-bridge/"
     cp -f "$ACP_BRIDGE_DIR/package.json" "$APP_BUNDLE/Contents/Resources/acp-bridge/"
-    cp -Rf "$ACP_BRIDGE_DIR/node_modules" "$APP_BUNDLE/Contents/Resources/acp-bridge/"
+    if [ "${OMI_SKIP_ACP_NODE_MODULES:-0}" = "1" ]; then
+        substep "Skipping acp-bridge node_modules copy (OMI_SKIP_ACP_NODE_MODULES=1)"
+    else
+        rm -rf "$APP_BUNDLE/Contents/Resources/acp-bridge/node_modules"
+        ditto --norsrc --noextattr --noqtn --noacl \
+            "$ACP_BRIDGE_DIR/node_modules" \
+            "$APP_BUNDLE/Contents/Resources/acp-bridge/node_modules"
+    fi
 fi
 
 substep "Copying .env.app"

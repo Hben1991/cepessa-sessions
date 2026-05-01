@@ -13,6 +13,18 @@ BACKEND_PID=""
 TUNNEL_PID=""
 TUNNEL_URL="${TUNNEL_URL:-}"
 
+fix_local_model_runner_linkage() {
+    local runner_path="$1"
+    [ -f "$runner_path" ] || return 0
+
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$runner_path" 2>/dev/null || true
+    install_name_tool -add_rpath "@loader_path/../Frameworks" "$runner_path" 2>/dev/null || true
+    install_name_tool \
+        -change "@rpath/llama.framework/Versions/Current/llama" \
+        "@loader_path/../Frameworks/llama.framework/Versions/Current/llama" \
+        "$runner_path" 2>/dev/null || true
+}
+
 # Cleanup function to stop backend and tunnel on exit
 cleanup() {
     if [ -n "$TUNNEL_PID" ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
@@ -97,7 +109,7 @@ mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 cp "Desktop/.build/debug/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 if [ -f "Desktop/.build/debug/$LOCAL_MODEL_RUNNER_NAME" ]; then
     cp "Desktop/.build/debug/$LOCAL_MODEL_RUNNER_NAME" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" 2>/dev/null || true
+    fix_local_model_runner_linkage "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
 fi
 
 LLAMA_FRAMEWORK="Desktop/.build/debug/llama.framework"

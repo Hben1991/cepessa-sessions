@@ -19,6 +19,18 @@ APP_PATH="/Applications/$APP_NAME.app"
 SIGN_IDENTITY="${OMI_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | grep 'Developer ID Application' | head -1 | sed 's/.*"\(.*\)"/\1/')}"
 VERSION="0.0.0-local"
 
+fix_local_model_runner_linkage() {
+    local runner_path="$1"
+    [ -f "$runner_path" ] || return 0
+
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$runner_path" 2>/dev/null || true
+    install_name_tool -add_rpath "@loader_path/../Frameworks" "$runner_path" 2>/dev/null || true
+    install_name_tool \
+        -change "@rpath/llama.framework/Versions/Current/llama" \
+        "@loader_path/../Frameworks/llama.framework/Versions/Current/llama" \
+        "$runner_path" 2>/dev/null || true
+}
+
 echo "=============================================="
 echo "  Building Local Production Version"
 echo "  Bundle ID: $BUNDLE_ID"
@@ -138,7 +150,7 @@ fi
 # Add rpath for Sparkle
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME" 2>/dev/null || true
 if [ -f "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" ]; then
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" 2>/dev/null || true
+    fix_local_model_runner_linkage "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
 fi
 
 # Copy resources

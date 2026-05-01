@@ -142,7 +142,9 @@ struct EmbeddedLocalLanguageModel: LocalSessionLanguageModelGenerating {
     }
     try? inputPipe.fileHandleForWriting.close()
 
-    let didExit = await process.waitUntilExit(timeout: 12)
+    let didExit = await process.waitUntilExit(
+      timeout: Self.timeoutSeconds(prompt: prompt, maxTokens: maxTokens)
+    )
     if !didExit {
       process.terminate()
       try? await Task.sleep(nanoseconds: 300_000_000)
@@ -170,6 +172,12 @@ struct EmbeddedLocalLanguageModel: LocalSessionLanguageModelGenerating {
     }
 
     return output
+  }
+
+  static func timeoutSeconds(prompt: String, maxTokens: Int) -> TimeInterval {
+    let promptBudget = Double(prompt.utf8.count) / 1_500
+    let generationBudget = Double(max(1, maxTokens)) * 0.05
+    return min(90, max(30, 12 + promptBudget + generationBudget))
   }
 }
 

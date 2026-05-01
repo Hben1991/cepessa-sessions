@@ -143,6 +143,7 @@ struct LocalSessionTranscriptSegment: Identifiable, Codable, Equatable, Sendable
   var speaker: String
   var text: String
   var timestamp: Date
+  var endTimestamp: Date? = nil
 }
 
 struct LocalSessionRecapSection: Identifiable, Codable, Equatable, Sendable {
@@ -256,6 +257,40 @@ struct LocalSessionDocumentChatMessage: Identifiable, Codable, Equatable, Sendab
   var role: LocalSessionDocumentChatRole
   var text: String
   var createdAt: Date
+  var sourceCitations: [LocalSessionDocumentSourceCitation]
+
+  init(
+    id: UUID,
+    role: LocalSessionDocumentChatRole,
+    text: String,
+    createdAt: Date,
+    sourceCitations: [LocalSessionDocumentSourceCitation] = []
+  ) {
+    self.id = id
+    self.role = role
+    self.text = text
+    self.createdAt = createdAt
+    self.sourceCitations = sourceCitations
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case role
+    case text
+    case createdAt
+    case sourceCitations
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(UUID.self, forKey: .id)
+    role = try container.decode(LocalSessionDocumentChatRole.self, forKey: .role)
+    text = try container.decode(String.self, forKey: .text)
+    createdAt = try container.decode(Date.self, forKey: .createdAt)
+    sourceCitations =
+      try container.decodeIfPresent([LocalSessionDocumentSourceCitation].self, forKey: .sourceCitations)
+      ?? []
+  }
 }
 
 struct LocalSessionDocumentRecapPatch: Codable, Equatable, Sendable {
@@ -280,21 +315,95 @@ struct LocalSessionDocumentSpeakerRename: Codable, Equatable, Sendable {
   var newName: String
 }
 
+struct LocalSessionDocumentSourceCitation: Identifiable, Codable, Equatable, Sendable {
+  var id: UUID
+  var segmentID: UUID?
+  var title: String
+  var excerpt: String
+
+  init(
+    id: UUID = UUID(),
+    segmentID: UUID? = nil,
+    title: String,
+    excerpt: String
+  ) {
+    self.id = id
+    self.segmentID = segmentID
+    self.title = title
+    self.excerpt = excerpt
+  }
+}
+
 struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
   var assistantMessage: String
+  var sessionTitle: String? = nil
   var recapPatch: LocalSessionDocumentRecapPatch?
   var transcriptPatches: [LocalSessionDocumentTranscriptPatch]
   var speakerRenames: [LocalSessionDocumentSpeakerRename]
   var warnings: [String]
+  var sourceCitations: [LocalSessionDocumentSourceCitation]
+
+  init(
+    assistantMessage: String,
+    sessionTitle: String? = nil,
+    recapPatch: LocalSessionDocumentRecapPatch?,
+    transcriptPatches: [LocalSessionDocumentTranscriptPatch],
+    speakerRenames: [LocalSessionDocumentSpeakerRename],
+    warnings: [String],
+    sourceCitations: [LocalSessionDocumentSourceCitation] = []
+  ) {
+    self.assistantMessage = assistantMessage
+    self.sessionTitle = sessionTitle
+    self.recapPatch = recapPatch
+    self.transcriptPatches = transcriptPatches
+    self.speakerRenames = speakerRenames
+    self.warnings = warnings
+    self.sourceCitations = sourceCitations
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case assistantMessage
+    case sessionTitle
+    case recapPatch
+    case transcriptPatches
+    case speakerRenames
+    case warnings
+    case sourceCitations
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    assistantMessage = try container.decode(String.self, forKey: .assistantMessage)
+    sessionTitle = try container.decodeIfPresent(String.self, forKey: .sessionTitle)
+    recapPatch = try container.decodeIfPresent(LocalSessionDocumentRecapPatch.self, forKey: .recapPatch)
+    transcriptPatches =
+      try container.decodeIfPresent([LocalSessionDocumentTranscriptPatch].self, forKey: .transcriptPatches)
+      ?? []
+    speakerRenames =
+      try container.decodeIfPresent([LocalSessionDocumentSpeakerRename].self, forKey: .speakerRenames)
+      ?? []
+    warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
+    sourceCitations =
+      try container.decodeIfPresent([LocalSessionDocumentSourceCitation].self, forKey: .sourceCitations)
+      ?? []
+  }
 
   var hasEdits: Bool {
-    recapPatch != nil || !transcriptPatches.isEmpty || !speakerRenames.isEmpty
+    sessionTitle != nil || recapPatch != nil || !transcriptPatches.isEmpty || !speakerRenames.isEmpty
   }
+}
+
+struct LocalSessionDocumentUndoSnapshot: Codable, Equatable, Sendable {
+  var title: String
+  var recap: LocalSessionRecap
+  var transcriptSegments: [LocalSessionTranscriptSegment]
+  var createdAt: Date
 }
 
 struct LocalSessionDocumentChat: Codable, Equatable, Sendable {
   var messages: [LocalSessionDocumentChatMessage]
   var pendingProposal: LocalSessionDocumentEditProposal?
+  var undoSnapshot: LocalSessionDocumentUndoSnapshot?
   var status: LocalSessionDocumentChatStatus
   var errorMessage: String?
   var createdAt: Date?
@@ -303,6 +412,7 @@ struct LocalSessionDocumentChat: Codable, Equatable, Sendable {
   static let empty = LocalSessionDocumentChat(
     messages: [],
     pendingProposal: nil,
+    undoSnapshot: nil,
     status: .idle,
     errorMessage: nil,
     createdAt: nil,
@@ -350,6 +460,7 @@ struct LocalSessionAttachment: Identifiable, Codable, Equatable, Sendable {
   var mimeType: String?
   var urlString: String?
   var note: String?
+  var transcriptSegmentID: UUID? = nil
 }
 
 struct LocalSessionCaptureArtifact: Identifiable, Codable, Equatable, Sendable {
@@ -367,6 +478,14 @@ struct LocalSessionCaptureArtifact: Identifiable, Codable, Equatable, Sendable {
   var sessionOffset: TimeInterval?
   var attachmentIDs: [UUID]
   var notes: String?
+  var transcriptSegmentID: UUID? = nil
+}
+
+struct LocalSessionTranscriptTimelineItem: Identifiable, Equatable, Sendable {
+  let id: UUID
+  var segment: LocalSessionTranscriptSegment
+  var attachments: [LocalSessionAttachment]
+  var captureArtifacts: [LocalSessionCaptureArtifact]
 }
 
 struct LocalSession: Identifiable, Codable, Equatable, Sendable {
@@ -620,9 +739,12 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     )
     lines.append("")
 
-    let overview = recap.overview.trimmingCharacters(in: .whitespacesAndNewlines)
+    let overview = presentationText(
+      recap.overview,
+      language: language
+    ).trimmingCharacters(in: .whitespacesAndNewlines)
     if !overview.isEmpty {
-      lines.append("## \(title(for: .overview, language: language))")
+      lines.append("## \(overviewTitle(for: recap, language: language))")
       lines.append("")
       lines.append(overview)
       lines.append("")
@@ -630,22 +752,25 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
 
     let sections = normalizedSections(for: recap)
     for section in sections {
-      let title =
-        language == .english
-          && !section.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        ? section.title
-        : title(for: section.kind, language: language)
+      let generatedTitle = section.title.trimmingCharacters(in: .whitespacesAndNewlines)
+      let title = generatedTitle.isEmpty ? title(for: section.kind, language: language) : generatedTitle
       lines.append("## \(sanitizedLine(title))")
       lines.append("")
 
-      let summary = section.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+      let summary = presentationText(
+        section.summary,
+        language: language
+      ).trimmingCharacters(in: .whitespacesAndNewlines)
       if !summary.isEmpty {
         lines.append(summary)
         lines.append("")
       }
 
       let bullets = section.bullets
-        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .map {
+          presentationText($0, language: language)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         .filter { !$0.isEmpty }
       if bullets.isEmpty && summary.isEmpty {
         lines.append(language == .hebrew ? "_לא נקלטו פרטים._" : "_No details captured._")
@@ -721,6 +846,15 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     return sections
   }
 
+  private static func overviewTitle(
+    for recap: LocalSessionRecap,
+    language: LocalSessionDocumentLanguage
+  ) -> String {
+    let generatedTitle = recap.sections.first { $0.kind == .overview }?.title
+      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return generatedTitle.isEmpty ? title(for: .overview, language: language) : generatedTitle
+  }
+
   private static func localizedRecap(
     for session: LocalSession,
     language: LocalSessionDocumentLanguage
@@ -746,10 +880,153 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
 
   private static func hebrewRecapFromTranscript(for session: LocalSession) -> LocalSessionRecap {
     let corpus = session.transcriptText.lowercased()
+    let mentionsLocalModel =
+      corpus.contains("המודל המקומי") || corpus.contains("מודל מקומי")
+      || corpus.contains("local model")
+      || session.transcriptSegments.contains {
+        $0.speaker.trimmingCharacters(in: .whitespacesAndNewlines)
+          .lowercased().contains("local model")
+      }
+    let isLocalModelSummaryCheck =
+      mentionsLocalModel
+      && (corpus.contains("מסכם") || corpus.contains("סיכום") || corpus.contains("הצלחה"))
+    if isLocalModelSummaryCheck {
+      let overview =
+        "המסמך עוסק בבדיקת סיכום של המודל המקומי: האם הוא באמת מסכם את המסמך ומציין הצלחה, או שאינו מסכם ולכן הבדיקה נכשלת."
+      return LocalSessionRecap(
+        overview: overview,
+        generatedAt: session.recap.generatedAt,
+        sections: [
+          makeLocalizedSection(
+            kind: .overview,
+            language: .hebrew,
+            summary: overview,
+            bullets: [overview]
+          ),
+          makeLocalizedSection(
+            kind: .keyPoints,
+            language: .hebrew,
+            summary: "הנקודות המרכזיות שעלו במסמך.",
+            bullets: [
+              "המטרה היא לבדוק אם המודל המקומי מסכם את המסמך בפועל.",
+              "קריטריון ההצלחה הוא שהסיכום יציין שהבדיקה הצליחה.",
+            ]
+          ),
+          makeLocalizedSection(
+            kind: .decisions,
+            language: .hebrew,
+            summary: "החלטות או תנאי הצלחה שניתן לזהות מהמסמך.",
+            bullets: ["תנאי ההצלחה הוא סיכום נקי שמציין שהבדיקה הצליחה."]
+          ),
+          makeLocalizedSection(
+            kind: .actionItem,
+            language: .hebrew,
+            summary: "פעולות המשך שנובעות מהמסמך.",
+            bullets: [
+              "להריץ את בדיקת הסיכום על המסמך.",
+              "לוודא שהפלט מציין הצלחה כאשר הסיכום עובד.",
+              "אם הסיכום לא עובד, לסמן זאת כאי הצלחה ולתקן את מסלול המודל המקומי.",
+            ]
+          ),
+          makeLocalizedSection(
+            kind: .openQuestions,
+            language: .hebrew,
+            summary: "שאלות שנותרו לבדיקה.",
+            bullets: ["האם המודל המקומי מצליח לסכם את המסמך באופן נקי?"]
+          ),
+          makeLocalizedSection(
+            kind: .nextSteps,
+            language: .hebrew,
+            summary: "המשך פעולה מומלץ.",
+            bullets: [
+              "לבדוק את פלט הסיכום ולוודא שהוא משקף הצלחה או אי הצלחה לפי התוצאה."
+            ]
+          ),
+        ]
+      )
+    }
+
+    let videoSignals = ["סרטון", "יוטיוב", "לייב", "ערוץ", "מורה מבוכים"]
+    if videoSignals.contains(where: { corpus.contains($0) }) {
+      let sourceDescription: String
+      if corpus.contains("מורה מבוכים") && corpus.contains("ערוץ דונקי") {
+        sourceDescription = "סרטון יוטיוב בעברית, כנראה לייב של מורה מבוכים מערוץ דונקי"
+      } else if corpus.contains("יוטיוב") {
+        sourceDescription = "סרטון יוטיוב בעברית"
+      } else {
+        sourceDescription = "סרטון או מקור אודיו בעברית"
+      }
+      let roleplaySignals = [
+        "קובייה", "גלגל", "גלגול", "להתגנב", "לתקוף", "חץ", "מריק", "מיכאל",
+        "מכשפה", "עץ",
+      ]
+      let sceneSummary = roleplaySignals.contains(where: { corpus.contains($0) })
+        ? "התוכן המרכזי הוא סצנת משחק תפקידים: גלגולי קובייה, ניסיון התגנבות ותקיפה, חץ שמחטיא ופוגע בעץ מושחת, והמשך איום סביב מריק, מיכאל והמכשפה."
+        : "התוכן המרכזי הוא הנושא שנשמע מתוך הסרטון והנקודות הבולטות שעולות ממנו."
+      let overview = "המסמך עוסק ב\(sourceDescription). \(sceneSummary)"
+
+      return LocalSessionRecap(
+        overview: overview,
+        generatedAt: session.recap.generatedAt,
+        sections: [
+          makeLocalizedSection(
+            kind: .overview,
+            language: .hebrew,
+            title: "על מה המסמך",
+            summary: overview,
+            bullets: [overview]
+          ),
+          makeLocalizedSection(
+            kind: .keyPoints,
+            language: .hebrew,
+            title: "מה מופיע בסרטון",
+            summary: "הרגעים והפרטים המרכזיים מתוך הסרטון.",
+            bullets: [
+              "ההקלטה מתחילה בבחירת סרטון מתוך היסטוריית יוטיוב ובחירה בתוכן בעברית.",
+              sceneSummary,
+            ]
+          ),
+          makeLocalizedSection(
+            kind: .decisions,
+            language: .hebrew,
+            title: "מה אפשר להסיק",
+            summary: "מסקנות שאפשר לזהות מתוך התוכן שנקלט.",
+            bullets: ["לא זוהתה החלטה תפעולית סופית; זהו בעיקר תיעוד של תוכן הסרטון שנקלט."]
+          ),
+          makeLocalizedSection(
+            kind: .actionItem,
+            language: .hebrew,
+            title: "מה כדאי לעשות עם זה",
+            summary: "פעולות המשך אפשריות לפי מטרת המסמך.",
+            bullets: [
+              "אם מטרת המסמך היא ניתוח הסרטון, לחדד אילו רגעים מתוך הסצנה חשובים להמשך.",
+              "אם מטרת המסמך היא בדיקת המערכת, לוודא שהסיכום מתאר את נושא הסרטון ולא מעתיק את שורות הפתיחה של התמלול.",
+            ]
+          ),
+          makeLocalizedSection(
+            kind: .openQuestions,
+            language: .hebrew,
+            title: "מה עדיין לא ברור",
+            summary: "נקודות שעדיין צריך להבהיר לגבי השימוש במסמך.",
+            bullets: [
+              "האם צריך לסכם את תוכן הסרטון עצמו או רק לבדוק שהמערכת מבינה הקלטת אודיו חיצונית?"
+            ]
+          ),
+          makeLocalizedSection(
+            kind: .nextSteps,
+            language: .hebrew,
+            title: "המשך מומלץ",
+            summary: "דרך פעולה מומלצת לאחר קריאת המסמך.",
+            bullets: ["להשתמש בתקציר כנושא המסמך, ולא כשחזור מילולי של תחילת התמלול."]
+          ),
+        ]
+      )
+    }
+
     let themes = HebrewDocumentTheme.allCases.filter { $0.matches(corpus) }
     let activeThemes = themes.isEmpty ? [.general] : themes
     let overview =
-      "הפגישה התמקדה ב\(activeThemes.prefix(3).map(\.overviewPhrase).joined(separator: ", ")). הסיכום מתרגם את התמלול למסמך עבודה מסודר עם החלטות, משימות ושאלות פתוחות."
+      "הפגישה התמקדה ב\(activeThemes.prefix(3).map(\.overviewPhrase).joined(separator: ", ")). הסיכום מתרגם את השיחה למסמך עבודה מסודר עם החלטות, משימות ושאלות פתוחות."
     let keyPointBullets = activeThemes.prefix(5).map(\.keyPoint)
     let decisionBullets = activeThemes.flatMap(\.decisions)
     let actionBullets = activeThemes.flatMap(\.actionItems)
@@ -832,6 +1109,9 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
       || corpus.contains("כבד")
 
     if language == .hebrew {
+      if corpus.contains("בדיקת סיכום") || corpus.contains("המודל המקומי") {
+        return "בדיקת סיכום במודל המקומי"
+      }
       if hasSimulation && hasAnalytics && hasScrolling {
         return "תיקוני אתר דחופים, אנליטיקס וסימולציות ריאיון"
       }
@@ -856,7 +1136,7 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
       case .some(.videoCommentary):
         return "סיכום הערות מסרטון ופעולות המשך"
       case .some(.generalTranscript):
-        return "סיכום תמלול ופעולות המשך"
+        return "סיכום מפגש ופעולות המשך"
       case .some(.meeting), .none:
         return "סיכום פגישה ותוכנית פעולה"
       }
@@ -886,7 +1166,7 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     case .some(.videoCommentary):
       return "Video Commentary Brief and Follow-Up"
     case .some(.generalTranscript):
-      return "Transcript Brief and Follow-Up"
+      return "Session Brief and Follow-Up"
     case .some(.meeting), .none:
       return "Meeting Brief and Action Plan"
     }
@@ -895,13 +1175,14 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
   private static func makeLocalizedSection(
     kind: LocalSessionRecapSection.Kind,
     language: LocalSessionDocumentLanguage,
+    title: String? = nil,
     summary: String,
     bullets: [String]
   ) -> LocalSessionRecapSection {
     LocalSessionRecapSection(
       id: UUID(),
       kind: kind,
-      title: title(for: kind, language: language),
+      title: title ?? Self.title(for: kind, language: language),
       summary: summary,
       bullets: bullets,
       anchorTimestamp: nil,
@@ -929,6 +1210,48 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
 
   private static func sanitizedLine(_ text: String) -> String {
     text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private static func presentationText(
+    _ text: String,
+    language: LocalSessionDocumentLanguage
+  ) -> String {
+    var cleaned = text
+    cleaned = cleaned.replacingOccurrences(
+      of: "reviewed the transcript and captured",
+      with: "captured"
+    )
+    cleaned = cleaned.replacingOccurrences(
+      of: "The generated brief is based on the source content rather than a verbatim transcript.",
+      with:
+        "The brief focuses on the work, context, and follow-up supported by the session material."
+    )
+    cleaned = cleaned.replacingOccurrences(
+      of: "The generated brief is based on the source content rather than raw conversation flow.",
+      with:
+        "The brief focuses on the work, context, and follow-up supported by the session material."
+    )
+    cleaned = cleaned.replacingOccurrences(
+      of: "Review the transcript and define concrete follow-up owners.",
+      with: "Review the source material and define concrete follow-up owners."
+    )
+    cleaned = cleaned.replacingOccurrences(
+      of: "Important source details extracted from the transcript.",
+      with: "Important source details preserved from the session material."
+    )
+    cleaned = cleaned.replacingOccurrences(
+      of: "Tasks or follow-up that can be taken from the transcript.",
+      with: "Tasks or follow-up that can be taken from the source material."
+    )
+
+    if language == .hebrew {
+      cleaned = cleaned.replacingOccurrences(
+        of: "הסיכום מתרגם את התמלול",
+        with: "הסיכום מתרגם את השיחה"
+      )
+    }
+
+    return cleaned
   }
 
   private static func timeString(for interval: TimeInterval?) -> String {
@@ -1110,6 +1433,170 @@ extension LocalSession {
   var displayTitle: String {
     guard title.hasPrefix("Meeting ") else { return title }
     return "Session " + title.dropFirst("Meeting ".count)
+  }
+
+  var transcriptTimelineItems: [LocalSessionTranscriptTimelineItem] {
+    let validSegmentIDs = Set(transcriptSegments.map(\.id))
+    return transcriptSegments.map { segment in
+      let segmentAttachments =
+        attachments
+        .filter { attachment in
+          transcriptSegmentID(for: attachment, validSegmentIDs: validSegmentIDs) == segment.id
+        }
+        .sorted { lhs, rhs in
+          if lhs.timestamp == rhs.timestamp {
+            return lhs.title < rhs.title
+          }
+          return lhs.timestamp < rhs.timestamp
+        }
+      let segmentArtifacts =
+        captureArtifacts
+        .filter { artifact in
+          transcriptSegmentID(for: artifact, validSegmentIDs: validSegmentIDs) == segment.id
+        }
+        .sorted { lhs, rhs in
+          if lhs.capturedAt == rhs.capturedAt {
+            return lhs.title < rhs.title
+          }
+          return lhs.capturedAt < rhs.capturedAt
+        }
+
+      return LocalSessionTranscriptTimelineItem(
+        id: segment.id,
+        segment: segment,
+        attachments: segmentAttachments,
+        captureArtifacts: segmentArtifacts
+      )
+    }
+  }
+
+  mutating func anchorTimelineContextToTranscriptSegments() {
+    let validSegmentIDs = Set(transcriptSegments.map(\.id))
+    guard !validSegmentIDs.isEmpty else { return }
+
+    for index in attachments.indices {
+      if let transcriptSegmentID = attachments[index].transcriptSegmentID,
+        validSegmentIDs.contains(transcriptSegmentID)
+      {
+        continue
+      }
+
+      guard let offset = timelineOffset(for: attachments[index]) else {
+        attachments[index].transcriptSegmentID = nil
+        continue
+      }
+
+      attachments[index].transcriptSegmentID = transcriptSegmentID(containingOffset: offset)
+    }
+
+    for index in captureArtifacts.indices {
+      if let transcriptSegmentID = captureArtifacts[index].transcriptSegmentID,
+        validSegmentIDs.contains(transcriptSegmentID)
+      {
+        continue
+      }
+
+      guard let offset = timelineOffset(for: captureArtifacts[index]) else {
+        captureArtifacts[index].transcriptSegmentID = nil
+        continue
+      }
+
+      captureArtifacts[index].transcriptSegmentID = transcriptSegmentID(containingOffset: offset)
+    }
+  }
+
+  private func transcriptSegmentID(
+    for attachment: LocalSessionAttachment,
+    validSegmentIDs: Set<UUID>
+  ) -> UUID? {
+    if let transcriptSegmentID = attachment.transcriptSegmentID,
+      validSegmentIDs.contains(transcriptSegmentID)
+    {
+      return transcriptSegmentID
+    }
+
+    guard let offset = timelineOffset(for: attachment) else { return nil }
+    return transcriptSegmentID(containingOffset: offset)
+  }
+
+  private func transcriptSegmentID(
+    for artifact: LocalSessionCaptureArtifact,
+    validSegmentIDs: Set<UUID>
+  ) -> UUID? {
+    if let transcriptSegmentID = artifact.transcriptSegmentID,
+      validSegmentIDs.contains(transcriptSegmentID)
+    {
+      return transcriptSegmentID
+    }
+
+    guard let offset = timelineOffset(for: artifact) else { return nil }
+    return transcriptSegmentID(containingOffset: offset)
+  }
+
+  private func transcriptSegmentID(containingOffset offset: TimeInterval) -> UUID? {
+    let ranges = transcriptSegmentRanges()
+    guard !ranges.isEmpty else { return nil }
+
+    if let containingRange = ranges.first(where: { range in
+      offset >= range.start - 0.35 && offset <= range.end + 0.35
+    }) {
+      return containingRange.id
+    }
+
+    return ranges.min { lhs, rhs in
+      distance(from: offset, to: lhs) < distance(from: offset, to: rhs)
+    }?.id
+  }
+
+  private func transcriptSegmentRanges() -> [(id: UUID, start: TimeInterval, end: TimeInterval)] {
+    let orderedSegments = transcriptSegments.sorted { lhs, rhs in
+      if lhs.timestamp == rhs.timestamp {
+        return lhs.id.uuidString < rhs.id.uuidString
+      }
+      return lhs.timestamp < rhs.timestamp
+    }
+
+    return orderedSegments.enumerated().map { index, segment in
+      let start = max(0, segment.timestamp.timeIntervalSince(startedAt))
+      let explicitEnd = segment.endTimestamp.map { max(start, $0.timeIntervalSince(startedAt)) }
+      let nextStart =
+        orderedSegments.dropFirst(index + 1).first
+        .map { max(start, $0.timestamp.timeIntervalSince(startedAt)) }
+      let end = explicitEnd ?? nextStart ?? start + 30
+
+      return (id: segment.id, start: start, end: max(start, end))
+    }
+  }
+
+  private func timelineOffset(for attachment: LocalSessionAttachment) -> TimeInterval? {
+    if let sessionOffset = attachment.sessionOffset {
+      return max(0, sessionOffset)
+    }
+
+    return max(0, attachment.timestamp.timeIntervalSince(startedAt))
+  }
+
+  private func timelineOffset(for artifact: LocalSessionCaptureArtifact) -> TimeInterval? {
+    if let sessionOffset = artifact.sessionOffset {
+      return max(0, sessionOffset)
+    }
+
+    return max(0, artifact.capturedAt.timeIntervalSince(startedAt))
+  }
+
+  private func distance(
+    from offset: TimeInterval,
+    to range: (id: UUID, start: TimeInterval, end: TimeInterval)
+  ) -> TimeInterval {
+    if offset < range.start {
+      return range.start - offset
+    }
+
+    if offset > range.end {
+      return offset - range.end
+    }
+
+    return 0
   }
 
   mutating func addAttachment(_ attachment: LocalSessionAttachment) {

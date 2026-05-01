@@ -13,6 +13,29 @@ final class CepessaSessionsStore {
   }
 }
 
+enum CepessaSessionFloatingBarPreferences {
+  static let enabledKey = "cepessa.sessions.floatingBarEnabled"
+  static let legacyDefaultOffMigrationKey = "cepessa.sessions.floatingBarDefaultOffMigrated"
+  static let defaultOnMigrationKey = "cepessa.sessions.floatingBarDefaultOnMigrated"
+
+  static func installDefaults(in defaults: UserDefaults = .standard) {
+    defaults.register(defaults: [
+      enabledKey: true,
+      legacyDefaultOffMigrationKey: true,
+      defaultOnMigrationKey: false,
+    ])
+
+    guard !defaults.bool(forKey: defaultOnMigrationKey) else { return }
+
+    let hasStoredPreference = defaults.object(forKey: enabledKey) != nil
+    let wasMovedOffByLegacyMigration = defaults.bool(forKey: legacyDefaultOffMigrationKey)
+    if !hasStoredPreference || wasMovedOffByLegacyMigration {
+      defaults.set(true, forKey: enabledKey)
+    }
+    defaults.set(true, forKey: defaultOnMigrationKey)
+  }
+}
+
 @MainActor
 final class CepessaSessionFloatingBarState: ObservableObject {
   enum NoticeStyle: Equatable {
@@ -35,6 +58,9 @@ final class CepessaSessionFloatingBarState: ObservableObject {
   @Published var errorMessage: String?
   @Published var noticeMessage: String?
   @Published var noticeStyle: NoticeStyle = .neutral
+  @Published var isDismissedForCurrentRecording = false
+  @Published var barContentWidth: CGFloat =
+    CepessaSessionFloatingBarController.Constants.preferredBarContentWidth
   @Published var processingStatusTitle: String?
   @Published var processingStatusDetail: String?
   @Published var processingProgress: Double?
@@ -64,12 +90,17 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   static let shared = CepessaSessionFloatingBarController()
 
   fileprivate enum Constants {
-    static let compactBarSize = NSSize(width: 612, height: 94)
-    static let expandedBarSize = NSSize(width: 612, height: 168)
+    static let preferredBarContentWidth: CGFloat = 860
+    static let minimumBarContentWidth: CGFloat = 620
+    static let maximumBarContentWidth: CGFloat = 920
+    static let panelHorizontalPadding: CGFloat = 20
+    static let compactBarHeight: CGFloat = 78
+    static let expandedBarHeight: CGFloat = 152
+    static let recordingPillHeight: CGFloat = 58
     static let queueRowHeight: CGFloat = 34
     static let positionKey = "CepessaSessionsFloatingBarPosition"
     static let attachmentsFolder = "Attachments"
-    static let enabledKey = "cepessa.sessions.floatingBarEnabled"
+    static let enabledKey = CepessaSessionFloatingBarPreferences.enabledKey
     static let attachmentDeckHiddenKey = "cepessa.sessions.floatingBarAttachmentDeckHidden"
   }
 
@@ -89,6 +120,8 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   }
 
   func connect(model: LocalMeetingAppModel) {
+    CepessaSessionFloatingBarPreferences.installDefaults()
+
     if self.model !== model {
       self.model = model
       bind(to: model)
@@ -113,6 +146,11 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
 
   func stopRecording() {
     model?.toggleRecording()
+  }
+
+  func dismissForCurrentRecording() {
+    state.isDismissedForCurrentRecording = true
+    syncVisibility()
   }
 
   func toggleAttachmentDeckVisibility() {
@@ -182,6 +220,8 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   func windowDidMove(_ notification: Notification) {
     guard let panel else { return }
     UserDefaults.standard.set(NSStringFromPoint(panel.frame.origin), forKey: Constants.positionKey)
+    refreshLayoutMetrics()
+    updatePanelSize(animated: false)
   }
 
   private func bind(to model: LocalMeetingAppModel) {
@@ -189,7 +229,10 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
 
     model.$isRecording
       .receive(on: DispatchQueue.main)
-      .sink { [weak self] _ in
+      .sink { [weak self] isRecording in
+        if !isRecording {
+          self?.state.isDismissedForCurrentRecording = false
+        }
         self?.refreshState()
         self?.syncVisibility()
       }
@@ -326,6 +369,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
 
     panel.contentView = container
     panel.setContentSize(preferredPanelSize)
+    refreshLayoutMetrics()
 
     if let savedOrigin = UserDefaults.standard.string(forKey: Constants.positionKey) {
       let origin = NSPointFromString(savedOrigin)
@@ -344,7 +388,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     let frame = screen.visibleFrame
     let origin = NSPoint(
       x: frame.midX - (preferredPanelSize.width / 2),
-      y: frame.maxY - preferredPanelSize.height - 24
+      y: frame.maxY - preferredPanelSize.height - 18
     )
     panel.setFrameOrigin(origin)
   }
@@ -352,6 +396,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   private func refreshState() {
     guard let model else { return }
 
+    refreshLayoutMetrics()
     state.isRecording = model.isRecording
     state.isTranscribing = model.isTranscribing || model.isGeneratingRecap
     state.isMicrophoneCaptureActive = model.isMicrophoneCaptureActive
@@ -411,7 +456,9 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
 
   private func syncVisibility() {
     guard let panel else { return }
-    let shouldShow = isFloatingBarEnabled && state.isRecording && !state.isTranscribing
+    let shouldShow =
+      isFloatingBarEnabled && state.isRecording && !state.isTranscribing
+      && !state.isDismissedForCurrentRecording
     state.isVisible = shouldShow
 
     if shouldShow {
@@ -429,14 +476,32 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   }
 
   private var preferredPanelSize: NSSize {
-    let baseSize =
+    let baseHeight =
       (state.isAttachmentDeckExpanded && state.attachmentDeck.hasContent)
-      ? Constants.expandedBarSize
-      : Constants.compactBarSize
+      ? Constants.expandedBarHeight
+      : Constants.compactBarHeight
     let queueRows = max(0, min(2, state.processingQueue.count - 1))
     return NSSize(
-      width: baseSize.width,
-      height: baseSize.height + (CGFloat(queueRows) * Constants.queueRowHeight))
+      width: currentBarContentWidth + Constants.panelHorizontalPadding,
+      height: baseHeight + (CGFloat(queueRows) * Constants.queueRowHeight))
+  }
+
+  private var currentBarContentWidth: CGFloat {
+    let availableWidth =
+      (panel.flatMap { screen(for: $0.frame) } ?? NSScreen.main ?? NSScreen.screens.first)?
+      .visibleFrame.width
+    let screenBoundWidth = max(
+      Constants.minimumBarContentWidth,
+      (availableWidth ?? Constants.preferredBarContentWidth) - 48
+    )
+    return min(Constants.maximumBarContentWidth, screenBoundWidth)
+  }
+
+  private func refreshLayoutMetrics() {
+    let width = currentBarContentWidth
+    if state.barContentWidth != width {
+      state.barContentWidth = width
+    }
   }
 
   private func updatePanelSize(animated: Bool) {
@@ -836,141 +901,18 @@ private struct CepessaSessionFloatingBarView: View {
 
           Spacer(minLength: 0)
         }
-        .padding(.horizontal, 20)
-        .padding(.bottom, -14)
+        .padding(.horizontal, 28)
+        .padding(.bottom, -10)
         .zIndex(2)
       }
 
-      VStack(alignment: .leading, spacing: 10) {
-        HStack(alignment: .center, spacing: 12) {
-          SessionFloatingDragHandle()
-
-          SessionFloatingLiveToken(
-            accent: state.accentColor,
-            isRecording: state.isRecording,
-            isTranscribing: state.isTranscribing,
-            timerText: state.timerText
-          )
-
-          VStack(alignment: .leading, spacing: 2) {
-            Text(state.title)
-              .scaledFont(size: 13, weight: .semibold)
-              .foregroundStyle(CepessaColors.textPrimary)
-              .lineLimit(1)
-
-            Text(state.noticeMessage ?? state.statusMessage)
-              .scaledFont(size: 11)
-              .foregroundStyle(
-                state.noticeMessage == nil ? CepessaColors.textSecondary : noticeTextColor
-              )
-              .lineLimit(2)
-              .fixedSize(horizontal: false, vertical: true)
-          }
-          .frame(maxWidth: .infinity, alignment: .leading)
-
-          HStack(spacing: 8) {
-            SessionFloatingSignalIndicator(
-              icon: "mic.fill",
-              label: "Mic",
-              value: state.micLevel,
-              accent: meterAccent(
-                isActive: state.isMicrophoneCaptureActive,
-                isRecording: state.isRecording,
-                isTranscribing: state.isTranscribing
-              )
-            )
-
-            SessionFloatingSignalIndicator(
-              icon: "speaker.wave.2.fill",
-              label: "System",
-              value: state.systemLevel,
-              accent: meterAccent(
-                isActive: state.isSystemAudioCaptureActive,
-                isRecording: state.isRecording,
-                isTranscribing: state.isTranscribing
-              )
-            )
-          }
-        }
-
-        HStack(alignment: .top, spacing: 10) {
-          if state.isTranscribing {
-            VStack(alignment: .leading, spacing: 8) {
-              HStack(spacing: 8) {
-                SessionFloatingProcessingLane(
-                  title: progressButtonTitle,
-                  detail: state.processingStatusDetail,
-                  progress: state.processingProgress
-                )
-
-                if state.processingQueue.count > 1 {
-                  Text("\(state.processingQueue.count) active")
-                    .scaledFont(size: 10.5, weight: .semibold)
-                    .foregroundStyle(CepessaColors.textSecondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(CepessaColors.backgroundRaised.opacity(0.62))
-                    .clipShape(Capsule())
-                }
-              }
-
-              if !secondaryProcessingItems.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                  ForEach(secondaryProcessingItems) { item in
-                    SessionFloatingQueueRow(item: item)
-                  }
-                }
-              }
-            }
-          } else {
-            SessionFloatingActionCluster(
-              isDisabled: !state.isRecording,
-              captureScreen: controller.captureFullScreenshot,
-              captureRegion: controller.captureRegionScreenshot,
-              importFile: controller.importDocument
-            )
-          }
-
-          Spacer(minLength: 0)
-
-          Button(action: controller.stopRecording) {
-            HStack(spacing: 8) {
-              Image(systemName: state.isRecording ? "stop.fill" : "hourglass")
-                .scaledFont(size: 11, weight: .bold)
-              Text(state.isRecording ? "Stop Session" : progressButtonTitle)
-                .scaledFont(size: 11.5, weight: .semibold)
-            }
-            .foregroundStyle(state.isRecording ? Color.white : CepessaColors.textSecondary)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .background(
-              state.isRecording ? CepessaColors.error : CepessaColors.backgroundRaised.opacity(0.7)
-            )
-            .clipShape(Capsule())
-          }
-          .buttonStyle(SessionFloatingPressStyle())
-          .disabled(!state.isRecording)
-          .help(state.isRecording ? "Stop the current recording session." : progressButtonTitle)
-          .accessibilityLabel(state.isRecording ? "Stop session" : progressButtonTitle)
-        }
-
-        if let error = state.errorMessage, !error.isEmpty {
-          HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-              .scaledFont(size: 10, weight: .semibold)
-            Text(error)
-              .scaledFont(size: 10.5, weight: .medium)
-              .lineLimit(2)
-          }
-          .foregroundStyle(CepessaColors.warning)
-        }
-      }
-      .padding(.horizontal, 16)
-      .padding(.vertical, 14)
-      .frame(width: CepessaSessionFloatingBarController.Constants.compactBarSize.width)
-      .background(barSurface)
+      recordingPill
     }
-    .padding(6)
+    .frame(
+      width: state.barContentWidth
+        + CepessaSessionFloatingBarController.Constants.panelHorizontalPadding
+    )
+    .padding(.vertical, 10)
     .background(Color.clear)
     .animation(barAnimation, value: state.noticeMessage)
     .animation(barAnimation, value: state.errorMessage)
@@ -980,28 +922,75 @@ private struct CepessaSessionFloatingBarView: View {
     .animation(barAnimation, value: state.isAttachmentDeckExpanded)
   }
 
-  private var barSurface: some View {
-    RoundedRectangle(cornerRadius: 24, style: .continuous)
-      .fill(
-        LinearGradient(
-          colors: [
-            CepessaColors.paperRaised.opacity(0.78),
-            CepessaColors.paperDeep.opacity(0.84),
-          ],
-          startPoint: .topLeading,
-          endPoint: .bottomTrailing
-        )
+  private var recordingPill: some View {
+    recordingPillContent
+      .padding(.horizontal, 10)
+      .padding(.vertical, 8)
+      .frame(
+        width: state.barContentWidth,
+        height: CepessaSessionFloatingBarController.Constants.recordingPillHeight
       )
-      .overlay(
-        RoundedRectangle(cornerRadius: 24, style: .continuous)
-          .stroke(Color.white.opacity(0.76), lineWidth: 1)
+      .cepessaFloatingToolbarSurface()
+      .accessibilityElement(children: .contain)
+      .accessibilityLabel("Floating recording controls")
+      .accessibilityHint("Drag the waveform area to move the recording bar.")
+  }
+
+  private var recordingPillContent: some View {
+    HStack(alignment: .center, spacing: 7) {
+      SessionFloatingToolbarIconButton(
+        icon: "xmark",
+        title: "Hide floating recording bar",
+        isDisabled: false,
+        action: controller.dismissForCurrentRecording
       )
-      .overlay(
-        RoundedRectangle(cornerRadius: 24, style: .continuous)
-          .stroke(CepessaColors.border.opacity(0.54), lineWidth: 1)
-          .padding(0.5)
+
+      toolbarDivider
+
+      SessionFloatingToolbarIconButton(
+        icon: "laptopcomputer",
+        title: "Capture screen",
+        isDisabled: !state.isRecording,
+        action: controller.captureFullScreenshot
       )
-      .shadow(color: CepessaColors.warmShadow.opacity(0.18), radius: 30, x: 0, y: 18)
+      SessionFloatingToolbarIconButton(
+        icon: "camera",
+        title: "Capture region",
+        isDisabled: !state.isRecording,
+        action: controller.captureRegionScreenshot
+      )
+      SessionFloatingToolbarIconButton(
+        icon: "paperclip",
+        title: "Attach file",
+        isDisabled: !state.isRecording,
+        action: controller.importDocument
+      )
+
+      SessionFloatingWaveformDragRegion(
+        micLevel: state.micLevel,
+        systemLevel: state.systemLevel,
+        accent: waveformAccent
+      )
+      .frame(maxWidth: .infinity, minHeight: 40, maxHeight: 42)
+
+      SessionFloatingTimerPill(timerText: state.timerText)
+
+      SessionFloatingStopButton(action: controller.stopRecording)
+    }
+  }
+
+  private var toolbarDivider: some View {
+    Rectangle()
+      .fill(Color(nsColor: .separatorColor).opacity(0.65))
+      .frame(width: 1, height: 20)
+      .padding(.horizontal, 2)
+  }
+
+  private var waveformAccent: Color {
+    if let error = state.errorMessage, !error.isEmpty {
+      return CepessaColors.warning
+    }
+    return state.noticeStyle == .error ? CepessaColors.warning : CepessaColors.textPrimary
   }
 
   private var noticeTextColor: Color {
@@ -1629,6 +1618,133 @@ private struct SessionFloatingQueueRow: View {
     .padding(.vertical, 7)
     .background(CepessaColors.backgroundRaised.opacity(0.54))
     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+  }
+}
+
+private struct SessionFloatingToolbarIconButton: View {
+  let icon: String
+  let title: String
+  let isDisabled: Bool
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      Image(systemName: icon)
+        .scaledFont(size: 12.5, weight: .medium)
+        .frame(width: 40, height: 40)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(CepessaPressStyle(scale: 0.965, pressedBrightness: -0.02))
+    .disabled(isDisabled)
+    .foregroundColor(
+      isDisabled ? CepessaColors.textTertiary.opacity(0.38) : CepessaColors.textSecondary
+    )
+    .help(title)
+    .accessibilityLabel(title)
+  }
+}
+
+private struct SessionFloatingTimerPill: View {
+  let timerText: String
+
+  var body: some View {
+    Text(timerText)
+      .scaledFont(size: 23, weight: .regular, design: .monospaced)
+      .monospacedDigit()
+      .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
+      .frame(minWidth: 118, minHeight: 40)
+      .padding(.horizontal, 4)
+      .cepessaFloatingToolbarPillSurface()
+      .accessibilityLabel("Recording duration \(timerText)")
+  }
+}
+
+private struct SessionFloatingStopButton: View {
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      Label("Stop", systemImage: "stop.fill")
+        .scaledFont(size: 12, weight: .semibold)
+        .foregroundColor(.white)
+        .padding(.horizontal, 13)
+        .frame(height: 40)
+        .background(CepessaColors.error.opacity(0.92), in: Capsule())
+    }
+    .buttonStyle(CepessaPressStyle(scale: 0.965, pressedBrightness: -0.02))
+    .help("Stop the current recording session")
+    .accessibilityLabel("Stop recording")
+  }
+}
+
+private struct SessionFloatingWaveformDragRegion: View {
+  let micLevel: Double
+  let systemLevel: Double
+  let accent: Color
+
+  var body: some View {
+    ZStack {
+      SessionFloatingDragHandleView()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+      SessionFloatingAudioWaveform(
+        micLevel: micLevel,
+        systemLevel: systemLevel,
+        accent: accent
+      )
+      .allowsHitTesting(false)
+    }
+    .contentShape(Capsule())
+    .accessibilityLabel("Move floating recording bar")
+    .accessibilityHint("Drag to reposition the recording controls.")
+  }
+}
+
+private struct SessionFloatingAudioWaveform: View {
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  let micLevel: Double
+  let systemLevel: Double
+  let accent: Color
+
+  private let pattern: [CGFloat] = [
+    0.22, 0.52, 0.26, 0.62, 0.34, 0.74, 0.30, 0.42, 0.25, 0.54, 0.36, 0.92, 0.28,
+    0.50, 0.24, 0.66, 0.32, 0.46, 0.24, 0.58, 0.38, 0.82, 0.30, 0.48, 0.26, 0.64,
+    0.34, 0.56, 0.24, 0.44, 0.30, 0.78,
+  ]
+
+  var body: some View {
+    HStack(alignment: .center, spacing: 6) {
+      ForEach(pattern.indices, id: \.self) { index in
+        Capsule()
+          .fill(barColor(at: index))
+          .frame(width: barWidth(at: index), height: barHeight(at: index))
+      }
+    }
+    .frame(maxWidth: .infinity, minHeight: 40, maxHeight: 40)
+    .animation(
+      reduceMotion ? nil : .timingCurve(0.23, 1, 0.32, 1, duration: 0.16),
+      value: micLevel + systemLevel
+    )
+  }
+
+  private var liveLevel: CGFloat {
+    CGFloat(min(max(max(micLevel, systemLevel), 0), 1))
+  }
+
+  private func barHeight(at index: Int) -> CGFloat {
+    let lift = 0.82 + (liveLevel * 0.34)
+    let pulse = index.isMultiple(of: 11) ? 1.20 : 1
+    return max(6, pattern[index] * 32 * lift * pulse)
+  }
+
+  private func barWidth(at index: Int) -> CGFloat {
+    index.isMultiple(of: 11) ? 5 : 4
+  }
+
+  private func barColor(at index: Int) -> Color {
+    let emphasis = index.isMultiple(of: 11) || index.isMultiple(of: 5)
+    return accent.opacity(emphasis ? 0.78 : 0.46)
   }
 }
 

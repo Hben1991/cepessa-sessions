@@ -135,6 +135,26 @@ struct CepessaSessionDocumentChatView: View {
 
       HStack(spacing: 8) {
         if let session {
+          if session.documentChat.undoSnapshot != nil {
+            Button {
+              model.undoLastDocumentChatEdit(for: session.id)
+            } label: {
+              Image(systemName: "arrow.uturn.backward")
+                .scaledFont(size: 11, weight: .semibold)
+                .foregroundColor(CepessaColors.textSecondary)
+                .frame(width: 28, height: 28)
+                .background(CepessaColors.backgroundRaised.opacity(0.82))
+                .clipShape(Circle())
+                .overlay(
+                  Circle()
+                    .stroke(CepessaColors.border.opacity(0.16), lineWidth: 1)
+                )
+            }
+            .buttonStyle(CepessaPressStyle(scale: 0.94, pressedBrightness: -0.02))
+            .help("Undo last document edit")
+            .accessibilityLabel("Undo last document edit")
+          }
+
           chatStatusBadge(for: session.documentChat.status)
         }
 
@@ -331,6 +351,12 @@ struct CepessaSessionDocumentChatView: View {
               .foregroundColor(CepessaColors.warning)
           }
         }
+      }
+
+      proposalPreview(proposal)
+
+      if !proposal.sourceCitations.isEmpty {
+        citationStrip(proposal.sourceCitations)
       }
 
       HStack(spacing: 8) {
@@ -538,6 +564,10 @@ struct CepessaSessionDocumentChatView: View {
   private func proposalSummary(_ proposal: LocalSessionDocumentEditProposal) -> String {
     var parts: [String] = []
 
+    if proposal.sessionTitle != nil {
+      parts.append("title update")
+    }
+
     if proposal.recapPatch != nil {
       parts.append("recap update")
     }
@@ -555,6 +585,81 @@ struct CepessaSessionDocumentChatView: View {
     }
 
     return parts.isEmpty ? "No document edits were proposed." : parts.joined(separator: ", ")
+  }
+
+  private func proposalPreview(_ proposal: LocalSessionDocumentEditProposal) -> some View {
+    VStack(alignment: .leading, spacing: 7) {
+      if let title = proposal.sessionTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+        !title.isEmpty
+      {
+        previewLine(title: "Title", body: title)
+      }
+
+      if let overview = proposal.recapPatch?.overview?.trimmingCharacters(
+        in: .whitespacesAndNewlines),
+        !overview.isEmpty
+      {
+        previewLine(title: "Overview", body: overview)
+      }
+
+      ForEach(Array((proposal.recapPatch?.sections ?? []).enumerated()), id: \.offset) {
+        _, section in
+        let title = section.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          ? section.kind.displayTitle
+          : section.title
+        previewLine(title: title, body: section.summary)
+      }
+
+      ForEach(proposal.transcriptPatches, id: \.segmentID) { patch in
+        previewLine(title: "Transcript \(patch.segmentID.uuidString.prefix(8))", body: patch.text)
+      }
+
+      ForEach(proposal.speakerRenames, id: \.oldName) { rename in
+        previewLine(title: "Speaker", body: "\(rename.oldName) -> \(rename.newName)")
+      }
+    }
+    .padding(10)
+    .background(CepessaColors.backgroundRaised.opacity(0.62))
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+  }
+
+  private func previewLine(title: String, body: String) -> some View {
+    VStack(alignment: .leading, spacing: 3) {
+      Text(title)
+        .scaledFont(size: 10.5, weight: .semibold)
+        .foregroundColor(CepessaColors.textSecondary)
+
+      Text(body)
+        .scaledFont(size: 11.5)
+        .foregroundColor(CepessaColors.textPrimary)
+        .lineLimit(3)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+  }
+
+  private func citationStrip(_ citations: [LocalSessionDocumentSourceCitation]) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Label("Sources", systemImage: "quote.bubble")
+        .scaledFont(size: 10.5, weight: .semibold)
+        .foregroundColor(CepessaColors.textSecondary)
+
+      ForEach(citations.prefix(3)) { citation in
+        VStack(alignment: .leading, spacing: 2) {
+          Text(citation.title)
+            .scaledFont(size: 10, weight: .semibold)
+            .foregroundColor(CepessaColors.capture)
+          Text(citation.excerpt)
+            .scaledFont(size: 10.5)
+            .foregroundColor(CepessaColors.textSecondary)
+            .lineLimit(2)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CepessaColors.paperRaised.opacity(0.48))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+      }
+    }
   }
 
   private func sendDraft(for session: LocalMeetingSession) {
@@ -599,6 +704,34 @@ private struct SessionDocumentChatBubble: View {
         .scaledFont(size: 10)
         .foregroundColor(CepessaColors.textTertiary)
         .padding(.horizontal, 4)
+
+        if !isUser, !message.sourceCitations.isEmpty {
+          VStack(alignment: .leading, spacing: 4) {
+            ForEach(message.sourceCitations.prefix(2)) { citation in
+              HStack(alignment: .top, spacing: 5) {
+                Image(systemName: "quote.opening")
+                  .scaledFont(size: 8, weight: .semibold)
+                  .foregroundColor(CepessaColors.capture)
+                  .frame(width: 12, height: 12)
+
+                VStack(alignment: .leading, spacing: 1) {
+                  Text(citation.title)
+                    .scaledFont(size: 9.5, weight: .semibold)
+                    .foregroundColor(CepessaColors.textSecondary)
+                  Text(citation.excerpt)
+                    .scaledFont(size: 9.5)
+                    .foregroundColor(CepessaColors.textTertiary)
+                    .lineLimit(2)
+                }
+              }
+              .padding(.horizontal, 8)
+              .padding(.vertical, 6)
+              .background(CepessaColors.backgroundRaised.opacity(0.56))
+              .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+          }
+          .frame(maxWidth: 360, alignment: .leading)
+        }
       }
       .frame(maxWidth: 430, alignment: isUser ? .trailing : .leading)
 

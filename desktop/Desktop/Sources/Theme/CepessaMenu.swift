@@ -28,12 +28,34 @@ struct CepessaToolbarMenu<Label: View, Content: View>: View {
           )
       }
     }
+    .onExitCommand {
+      guard isOpen else { return }
+      dismissMenu()
+    }
+    .background {
+      if isOpen {
+        Button(action: dismissMenu) {
+          Color.clear
+            .frame(width: 0, height: 0)
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.cancelAction)
+        .accessibilityHidden(true)
+      }
+    }
     .zIndex(isOpen ? 40 : 0)
+  }
+
+  private func dismissMenu() {
+    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.12)) {
+      isOpen = false
+    }
   }
 
   private var menuPanel: some View {
     content()
       .padding(8)
+      .fixedSize(horizontal: true, vertical: false)
       .background {
         if #available(macOS 26.0, *) {
           RoundedRectangle(cornerRadius: 22, style: .continuous)

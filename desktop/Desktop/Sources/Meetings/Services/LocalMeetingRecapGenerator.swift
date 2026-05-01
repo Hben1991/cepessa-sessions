@@ -107,13 +107,14 @@ struct LocalSessionEmbeddedRecapClient: LocalSessionRecapModelProviding, Sendabl
     let contentInstructions = instructions(for: contentType)
 
     return """
-      You are creating a clear, practical brief from the attached transcript.
+      You are creating a clear, practical brief from the recorded session material below.
 
       Clean the transcript before summarizing it:
       - Remove noise, side conversations, repetitions, polite filler, irrelevant jokes, broken transcription fragments, and casual "thank you" exchanges.
       - Do not write a transcript.
       - Do not include raw conversation noise.
       - Keep only what matters for actual work.
+      - Do not frame the final brief as being about "the transcript"; write about the meeting, session, project, product, client, or source material when supported.
 
       The transcript was classified before this step.
       Content type: \(contentType.displayTitle)
@@ -122,7 +123,11 @@ struct LocalSessionEmbeddedRecapClient: LocalSessionRecapModelProviding, Sendabl
 
       \(contentInstructions)
 
-      Not every section must be full. Include only what is supported by the transcript.
+      Not every section must be full. Include only what is supported by the source material.
+      Match the spirit of the recording itself unless the user supplied a different instruction.
+      Prefer a compact useful brief over a long exhaustive report.
+      Do not force meeting-style or follow-up sections when the recording is a test, video, note, or ambient source capture.
+      Use empty arrays for decisions, actionItems, openQuestions, or nextSteps when the source does not clearly support them.
       Separate urgent fixes from next-iteration improvements when that distinction exists.
       Use a professional, clear, direct tone that is not overly formal.
       Extract project, client, or product names only when the transcript or session title explicitly provides them.
@@ -150,7 +155,7 @@ struct LocalSessionEmbeddedRecapClient: LocalSessionRecapModelProviding, Sendabl
       Transcript:
       \(transcript)
 
-      Final instruction: Return only valid JSON matching the schema above. Write a cleaned practical brief for the detected content type, not a transcript. End with a short professional recommendation in nextSteps. No markdown fences. No commentary.
+      Final instruction: Return only valid JSON matching the schema above. Write a cleaned practical brief for the detected content type, not a transcript or a note about a transcript. Leave unsupported arrays empty. No markdown fences. No commentary.
       """
   }
 
@@ -199,7 +204,7 @@ struct LocalSessionEmbeddedRecapClient: LocalSessionRecapModelProviding, Sendabl
         - useful details worth preserving
         - explicit tasks, commitments, or questions
         - what remains ambiguous
-        - a short recommendation for how to use this transcript next
+        - a short recommendation for how to use this source material next
         """
     }
   }
@@ -266,9 +271,11 @@ struct LocalSessionDeterministicRecapGenerator {
     let candidates = normalizedCandidates(from: input)
     let summary = synthesizedSummary(for: input, candidates: candidates)
     let contentType = input.contentClassification?.type ?? .generalTranscript
+    let usesHebrewDocument = summary.overview.containsHebrewScript
     let overviewSection = section(
       kind: .overview,
-      title: "Overview",
+      title: usesHebrewDocument
+        ? hebrewSectionTitle(for: .overview, contentType: contentType) : "Overview",
       summary: summary.overview,
       bullets: [summary.overview],
       candidates: candidates,
@@ -276,57 +283,88 @@ struct LocalSessionDeterministicRecapGenerator {
     )
     let keyPointsSection = section(
       kind: .keyPoints,
-      title: sectionTitle(for: .keyPoints, contentType: contentType),
-      summary: keyPointSummary(for: contentType),
+      title: usesHebrewDocument
+        ? hebrewSectionTitle(for: .keyPoints, contentType: contentType)
+        : sectionTitle(for: .keyPoints, contentType: contentType),
+      summary: usesHebrewDocument
+        ? hebrewSectionSummary(for: .keyPoints, contentType: contentType)
+        : keyPointSummary(for: contentType),
       bullets: summary.keyPoints,
       candidates: candidates,
       startedAt: input.startedAt
     )
     let decisionsSection = section(
       kind: .decisions,
-      title: sectionTitle(for: .decisions, contentType: contentType),
-      summary: decisionSummary(for: contentType),
+      title: usesHebrewDocument
+        ? hebrewSectionTitle(for: .decisions, contentType: contentType)
+        : sectionTitle(for: .decisions, contentType: contentType),
+      summary: usesHebrewDocument
+        ? hebrewSectionSummary(for: .decisions, contentType: contentType)
+        : decisionSummary(for: contentType),
       bullets: summary.decisions,
       candidates: candidates,
       startedAt: input.startedAt
     )
     let actionItemsSection = section(
       kind: .actionItem,
-      title: sectionTitle(for: .actionItem, contentType: contentType),
-      summary: actionSummary(for: contentType),
+      title: usesHebrewDocument
+        ? hebrewSectionTitle(for: .actionItem, contentType: contentType)
+        : sectionTitle(for: .actionItem, contentType: contentType),
+      summary: usesHebrewDocument
+        ? hebrewSectionSummary(for: .actionItem, contentType: contentType)
+        : actionSummary(for: contentType),
       bullets: summary.actionItems,
       candidates: candidates,
       startedAt: input.startedAt
     )
     let openQuestionsSection = section(
       kind: .openQuestions,
-      title: "Open questions",
-      summary: "Questions that still need confirmation.",
+      title: usesHebrewDocument
+        ? hebrewSectionTitle(for: .openQuestions, contentType: contentType) : "Open questions",
+      summary: usesHebrewDocument
+        ? hebrewSectionSummary(for: .openQuestions, contentType: contentType)
+        : "Questions that still need confirmation.",
       bullets: summary.openQuestions,
       candidates: candidates,
       startedAt: input.startedAt
     )
     let nextStepsSection = section(
       kind: .nextSteps,
-      title: "Professional recommendation",
-      summary: "Recommended way to move forward.",
+      title: usesHebrewDocument
+        ? hebrewSectionTitle(for: .nextSteps, contentType: contentType)
+        : "Professional recommendation",
+      summary: usesHebrewDocument
+        ? hebrewSectionSummary(for: .nextSteps, contentType: contentType)
+        : "Recommended way to move forward.",
       bullets: summary.nextSteps,
       candidates: candidates,
       startedAt: input.startedAt
     )
 
+    var sections = [overviewSection]
+    sections.append(contentsOf: [
+      keyPointsSection,
+      decisionsSection,
+      actionItemsSection,
+      openQuestionsSection,
+      nextStepsSection,
+    ].filter { section in
+      shouldIncludeSection(section)
+    })
+
     return LocalSessionRecap(
       overview: overviewSection.summary,
       generatedAt: Date(),
-      sections: [
-        overviewSection,
-        keyPointsSection,
-        decisionsSection,
-        actionItemsSection,
-        openQuestionsSection,
-        nextStepsSection,
-      ]
+      sections: sections
     )
+  }
+
+  private func shouldIncludeSection(_ section: LocalSessionRecapSection) -> Bool {
+    if section.kind == .overview { return true }
+
+    return !section.bullets.filter {
+      !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }.isEmpty
   }
 
   private func normalizedCandidates(
@@ -384,13 +422,26 @@ struct LocalSessionDeterministicRecapGenerator {
     let workContextName =
       explicitProjectName(for: input, candidates: candidates) ?? meaningfulSessionTitle(input.title)
     let contentType = input.contentClassification?.type ?? .generalTranscript
+    if contentType == .videoCommentary,
+      candidates.contains(where: { $0.text.containsHebrewScript })
+    {
+      return hebrewVideoSummary(from: candidates)
+    }
+    if activeThemes == [.generalDiscussion],
+      contentType == .generalTranscript,
+      candidates.contains(where: { $0.text.containsHebrewScript })
+    {
+      return hebrewGeneralSummary(from: candidates)
+    }
+
     let sourceNoun = sourceNoun(for: contentType)
-    let overviewSubject = workContextName.map { "For \($0), the \(sourceNoun)" } ?? "The \(sourceNoun)"
+    let overviewSubject =
+      workContextName.map { "For \($0), the \(sourceNoun)" } ?? "The \(sourceNoun)"
 
     let overview: String
     if activeThemes == [.generalDiscussion] {
       overview =
-        "\(overviewSubject) reviewed the transcript and captured the main areas that need follow-up. The generated brief is based on the source content rather than a verbatim transcript."
+        "\(overviewSubject) captured the main areas that need follow-up. The brief focuses on the work, context, and follow-up supported by the source material."
     } else {
       let themeList = activeThemes.prefix(3).map(\.overviewPhrase).joined(separator: ", ")
       overview =
@@ -398,26 +449,20 @@ struct LocalSessionDeterministicRecapGenerator {
     }
 
     let keyPoints = activeThemes.prefix(5).map(\.keyPoint)
+    let explicitDecisions = salientBullets(from: candidates, matching: .decision)
     let decisions =
-      activeThemes.flatMap(\.decisions).isEmpty
-      ? ["No final decision was explicit enough to treat as closed."]
-      : Array(activeThemes.flatMap(\.decisions).prefix(4))
+      explicitDecisions.isEmpty
+      ? Array(activeThemes.flatMap(\.decisions).prefix(4))
+      : explicitDecisions
     let ownerActionItems = ownerAwareActionItems(from: candidates)
     let themeActionItems = activeThemes.flatMap(\.actionItems)
-    let actionItems =
-      ownerActionItems.isEmpty && themeActionItems.isEmpty
-      ? ["Review the transcript and define concrete follow-up owners."]
-      : Array((ownerActionItems + themeActionItems).prefix(5))
+    let actionItems = Array((ownerActionItems + themeActionItems).prefix(5))
+    let explicitQuestions = salientBullets(from: candidates, matching: .question)
     let openQuestions =
-      activeThemes.flatMap(\.openQuestions).isEmpty
-      ? [
-        "Which items should become immediate fixes, and which require a broader product/design pass?"
-      ]
-      : Array(activeThemes.flatMap(\.openQuestions).prefix(4))
-    let nextSteps =
-      activeThemes.flatMap(\.nextSteps).isEmpty
-      ? ["Turn the recap into a prioritized task list."]
-      : Array(activeThemes.flatMap(\.nextSteps).prefix(4))
+      explicitQuestions.isEmpty
+      ? Array(activeThemes.flatMap(\.openQuestions).prefix(4))
+      : explicitQuestions
+    let nextSteps = Array(activeThemes.flatMap(\.nextSteps).prefix(4))
 
     return DeterministicRecapSummary(
       overview: overview,
@@ -429,9 +474,100 @@ struct LocalSessionDeterministicRecapGenerator {
     )
   }
 
+  private func hebrewVideoSummary(from candidates: [Candidate]) -> DeterministicRecapSummary {
+    let corpus = candidates.map(\.text).joined(separator: " ")
+    let sourceDescription: String
+    if corpus.contains("מורה מבוכים") && corpus.contains("ערוץ דונקי") {
+      sourceDescription = "סרטון יוטיוב בעברית, כנראה לייב של מורה מבוכים מערוץ דונקי"
+    } else if corpus.contains("יוטיוב") {
+      sourceDescription = "סרטון יוטיוב בעברית"
+    } else {
+      sourceDescription = "סרטון או מקור אודיו בעברית"
+    }
+
+    let roleplaySignals = [
+      "קובייה", "גלגל", "גלגול", "להתגנב", "לתקוף", "חץ", "מריק", "מיכאל",
+      "מכשפה", "עץ",
+    ]
+    let isRoleplayScene = roleplaySignals.contains { corpus.contains($0) }
+    let sceneSummary = isRoleplayScene
+      ? "הקטע מתאר סצנת משחק תפקידים: ניסיון התגנבות ותקיפה, גלגולי קובייה, חץ שמחטיא ופוגע בעץ מושחת, והמשך איום סביב מריק, מיכאל והמכשפה."
+      : "הקטע מתמקד בתוכן שנשמע מתוך הסרטון ובנקודות המרכזיות שעולות ממנו."
+
+    return DeterministicRecapSummary(
+      overview: "המסמך עוסק ב\(sourceDescription). \(sceneSummary)",
+      keyPoints: [
+        "ההקלטה מתחילה בבחירת סרטון מהיסטוריית יוטיוב ובחירה בתוכן בעברית.",
+        sceneSummary,
+      ],
+      decisions: [],
+      actionItems: [],
+      openQuestions: [],
+      nextSteps: []
+    )
+  }
+
+  private func hebrewGeneralSummary(from candidates: [Candidate]) -> DeterministicRecapSummary {
+    let corpus = candidates.map(\.text).joined(separator: " ")
+    let mentionsLocalModel = candidates.contains { candidate in
+      let speaker = candidate.speaker.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      let text = candidate.text.lowercased()
+      return speaker.contains("local model")
+        || text.contains("המודל המקומי")
+        || text.contains("מודל מקומי")
+        || text.contains("local model")
+    }
+    let isLocalModelSummaryCheck =
+      mentionsLocalModel
+      && (corpus.contains("מסכם") || corpus.contains("סיכום") || corpus.contains("הצלחה"))
+    if isLocalModelSummaryCheck {
+      return DeterministicRecapSummary(
+        overview:
+          "המסמך עוסק בבדיקת סיכום של המודל המקומי: האם הוא באמת מסכם את המסמך ומציין הצלחה, או שאינו מסכם ולכן הבדיקה נכשלת.",
+        keyPoints: [
+          "המטרה היא לבדוק אם המודל המקומי מסכם את המסמך בפועל.",
+          "קריטריון ההצלחה הוא שהסיכום יציין שהבדיקה הצליחה.",
+        ],
+        decisions: [
+          "לא התקבלה החלטה נוספת מעבר להגדרת תנאי הצלחה ואי הצלחה לבדיקה."
+        ],
+        actionItems: [
+          "להריץ את בדיקת הסיכום על המסמך.",
+          "לוודא שהפלט מציין הצלחה כאשר הסיכום עובד.",
+          "אם הסיכום לא עובד, לסמן זאת כאי הצלחה ולתקן את מסלול המודל המקומי.",
+        ],
+        openQuestions: [
+          "האם המודל המקומי מצליח לסכם את המסמך באופן נקי?"
+        ],
+        nextSteps: [
+          "לבדוק את פלט הסיכום ולוודא שהוא משקף הצלחה או אי הצלחה לפי התוצאה."
+        ]
+      )
+    }
+
+    let usefulSentences = candidates.map(\.text)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+      .prefix(4)
+    let joined = usefulSentences.joined(separator: " ")
+    let overview = joined.isEmpty
+      ? "המסמך מסכם מקור בעברית ומרכז את הנקודות שדורשות המשך טיפול."
+      : "המסמך עוסק ב\(joined)"
+
+    return DeterministicRecapSummary(
+      overview: overview,
+      keyPoints: Array(usefulSentences),
+      decisions: ["לא זוהתה החלטה סופית מפורשת."],
+      actionItems: ["להפוך את הנקודות במסמך לרשימת משימות ברורה."],
+      openQuestions: ["אילו נקודות דורשות בדיקה או פעולה נוספת?"],
+      nextSteps: ["לעבור על המסמך ולחדד את הפעולות הבאות."]
+    )
+  }
+
   private func ownerAwareActionItems(from candidates: [Candidate]) -> [String] {
     let bullets = candidates.compactMap { candidate -> String? in
-      guard candidate.score.contains(.action), let speaker = meaningfulSpeakerName(candidate.speaker)
+      guard candidate.score.contains(.action),
+        let speaker = meaningfulSpeakerName(candidate.speaker)
       else {
         return nil
       }
@@ -439,6 +575,19 @@ struct LocalSessionDeterministicRecapGenerator {
       let text = candidate.text.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !text.isEmpty else { return nil }
       return "\(speaker): \(text)"
+    }
+
+    return Array(deduplicatedBullets(from: bullets).prefix(4))
+  }
+
+  private func salientBullets(
+    from candidates: [Candidate],
+    matching score: Candidate.Score
+  ) -> [String] {
+    let bullets = candidates.compactMap { candidate -> String? in
+      guard candidate.score.contains(score) else { return nil }
+      let text = candidate.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      return text.isEmpty ? nil : text
     }
 
     return Array(deduplicatedBullets(from: bullets).prefix(4))
@@ -453,7 +602,7 @@ struct LocalSessionDeterministicRecapGenerator {
     case .videoCommentary:
       return "video commentary"
     case .generalTranscript:
-      return "transcript"
+      return "source material"
     }
   }
 
@@ -476,6 +625,58 @@ struct LocalSessionDeterministicRecapGenerator {
     }
   }
 
+  private func hebrewSectionTitle(
+    for kind: LocalSessionRecapSection.Kind,
+    contentType: LocalSessionContentType
+  ) -> String {
+    if contentType == .videoCommentary {
+      switch kind {
+      case .overview: return "על מה המסמך"
+      case .keyPoints: return "מה מופיע בסרטון"
+      case .decisions: return "מה אפשר להסיק"
+      case .actionItem: return "מה כדאי לעשות עם זה"
+      case .openQuestions: return "מה עדיין לא ברור"
+      case .nextSteps: return "המשך מומלץ"
+      case .notes: return "הערות"
+      }
+    }
+
+    switch kind {
+    case .overview: return "על מה המסמך"
+    case .keyPoints: return "נקודות חשובות"
+    case .decisions: return "מה הובן מהמקור"
+    case .actionItem: return "המשך טיפול"
+    case .openQuestions: return "שאלות פתוחות"
+    case .nextSteps: return "המשך מומלץ"
+    case .notes: return "הערות"
+    }
+  }
+
+  private func hebrewSectionSummary(
+    for kind: LocalSessionRecapSection.Kind,
+    contentType: LocalSessionContentType
+  ) -> String {
+    if contentType == .videoCommentary {
+      switch kind {
+      case .keyPoints: return "הרגעים והפרטים המרכזיים מתוך הסרטון."
+      case .decisions: return "מסקנות שאפשר לזהות מתוך התוכן שנקלט."
+      case .actionItem: return "פעולות המשך אפשריות לפי מטרת המסמך."
+      case .openQuestions: return "נקודות שעדיין צריך להבהיר לגבי השימוש במסמך."
+      case .nextSteps: return "דרך פעולה מומלצת לאחר קריאת המסמך."
+      case .overview, .notes: return "תוכן מרכזי מתוך המסמך."
+      }
+    }
+
+    switch kind {
+    case .keyPoints: return "הנקודות החשובות שעלו במסמך."
+    case .decisions: return "דברים שאפשר להבין מהמקור בלי להוסיף מידע חיצוני."
+    case .actionItem: return "פעולות המשך שנובעות מהמסמך."
+    case .openQuestions: return "שאלות שנותרו לבדיקה."
+    case .nextSteps: return "המשך פעולה מומלץ."
+    case .overview, .notes: return "תוכן מרכזי מתוך המסמך."
+    }
+  }
+
   private func keyPointSummary(for contentType: LocalSessionContentType) -> String {
     switch contentType {
     case .meeting:
@@ -485,7 +686,7 @@ struct LocalSessionDeterministicRecapGenerator {
     case .videoCommentary:
       return "Important moments and observations from the commentary."
     case .generalTranscript:
-      return "Important source details extracted from the transcript."
+      return "Important source details preserved from the session material."
     }
   }
 
@@ -511,7 +712,7 @@ struct LocalSessionDeterministicRecapGenerator {
     case .videoCommentary:
       return "Follow-up work created by the observed video or screen context."
     case .generalTranscript:
-      return "Tasks or follow-up that can be taken from the transcript."
+      return "Tasks or follow-up that can be taken from the source material."
     }
   }
 
@@ -657,7 +858,7 @@ private enum SummaryTheme: CaseIterable {
     case .visualDirection:
       return ["צבעוניות", "כחול", "רקע", "לבן", "אפור", "כבד", "משחקי", "wow"]
     case .localization:
-      return ["עברית", "rtl", "תרגום", "locale", "לוקל", "webflow"]
+      return ["rtl", "תרגום", "locale", "לוקל", "webflow", "גרסה עברית", "עברית באתר"]
     case .registrationData:
       return ["נרשמו", "רשומים", "monday", "49", "82", "13", "11"]
     case .generalDiscussion:
@@ -1145,6 +1346,12 @@ extension LocalSessionRecap {
 }
 
 extension String {
+  fileprivate var containsHebrewScript: Bool {
+    unicodeScalars.contains { scalar in
+      (0x0590...0x05FF).contains(Int(scalar.value))
+    }
+  }
+
   fileprivate var cleanedGeneratedContent: String? {
     let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }

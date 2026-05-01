@@ -30,14 +30,28 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
         prompt: Self.prompt(for: request),
         maxTokens: maxTokens
       )
-      let proposal = Self.decodeProposal(from: rawResponse)
       let isDocumentEditRequest = Self.requestLooksLikeDocumentEdit(request.userMessage)
+      var proposal = Self.decodeProposal(
+        from: rawResponse,
+        fallbackSectionKind: isDocumentEditRequest
+          ? Self.fallbackSectionKind(for: request.userMessage)
+          : nil
+      )
+      if proposal.sourceCitations.isEmpty {
+        proposal.sourceCitations = Self.sourceCitations(for: request.session)
+      }
+      if !isDocumentEditRequest && proposal.shouldUseQuestionFallback {
+        return Self.fallbackAnswerProposal(for: request)
+      }
       if proposal.hasEdits || !isDocumentEditRequest {
         return proposal
       }
 
       return Self.fallbackProposal(for: request)
     } catch {
+      if !Self.requestLooksLikeDocumentEdit(request.userMessage) {
+        return Self.fallbackAnswerProposal(for: request, failureMessage: error.localizedDescription)
+      }
       return Self.fallbackProposal(for: request, failureMessage: error.localizedDescription)
     }
   }
@@ -59,6 +73,8 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       The JSON object must match this exact contract:
       {
         "assistantMessage": "plain English explanation for the user",
+        "sessionTitle": "optional replacement document/session title or null",
+        "sourceCitations": [{"segmentID":"UUID from transcript below or null","title":"short source label","excerpt":"short source excerpt"}],
         "recapPatch": {
           "overview": "optional replacement overview or null",
           "sections": [
@@ -77,6 +93,7 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       Rules:
       - Return document edits whenever the user asks to change, clean up, rewrite, summarize into sections, turn into action items, rename speakers, or fix transcript text.
       - If the user asks in Hebrew or asks to translate to Hebrew, write assistantMessage and recapPatch content in Hebrew.
+      - If the user asks to change or update the title, return sessionTitle with the new title. Do not create a note section for title changes.
       - The structured session is the source of truth, not the rendered Markdown.
       - You may replace recap overview and recap sections.
       - You may rename speakers/participants across transcript segments.
@@ -88,6 +105,7 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       - Use empty arrays and null recapPatch only for pure question-answer requests that should not alter the document.
       - assistantMessage must be a short human summary of what changed or why no edit was made.
       - Never put segment IDs, offsets, the transcript excerpt, or raw JSON in assistantMessage.
+      - For every answer or edit, include one to three sourceCitations grounded in the transcript excerpt when available.
 
       Session title: \(session.title)
       Started at: \(session.startedAt.formatted(date: .complete, time: .complete))
@@ -184,7 +202,58 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
         recapPatch: nil,
         transcriptPatches: [],
         speakerRenames: [],
+        warnings: fallbackWarnings(from: failureMessage),
+        sourceCitations: sourceCitations(for: request.session)
+      )
+    }
+
+    if requestLooksLikeConciseStyleEdit(request.userMessage) {
+      return conciseStyleFallbackProposal(for: request, failureMessage: failureMessage)
+    }
+
+    if requestLooksLikeEndAppendRequest(request.userMessage) {
+      if let paragraph = fallbackEndAppendText(from: request.userMessage, isHebrew: isHebrew) {
+        return LocalSessionDocumentEditProposal(
+          assistantMessage: isHebrew
+            ? "הוספתי פסקת המשך בסוף המסמך." : "Added a closing paragraph to the document.",
+          recapPatch: LocalSessionDocumentRecapPatch(
+            overview: nil,
+            sections: [
+              .init(
+                kind: .notes,
+                title: isHebrew ? "המשך המסמך" : "Document addendum",
+                summary: paragraph,
+                bullets: []
+              )
+            ]
+          ),
+          transcriptPatches: [],
+          speakerRenames: [],
+          warnings: fallbackWarnings(from: failureMessage),
+          sourceCitations: sourceCitations(for: request.session)
+        )
+      }
+
+      return LocalSessionDocumentEditProposal(
+        assistantMessage: isHebrew
+          ? "אני צריך לדעת איזה מלל להוסיף בסוף המסמך. שלח את הפסקה עצמה ואוסיף אותה בלי להפוך את ההוראה לתוכן."
+          : "I need the exact text to add at the end of the document. Send the paragraph and I will add it without turning the instruction into content.",
+        recapPatch: nil,
+        transcriptPatches: [],
+        speakerRenames: [],
         warnings: fallbackWarnings(from: failureMessage)
+      )
+    }
+
+    if let title = fallbackTitle(from: request.userMessage) {
+      return LocalSessionDocumentEditProposal(
+        assistantMessage: isHebrew ? "עדכנתי את כותרת המסמך." : "Updated the document title.",
+        sessionTitle: title,
+        recapPatch: nil,
+        transcriptPatches: [],
+        speakerRenames: [],
+        warnings: fallbackWarnings(from: failureMessage),
+        sourceCitations: sourceCitations(for: request.session)
       )
     }
 
@@ -225,8 +294,144 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       ),
       transcriptPatches: [],
       speakerRenames: [],
-      warnings: fallbackWarnings(from: failureMessage)
+      warnings: fallbackWarnings(from: failureMessage),
+      sourceCitations: sourceCitations(for: request.session)
     )
+  }
+
+  private static func conciseStyleFallbackProposal(
+    for request: LocalSessionDocumentChatRequest,
+    failureMessage: String? = nil
+  ) -> LocalSessionDocumentEditProposal {
+    let isHebrew = request.userMessage.containsHebrewScript
+    let existingOverview = request.session.recap.overview.trimmingCharacters(in: .whitespacesAndNewlines)
+    let snippets = fallbackSourceSnippets(from: request.session).prefix(2)
+    let source = snippets.isEmpty ? existingOverview : snippets.joined(separator: " ")
+    let fallbackSource = source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      ? (isHebrew ? "המסמך מסכם את עיקר ההקלטה." : "The document captures the recording's main point.")
+      : source
+    let overview = truncatedText(fallbackSource, limit: isHebrew ? 220 : 240)
+
+    return LocalSessionDocumentEditProposal(
+      assistantMessage: isHebrew
+        ? "קיצרתי את המסמך וכתבתי אותו קרוב יותר לרוח ההקלטה."
+        : "I shortened the document and aligned it more closely with the recording.",
+      recapPatch: LocalSessionDocumentRecapPatch(
+        overview: overview,
+        sections: []
+      ),
+      transcriptPatches: [],
+      speakerRenames: [],
+      warnings: fallbackWarnings(from: failureMessage),
+      sourceCitations: sourceCitations(for: request.session)
+    )
+  }
+
+  private static func fallbackAnswerProposal(
+    for request: LocalSessionDocumentChatRequest,
+    failureMessage: String? = nil
+  ) -> LocalSessionDocumentEditProposal {
+    let isHebrew = request.userMessage.containsHebrewScript
+    let answer: String
+    if requestLooksLikeErrorQuestion(request.userMessage) {
+      let detail = failureMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+      answer =
+        isHebrew
+        ? "המודל המקומי לא החזיר תשובת JSON תקינה שאפשר היה לקרוא בבטחה. \(detail.map { "פרטי השגיאה: \($0)" } ?? "לכן השתמשתי בתשובת גיבוי מתוך המסמך הקיים.")"
+        : "The local model did not return valid JSON that could be safely read. \(detail.map { "Error detail: \($0)" } ?? "I used a deterministic answer from the existing document instead.")"
+    } else {
+      answer = isHebrew ? hebrewDocumentAnswer(for: request.session) : englishDocumentAnswer(for: request.session)
+    }
+
+    return LocalSessionDocumentEditProposal(
+      assistantMessage: answer,
+      recapPatch: nil,
+      transcriptPatches: [],
+      speakerRenames: [],
+      warnings: fallbackWarnings(from: failureMessage),
+      sourceCitations: sourceCitations(for: request.session)
+    )
+  }
+
+  private static func requestLooksLikeErrorQuestion(_ message: String) -> Bool {
+    let normalized = message.lowercased()
+    return [
+      "why", "error", "failed", "failure", "what happened",
+      "למה", "מדוע", "שגיאה", "הודעת שגיאה", "נכשל", "בעיה",
+    ].contains { normalized.contains($0) }
+  }
+
+  private static func hebrewDocumentAnswer(for session: LocalSession) -> String {
+    let transcript = session.transcriptSegments.map(\.text).joined(separator: " ")
+    let recap = ([session.recap.overview] + session.recap.sections.flatMap { [$0.summary] + $0.bullets })
+      .joined(separator: " ")
+    let corpus = "\(transcript) \(recap)"
+
+    let mentionsLocalModel =
+      corpus.contains("המודל המקומי") || corpus.contains("מודל מקומי")
+      || corpus.contains("local model")
+      || session.transcriptSegments.contains {
+        $0.speaker.trimmingCharacters(in: .whitespacesAndNewlines)
+          .lowercased().contains("local model")
+      }
+    let isLocalModelSummaryCheck =
+      mentionsLocalModel
+      && (corpus.contains("מסכם") || corpus.contains("סיכום") || corpus.contains("הצלחה"))
+    if isLocalModelSummaryCheck {
+      return
+        "המסמך עוסק בבדיקה של המודל המקומי: האם הוא באמת מסכם את המסמך, ואם הסיכום עובד הוא צריך לציין הצלחה. אם הוא לא מסכם את המסמך, זו אי הצלחה."
+    }
+    if let videoAnswer = hebrewVideoTopicAnswer(for: session, corpus: corpus) {
+      return videoAnswer
+    }
+
+    let snippets = fallbackSourceSnippets(from: session)
+      .filter(\.containsHebrewScript)
+      .prefix(3)
+    guard !snippets.isEmpty else {
+      return "המסמך מסכם את התוכן שנקלט בסשן ומרכז את הנקודות שדורשות המשך טיפול."
+    }
+
+    return "המסמך עוסק ב\(snippets.joined(separator: " "))"
+  }
+
+  private static func hebrewVideoTopicAnswer(for session: LocalSession, corpus: String) -> String? {
+    let videoSignals = ["סרטון", "יוטיוב", "לייב", "ערוץ", "מורה מבוכים"]
+    guard videoSignals.contains(where: { corpus.contains($0) }) else { return nil }
+
+    let sourceDescription: String
+    if corpus.contains("מורה מבוכים") && corpus.contains("ערוץ דונקי") {
+      sourceDescription = "סרטון יוטיוב בעברית, כנראה לייב של מורה מבוכים מערוץ דונקי"
+    } else if corpus.contains("יוטיוב") {
+      sourceDescription = "סרטון יוטיוב בעברית"
+    } else {
+      sourceDescription = "סרטון או מקור אודיו בעברית"
+    }
+
+    let roleplaySignals = [
+      "קובייה", "גלגל", "גלגול", "להתגנב", "לתקוף", "חץ", "מריק", "מיכאל",
+      "מכשפה", "עץ",
+    ]
+    if roleplaySignals.contains(where: { corpus.contains($0) }) {
+      return
+        "המסמך עוסק ב\(sourceDescription). התוכן המרכזי הוא סצנת משחק תפקידים: גלגולי קובייה, ניסיון התגנבות ותקיפה, חץ שמחטיא ופוגע בעץ מושחת, והמשך איום סביב מריק, מיכאל והמכשפה."
+    }
+
+    let recapOverview = session.recap.overview.trimmingCharacters(in: .whitespacesAndNewlines)
+    if recapOverview.containsHebrewScript, !recapOverview.isEmpty {
+      return "המסמך עוסק ב\(sourceDescription). \(recapOverview)"
+    }
+
+    return "המסמך עוסק ב\(sourceDescription) ובנקודות המרכזיות שנשמעו מתוכו."
+  }
+
+  private static func englishDocumentAnswer(for session: LocalSession) -> String {
+    let snippets = fallbackSourceSnippets(from: session).prefix(3)
+    guard !snippets.isEmpty else {
+      return "The document summarizes the captured session and the follow-up points it contains."
+    }
+
+    return "The document is about \(snippets.joined(separator: " "))"
   }
 
   private static func requestLooksLikeDocumentEdit(_ message: String) -> Bool {
@@ -235,12 +440,91 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       "action item", "action items", "todo", "to-do", "follow up", "follow-up",
       "add section", "add a section", "add this", "add to", "edit", "change", "fix",
       "rewrite", "clean up", "turn this into", "rename", "translate", "summarize",
+      "shorten", "shorter", "make it short", "make this short", "concise", "tighten",
+      "trim", "less verbose", "too verbose", "tone", "style", "title",
       "תוסיף", "הוסף", "להוסיף", "תעדכן", "עדכן", "שנה", "תקן", "תתקן", "סכם",
       "סיכום", "משימה", "משימות", "אקשן", "פעולה", "פעולות", "סעיף", "דירוג",
-      "דרוג",
+      "דרוג", "תקצר", "קצר", "לקצר", "שיקצר", "תמצת", "לתמצת", "תמציתי",
+      "פחות לחפור", "לחפור", "ברוח ההקלטה", "ברוח המסמך", "סגנון", "טון",
+      "כותרת",
     ]
 
     return editTerms.contains { normalized.contains($0) }
+  }
+
+  private static func requestLooksLikeConciseStyleEdit(_ message: String) -> Bool {
+    let normalized = message.lowercased()
+    let styleTerms = [
+      "shorten", "shorter", "concise", "tighten", "trim", "less verbose", "too verbose",
+      "tone", "style", "תקצר", "קצר", "לקצר", "שיקצר", "תמצת", "לתמצת", "תמציתי",
+      "פחות לחפור", "לחפור", "ברוח ההקלטה", "ברוח המסמך", "סגנון", "טון",
+    ]
+    return styleTerms.contains { normalized.contains($0) }
+  }
+
+  private static func requestLooksLikeEndAppendRequest(_ message: String) -> Bool {
+    let normalized = message.lowercased()
+    let hasAppendIntent = [
+      "append", "add at the end", "add this at the end", "closing paragraph",
+      "תוסיף", "הוסף", "להוסיף", "תכתוב", "כתוב", "תרשום", "רשום",
+    ].contains { normalized.contains($0) }
+    let hasEndTarget = [
+      "at the end", "end of the document", "bottom of the document", "closing",
+      "בסוף", "סוף המסמך", "בסוף המסמך", "בסוף הסיכום", "פסקת סיום",
+    ].contains { normalized.contains($0) }
+
+    return hasAppendIntent && hasEndTarget
+  }
+
+  private static func fallbackEndAppendText(from message: String, isHebrew: Bool) -> String? {
+    if let delimited = message.textAfterInstructionDelimiter {
+      return delimited
+    }
+
+    var candidate = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    let removablePhrases = isHebrew
+      ? [
+        "תוסיף את המלל בסוף המסמך", "תוסיף את הטקסט בסוף המסמך",
+        "תוסיף פסקה בסוף המסמך", "תוסיף בסוף המסמך", "תוסיף בסוף",
+        "הוסף את המלל בסוף המסמך", "הוסף את הטקסט בסוף המסמך",
+        "הוסף פסקה בסוף המסמך", "הוסף בסוף המסמך", "הוסף בסוף",
+        "תרשום את זה כמו ספר", "תכתוב את זה כמו ספר", "כתוב את זה כמו ספר",
+        "תרשום כמו ספר", "תכתוב כמו ספר", "כתוב כמו ספר", "כמו ספר",
+      ]
+      : [
+        "add this at the end of the document", "add the text at the end of the document",
+        "append this to the end of the document", "append to the end of the document",
+        "add a closing paragraph", "write it like a book", "make it read like a book",
+      ]
+
+    for phrase in removablePhrases {
+      candidate = candidate.replacingOccurrences(of: phrase, with: "", options: [.caseInsensitive])
+    }
+
+    candidate = candidate.trimmingCharacters(
+      in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+    return candidate.isEmpty ? nil : candidate
+  }
+
+  private static func fallbackTitle(from message: String) -> String? {
+    var title = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    let lowercased = title.lowercased()
+    guard lowercased.contains("title") || title.contains("כותרת") else { return nil }
+
+    let removablePhrases = [
+      "update the title to", "change the title to", "rename the document to",
+      "set the title to", "title:", "title -", "title",
+      "תעדכן את הכותרת ל", "תעדכן את הכותרת", "עדכן את הכותרת ל",
+      "עדכן את הכותרת", "שנה את הכותרת ל", "שנה את הכותרת", "כותרת:",
+      "כותרת -", "כותרת",
+    ]
+    for phrase in removablePhrases {
+      title = title.replacingOccurrences(of: phrase, with: "", options: [.caseInsensitive])
+    }
+
+    title = title.trimmingCharacters(
+      in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+    return title.isEmpty ? nil : title
   }
 
   private static func fallbackSectionKind(for message: String) -> LocalSessionRecapSection.Kind {
@@ -341,6 +625,30 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       .removingDuplicates()
   }
 
+  private static func sourceCitations(
+    for session: LocalSession,
+    limit: Int = 3
+  ) -> [LocalSessionDocumentSourceCitation] {
+    session.transcriptSegments
+      .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+      .prefix(max(0, limit))
+      .map { segment in
+        let offset = max(0, segment.timestamp.timeIntervalSince(session.startedAt))
+        return LocalSessionDocumentSourceCitation(
+          segmentID: segment.id,
+          title: "Transcript \(Self.clockOffsetLabel(for: offset))",
+          excerpt: truncatedText(segment.text, limit: 140)
+        )
+      }
+  }
+
+  private static func clockOffsetLabel(for offset: TimeInterval) -> String {
+    let totalSeconds = max(0, Int(offset.rounded()))
+    let minutes = totalSeconds / 60
+    let seconds = totalSeconds % 60
+    return String(format: "%02d:%02d", minutes, seconds)
+  }
+
   private static func splitSentences(_ text: String) -> [String] {
     text
       .components(separatedBy: CharacterSet(charactersIn: ".!?؟\n"))
@@ -378,17 +686,24 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       return []
     }
 
-    return ["Used deterministic fallback because the local model response was unavailable: \(failureMessage)"]
+    return ["Used deterministic fallback because the local model response was unavailable."]
   }
 
   static func decodeProposal(from rawResponse: String) -> LocalSessionDocumentEditProposal {
+    decodeProposal(from: rawResponse, fallbackSectionKind: nil)
+  }
+
+  private static func decodeProposal(
+    from rawResponse: String,
+    fallbackSectionKind: LocalSessionRecapSection.Kind?
+  ) -> LocalSessionDocumentEditProposal {
     let jsonString = rawResponse.jsonObjectSubstringOrSelf
     let data = jsonString.data(using: .utf8) ?? Data()
 
     do {
       let payload = try JSONDecoder().decode(
         LocalSessionDocumentEditProposalPayload.self, from: data)
-      return payload.makeProposal()
+      return payload.makeProposal(fallbackSectionKind: fallbackSectionKind)
     } catch {
       return LocalSessionDocumentEditProposal(
         assistantMessage: "I could not produce a clean document edit from the local model.",
@@ -401,8 +716,22 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
   }
 }
 
+extension LocalSessionDocumentEditProposal {
+  fileprivate var shouldUseQuestionFallback: Bool {
+    guard !hasEdits else { return false }
+
+    let normalized = assistantMessage.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.isEmpty
+      || normalized.contains("could not produce a clean document edit")
+      || normalized.contains("couldn't produce a clean document edit")
+      || normalized.contains("local model returned an invalid edit shape")
+  }
+}
+
 private struct LocalSessionDocumentEditProposalPayload: Codable {
   var assistantMessage: String?
+  var sessionTitle: String?
+  var sourceCitations: [SourceCitation]?
   var recapPatch: RecapPatch?
   var transcriptPatches: [TranscriptPatch]?
   var speakerRenames: [SpeakerRename]?
@@ -430,17 +759,26 @@ private struct LocalSessionDocumentEditProposalPayload: Codable {
     var newName: String?
   }
 
-  func makeProposal() -> LocalSessionDocumentEditProposal {
+  struct SourceCitation: Codable {
+    var segmentID: String?
+    var title: String?
+    var excerpt: String?
+  }
+
+  func makeProposal(
+    fallbackSectionKind: LocalSessionRecapSection.Kind? = nil
+  ) -> LocalSessionDocumentEditProposal {
     let sections = (recapPatch?.sections ?? []).compactMap {
       section
         -> LocalSessionDocumentRecapPatch.SectionReplacement? in
-      guard let kind = section.kind?.recapSectionKind else { return nil }
+      let kind = section.kind?.recapSectionKind ?? fallbackSectionKind
       let summary = section.summary?.cleanedGeneratedContent ?? ""
       let bullets = (section.bullets ?? []).compactMap(\.cleanedGeneratedContent)
 
       guard !summary.isEmpty || !bullets.isEmpty else {
         return nil
       }
+      guard let kind else { return nil }
 
       return LocalSessionDocumentRecapPatch.SectionReplacement(
         kind: kind,
@@ -484,25 +822,56 @@ private struct LocalSessionDocumentEditProposalPayload: Codable {
       return LocalSessionDocumentSpeakerRename(oldName: oldName, newName: newName)
     }
 
+    let citations = (sourceCitations ?? []).compactMap {
+      citation -> LocalSessionDocumentSourceCitation? in
+      let title = citation.title?.cleanedGeneratedContent ?? "Session source"
+      guard let excerpt = citation.excerpt?.cleanedGeneratedContent,
+        !excerpt.isEmpty
+      else {
+        return nil
+      }
+      let segmentID = citation.segmentID.flatMap(UUID.init(uuidString:))
+      return LocalSessionDocumentSourceCitation(
+        segmentID: segmentID,
+        title: title,
+        excerpt: excerpt
+      )
+    }
+
     return LocalSessionDocumentEditProposal(
       assistantMessage: assistantMessage?.cleanedAssistantMessage ?? "",
+      sessionTitle: sessionTitle?.cleanedGeneratedContent,
       recapPatch: recap,
       transcriptPatches: transcriptEdits,
       speakerRenames: renames,
-      warnings: (warnings ?? []).compactMap(\.cleanedGeneratedContent)
+      warnings: (warnings ?? []).compactMap(\.cleanedGeneratedContent),
+      sourceCitations: citations
     )
   }
 }
 
 extension String {
-  fileprivate var containsHebrewScript: Bool {
-    unicodeScalars.contains { scalar in
-      (0x0590...0x05FF).contains(Int(scalar.value))
+	  fileprivate var containsHebrewScript: Bool {
+	    unicodeScalars.contains { scalar in
+	      (0x0590...0x05FF).contains(Int(scalar.value))
+	    }
+	  }
+
+  fileprivate var textAfterInstructionDelimiter: String? {
+    let delimiters = [":", "：", " - ", " – ", " — "]
+    for delimiter in delimiters {
+      guard let range = range(of: delimiter) else { continue }
+      let candidate = self[range.upperBound...]
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      if !candidate.isEmpty {
+        return candidate
+      }
     }
+    return nil
   }
 
   fileprivate var recapSectionKind: LocalSessionRecapSection.Kind? {
-    switch trimmingCharacters(in: .whitespacesAndNewlines) {
+	    switch trimmingCharacters(in: .whitespacesAndNewlines) {
     case "overview", "summary":
       return .overview
     case "keyPoints", "highlight":

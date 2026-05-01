@@ -48,18 +48,7 @@ struct CepessaSessionsApp: App {
 
 private final class CepessaSessionsAppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
-    let floatingBarEnabledKey = "cepessa.sessions.floatingBarEnabled"
-    let floatingBarMigrationKey = "cepessa.sessions.floatingBarDefaultOffMigrated"
-    let defaults = UserDefaults.standard
-
-    UserDefaults.standard.register(defaults: [
-      floatingBarEnabledKey: false,
-      floatingBarMigrationKey: false,
-    ])
-    if !defaults.bool(forKey: floatingBarMigrationKey) {
-      defaults.set(false, forKey: floatingBarEnabledKey)
-      defaults.set(true, forKey: floatingBarMigrationKey)
-    }
+    CepessaSessionFloatingBarPreferences.installDefaults()
     CepessaSessionStatusBarController.shared.connect(model: CepessaSessionsStore.shared.model)
   }
 }

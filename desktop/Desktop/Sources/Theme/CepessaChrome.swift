@@ -325,6 +325,57 @@ private struct CepessaInstrumentStripModifier: ViewModifier {
   }
 }
 
+private struct CepessaFloatingToolbarSurfaceModifier: ViewModifier {
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    content
+      .background {
+        if #available(macOS 26.0, *) {
+          Capsule()
+            .fill(Color.white.opacity(0.42))
+            .glassEffect(
+              .regular.tint(Color(hex: 0xF3DA9A).opacity(0.06)).interactive(),
+              in: .capsule
+            )
+
+          Capsule()
+            .fill(Color.white.opacity(0.56))
+        } else {
+          Capsule()
+            .fill(.ultraThinMaterial)
+
+          Capsule()
+            .fill(Color.white.opacity(0.88))
+        }
+      }
+      .overlay {
+        Capsule()
+          .stroke(Color.white.opacity(0.82), lineWidth: 0.8)
+      }
+      .overlay {
+        Capsule()
+          .stroke(Color(hex: 0xF0C45A).opacity(0.42), lineWidth: 0.8)
+          .padding(0.5)
+      }
+      .shadow(color: CepessaColors.warmShadow.opacity(0.14), radius: 24, x: 0, y: 14)
+      .shadow(color: .white.opacity(0.38), radius: 1, x: 0, y: -1)
+  }
+}
+
+private struct CepessaFloatingToolbarPillSurfaceModifier: ViewModifier {
+  func body(content: Content) -> some View {
+    content
+      .background(
+        Color.white.opacity(0.42),
+        in: Capsule()
+      )
+      .overlay {
+        Capsule()
+          .stroke(CepessaColors.border.opacity(0.18), lineWidth: 0.6)
+      }
+  }
+}
+
 extension View {
   func cepessaPanel(
     fill: Color = CepessaColors.backgroundSecondary,
@@ -391,5 +442,13 @@ extension View {
 
   func cepessaInstrumentStrip(radius: CGFloat = CepessaChrome.instrumentRadius) -> some View {
     modifier(CepessaInstrumentStripModifier(radius: radius))
+  }
+
+  func cepessaFloatingToolbarSurface() -> some View {
+    modifier(CepessaFloatingToolbarSurfaceModifier())
+  }
+
+  func cepessaFloatingToolbarPillSurface() -> some View {
+    modifier(CepessaFloatingToolbarPillSurfaceModifier())
   }
 }

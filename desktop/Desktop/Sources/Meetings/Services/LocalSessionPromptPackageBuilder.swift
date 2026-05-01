@@ -29,9 +29,14 @@ struct LocalSessionPromptPackageBuilder {
     private func renderMarkdown(for session: LocalSession) -> String {
         let transcriptBlock = session.transcriptSegments.isEmpty
             ? "No transcript text is available yet."
-            : session.transcriptSegments.map { segment in
-                let time = segment.timestamp.formatted(date: .omitted, time: .standard)
-                return "[\(time)] \(segment.speaker): \(segment.text)"
+            : session.transcriptTimelineItems.map { item in
+                let segment = item.segment
+                let time = transcriptTimeRange(for: segment, in: session)
+                let contextLines = item.attachments.map { attachment in
+                    "  - Context: \(attachment.title) (\(attachment.fileName ?? attachment.urlString ?? "saved locally"))"
+                }
+                let contextBlock = contextLines.isEmpty ? "" : "\n" + contextLines.joined(separator: "\n")
+                return "[\(time)] \(segment.speaker): \(segment.text)\(contextBlock)"
             }.joined(separator: "\n")
 
         let recapOverview = session.recap.overview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -109,7 +114,8 @@ struct LocalSessionPromptPackageBuilder {
                     fileName: attachment.fileName,
                     mimeType: attachment.mimeType,
                     urlString: attachment.urlString,
-                    note: attachment.note
+                    note: attachment.note,
+                    transcriptSegmentID: attachment.transcriptSegmentID
                 )
             },
             captureArtifacts: session.captureArtifacts,
@@ -176,6 +182,20 @@ struct LocalSessionPromptPackageBuilder {
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
     }
+
+    private func transcriptTimeRange(for segment: LocalSessionTranscriptSegment, in session: LocalSession) -> String {
+        let start = max(0, segment.timestamp.timeIntervalSince(session.startedAt))
+        guard let endTimestamp = segment.endTimestamp else {
+            return timeString(from: start)
+        }
+
+        let end = max(start, endTimestamp.timeIntervalSince(session.startedAt))
+        guard Int(start.rounded()) != Int(end.rounded()) else {
+            return timeString(from: start)
+        }
+
+        return "\(timeString(from: start)) -> \(timeString(from: end))"
+    }
 }
 
 private struct LocalSessionPromptPackageManifest: Codable {
@@ -190,6 +210,7 @@ private struct LocalSessionPromptPackageManifest: Codable {
         let mimeType: String?
         let urlString: String?
         let note: String?
+        let transcriptSegmentID: UUID?
     }
 
     struct PackageFile: Codable {

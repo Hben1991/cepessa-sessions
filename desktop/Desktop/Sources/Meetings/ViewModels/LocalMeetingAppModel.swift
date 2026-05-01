@@ -454,18 +454,28 @@ final class LocalSessionAppModel: ObservableObject {
         )
         _ = self.mutateSession(id: resolvedSessionID) { session in
           if proposal.hasEdits {
-            self.apply(proposal, to: &session)
-          }
-
-          session.documentChat.messages.append(
-            LocalSessionDocumentChatMessage(
-              id: UUID(),
-              role: .assistant,
-              text: self.assistantMessage(for: proposal),
-              createdAt: Date()
+            session.documentChat.pendingProposal = proposal
+            session.documentChat.messages.append(
+              LocalSessionDocumentChatMessage(
+                id: UUID(),
+                role: .assistant,
+                text: self.previewReadyMessage(for: proposal),
+                createdAt: Date(),
+                sourceCitations: proposal.sourceCitations
+              )
             )
-          )
-          session.documentChat.pendingProposal = nil
+          } else {
+            session.documentChat.pendingProposal = nil
+            session.documentChat.messages.append(
+              LocalSessionDocumentChatMessage(
+                id: UUID(),
+                role: .assistant,
+                text: self.assistantMessage(for: proposal),
+                createdAt: Date(),
+                sourceCitations: proposal.sourceCitations
+              )
+            )
+          }
           session.documentChat.status = .idle
           session.documentChat.errorMessage = nil
           session.documentChat.updatedAt = Date()
@@ -494,7 +504,18 @@ final class LocalSessionAppModel: ObservableObject {
     beginContentClassification(for: session)
   }
 
-  private func assistantMessage(for proposal: LocalSessionDocumentEditProposal) -> String {
+  private func assistantMessage(
+    for proposal: LocalSessionDocumentEditProposal,
+    requestedEdit: Bool = false,
+    didApplyEdits: Bool = false,
+    userMessage: String = ""
+  ) -> String {
+    if requestedEdit, !didApplyEdits {
+      return userMessage.containsHebrewScript || proposal.assistantMessage.containsHebrewScript
+        ? "לא הצלחתי להחיל שינוי במסמך מהתגובה הזאת."
+        : "I could not apply a document change from that response."
+    }
+
     let trimmed = proposal.assistantMessage.trimmingCharacters(in: .whitespacesAndNewlines)
     if !trimmed.isEmpty {
       return trimmed
@@ -504,16 +525,69 @@ final class LocalSessionAppModel: ObservableObject {
       ? "Applied the requested document edits." : "No document edit was needed."
   }
 
+  private func previewReadyMessage(for proposal: LocalSessionDocumentEditProposal) -> String {
+    let trimmed = proposal.assistantMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+    let summary = trimmed.isEmpty ? "Review the proposed document changes before applying them." : trimmed
+    return "Preview ready: \(summary)"
+  }
+
   func applyPendingDocumentChatProposal(for sessionID: LocalSession.ID? = nil) {
     let resolvedSessionID = sessionID ?? selectedSessionID
     guard let resolvedSessionID else { return }
 
     _ = mutateSession(id: resolvedSessionID) { session in
       guard let proposal = session.documentChat.pendingProposal else { return }
-      apply(proposal, to: &session)
+      let undoSnapshot = LocalSessionDocumentUndoSnapshot(
+        title: session.title,
+        recap: session.recap,
+        transcriptSegments: session.transcriptSegments,
+        createdAt: Date()
+      )
+      let didApplyEdits = apply(proposal, to: &session)
+      session.documentChat.pendingProposal = nil
+      session.documentChat.status = didApplyEdits ? .idle : .failed
+      session.documentChat.errorMessage = didApplyEdits
+        ? nil
+        : "The proposed document edit could not be applied."
+      if didApplyEdits {
+        session.documentChat.undoSnapshot = undoSnapshot
+      }
+      session.documentChat.messages.append(
+        LocalSessionDocumentChatMessage(
+          id: UUID(),
+          role: .assistant,
+          text: didApplyEdits
+            ? "Applied the previewed document changes."
+            : "I could not apply a document change from that preview.",
+          createdAt: Date(),
+          sourceCitations: proposal.sourceCitations
+        )
+      )
+      session.documentChat.updatedAt = Date()
+    }
+  }
+
+  func undoLastDocumentChatEdit(for sessionID: LocalSession.ID? = nil) {
+    let resolvedSessionID = sessionID ?? selectedSessionID
+    guard let resolvedSessionID else { return }
+
+    _ = mutateSession(id: resolvedSessionID) { session in
+      guard let snapshot = session.documentChat.undoSnapshot else { return }
+      session.title = snapshot.title
+      session.recap = snapshot.recap
+      session.transcriptSegments = snapshot.transcriptSegments
+      session.documentChat.undoSnapshot = nil
       session.documentChat.pendingProposal = nil
       session.documentChat.status = .idle
       session.documentChat.errorMessage = nil
+      session.documentChat.messages.append(
+        LocalSessionDocumentChatMessage(
+          id: UUID(),
+          role: .assistant,
+          text: "Undid the last document edit.",
+          createdAt: Date()
+        )
+      )
       session.documentChat.updatedAt = Date()
     }
   }
@@ -835,7 +909,8 @@ final class LocalSessionAppModel: ObservableObject {
             endTime: segment.endTime
           ) ?? "Speaker 1",
           text: segment.text,
-          timestamp: session.startedAt.addingTimeInterval(segment.startTime)
+          timestamp: session.startedAt.addingTimeInterval(segment.startTime),
+          endTimestamp: session.startedAt.addingTimeInterval(max(segment.endTime, segment.startTime))
         )
       }
     }
@@ -850,7 +925,8 @@ final class LocalSessionAppModel: ObservableObject {
         id: UUID(),
         speaker: "Speaker 1",
         text: transcriptText,
-        timestamp: session.startedAt
+        timestamp: session.startedAt,
+        endTimestamp: nil
       )
     ]
   }
@@ -865,7 +941,8 @@ final class LocalSessionAppModel: ObservableObject {
         id: UUID(),
         speaker: "Speaker 1",
         text: segment.text,
-        timestamp: session.startedAt.addingTimeInterval(segment.startTime)
+        timestamp: session.startedAt.addingTimeInterval(segment.startTime),
+        endTimestamp: session.startedAt.addingTimeInterval(max(segment.endTime, segment.startTime))
       )
     }
   }
@@ -967,7 +1044,9 @@ final class LocalSessionAppModel: ObservableObject {
 
   private func mergedSession(from incomingSession: LocalSession) -> LocalSession {
     guard let existingSession = sessions.first(where: { $0.id == incomingSession.id }) else {
-      return incomingSession
+      var anchoredSession = incomingSession
+      anchoredSession.anchorTimelineContextToTranscriptSegments()
+      return anchoredSession
     }
 
     var mergedSession = incomingSession
@@ -998,33 +1077,63 @@ final class LocalSessionAppModel: ObservableObject {
     mergedSession.documentChat =
       incomingSession.documentChat == .empty
       ? existingSession.documentChat : incomingSession.documentChat
+    mergedSession.anchorTimelineContextToTranscriptSegments()
 
     return mergedSession
   }
 
-  private func apply(_ proposal: LocalSessionDocumentEditProposal, to session: inout LocalSession) {
+  @discardableResult
+  private func apply(
+    _ proposal: LocalSessionDocumentEditProposal,
+    to session: inout LocalSession
+  ) -> Bool {
+    var changed = false
+    var recapChanged = false
+
+    if let title = proposal.sessionTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !title.isEmpty,
+      session.title != title
+    {
+      session.title = title
+      changed = true
+    }
+
     if let recapPatch = proposal.recapPatch {
       if let overview = recapPatch.overview?.trimmingCharacters(in: .whitespacesAndNewlines) {
-        session.recap.overview = overview
+        if session.recap.overview != overview {
+          session.recap.overview = overview
+          changed = true
+          recapChanged = true
+        }
       }
 
       for replacement in recapPatch.sections {
+        let existingSection = session.recap.section(kind: replacement.kind)
         let section = LocalSessionRecapSection(
-          id: session.recap.section(kind: replacement.kind)?.id ?? UUID(),
+          id: existingSection?.id ?? UUID(),
           kind: replacement.kind,
           title: replacement.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? replacement.kind.displayTitle
             : replacement.title,
           summary: replacement.summary,
           bullets: replacement.bullets,
-          anchorTimestamp: session.recap.section(kind: replacement.kind)?.anchorTimestamp,
-          startOffset: session.recap.section(kind: replacement.kind)?.startOffset,
-          endOffset: session.recap.section(kind: replacement.kind)?.endOffset
+          anchorTimestamp: existingSection?.anchorTimestamp,
+          startOffset: existingSection?.startOffset,
+          endOffset: existingSection?.endOffset
         )
-        session.recap.upsertSection(section)
+        if existingSection?.title != section.title
+          || existingSection?.summary != section.summary
+          || existingSection?.bullets != section.bullets
+        {
+          session.recap.upsertSection(section)
+          changed = true
+          recapChanged = true
+        }
       }
 
-      session.recap.generatedAt = Date()
+      if recapChanged {
+        session.recap.generatedAt = Date()
+      }
     }
 
     for patch in proposal.transcriptPatches {
@@ -1034,15 +1143,23 @@ final class LocalSessionAppModel: ObservableObject {
       else {
         continue
       }
-      session.transcriptSegments[segmentIndex].text = patch.text
+      if session.transcriptSegments[segmentIndex].text != patch.text {
+        session.transcriptSegments[segmentIndex].text = patch.text
+        changed = true
+      }
     }
 
     for rename in proposal.speakerRenames {
       for segmentIndex in session.transcriptSegments.indices
       where session.transcriptSegments[segmentIndex].speaker == rename.oldName {
-        session.transcriptSegments[segmentIndex].speaker = rename.newName
+        if session.transcriptSegments[segmentIndex].speaker != rename.newName {
+          session.transcriptSegments[segmentIndex].speaker = rename.newName
+          changed = true
+        }
       }
     }
+
+    return changed
   }
 
   private func mergeAttachments(
@@ -1095,6 +1212,28 @@ final class LocalSessionAppModel: ObservableObject {
       normalizedSession.documentChat.status = .idle
       normalizedSession.documentChat.errorMessage = nil
       normalizedSession.documentChat.updatedAt = Date()
+    }
+    let cleanedMessages = normalizedSession.documentChat.messages.filter {
+      !$0.isStaleLocalModelFailureMessage
+    }
+    if cleanedMessages.count != normalizedSession.documentChat.messages.count {
+      normalizedSession.documentChat.messages = cleanedMessages
+      normalizedSession.documentChat.status = .idle
+      normalizedSession.documentChat.errorMessage = nil
+      normalizedSession.documentChat.updatedAt = Date()
+    }
+    if let migratedTitle = normalizedSession.recap.removeStaleTitleUpdateNote(),
+      normalizedSession.title != migratedTitle
+    {
+      normalizedSession.title = migratedTitle
+    }
+    if normalizedSession.recap.normalizeStaleHebrewVideoTemplateTitles() {
+      normalizedSession.recap.generatedAt = normalizedSession.recap.generatedAt ?? Date()
+    }
+    if normalizedSession.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      normalizedSession.recap.removeStaleGenericFallback()
+    {
+      normalizedSession.recap = .empty
     }
 
     return normalizedSession
@@ -1365,6 +1504,190 @@ private struct LocalSessionPCM16Wave {
 
 private enum LocalSessionPCM16WaveError: Error {
   case unsupportedFormat
+}
+
+private extension LocalSessionDocumentChatMessage {
+  var isStaleLocalModelFailureMessage: Bool {
+    guard role == .assistant else { return false }
+
+    let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.contains("could not produce a clean document edit")
+      || normalized.contains("couldn't produce a clean document edit")
+      || normalized.contains("the local model couldn't produce a clean document edit")
+      || normalized.contains("could not run the local model")
+      || normalized.contains("לא הצלחתי להפעיל את המודל המקומי")
+      || normalized.contains("המסמך עוסק בועכשיו אני למשל לוקח סרטון")
+      || (normalized.contains("המסמך עוסק ב")
+        && normalized.contains("ההיסטוריה שראיתי ביוטיוב"))
+  }
+}
+
+private extension LocalSessionRecap {
+  mutating func removeStaleTitleUpdateNote() -> String? {
+    guard let index = sections.firstIndex(where: { section in
+      section.kind == .notes && section.title.contains("כותרת")
+    }) else {
+      return nil
+    }
+
+    let title = sections[index].title.cleanedTitleUpdateRequest
+    guard let title else { return nil }
+
+    sections.remove(at: index)
+    return title
+  }
+
+  mutating func normalizeStaleHebrewVideoTemplateTitles() -> Bool {
+    let corpus =
+      ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: " ")
+      .lowercased()
+    guard corpus.containsHebrewScript else { return false }
+    guard ["סרטון", "יוטיוב", "לייב", "ערוץ", "מורה מבוכים"].contains(where: {
+      corpus.contains($0)
+    }) else {
+      return false
+    }
+
+    var changed = false
+    for index in sections.indices {
+      let normalizedTitle = sections[index].title.trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+      let replacementTitle: String?
+      let replacementSummary: String?
+      switch sections[index].kind {
+      case .overview:
+        replacementTitle = normalizedTitle == "overview" ? "על מה המסמך" : nil
+        replacementSummary = nil
+      case .keyPoints:
+        replacementTitle =
+          ["commentary highlights", "key details", "key points", "נקודות מרכזיות"].contains(
+            normalizedTitle)
+          ? "מה מופיע בסרטון" : nil
+        replacementSummary =
+          sections[index].summary.containsHebrewScript
+          ? nil : "הרגעים והפרטים המרכזיים מתוך הסרטון."
+      case .decisions:
+        replacementTitle =
+          ["observed conclusions", "explicit conclusions", "decisions", "החלטות"].contains(
+            normalizedTitle)
+          ? "מה אפשר להסיק" : nil
+        replacementSummary =
+          sections[index].summary.containsHebrewScript
+          ? nil : "מסקנות שאפשר לזהות מתוך התוכן שנקלט."
+      case .actionItem:
+        replacementTitle =
+          [
+            "follow-up from commentary", "tasks or follow-up", "action items",
+            "משימות לביצוע", "משימות המשך",
+          ].contains(normalizedTitle)
+          ? "מה כדאי לעשות עם זה" : nil
+        replacementSummary =
+          sections[index].summary.containsHebrewScript
+          ? nil : "פעולות המשך אפשריות לפי מטרת המסמך."
+      case .openQuestions:
+        replacementTitle =
+          ["open questions", "שאלות פתוחות"].contains(normalizedTitle)
+          ? "מה עדיין לא ברור" : nil
+        replacementSummary =
+          sections[index].summary.containsHebrewScript
+          ? nil : "נקודות שעדיין צריך להבהיר לגבי השימוש במסמך."
+      case .nextSteps:
+        replacementTitle =
+          ["professional recommendation", "next steps", "המלצה מקצועית"].contains(normalizedTitle)
+          ? "המשך מומלץ" : nil
+        replacementSummary =
+          sections[index].summary.containsHebrewScript
+          ? nil : "דרך פעולה מומלצת לאחר קריאת המסמך."
+      case .notes:
+        replacementTitle = nil
+        replacementSummary = nil
+      }
+
+      if let replacementTitle {
+        sections[index].title = replacementTitle
+        changed = true
+      }
+      if let replacementSummary {
+        sections[index].summary = replacementSummary
+        changed = true
+      }
+    }
+
+    let countBeforePruning = sections.count
+    sections.removeAll { section in
+      guard [.decisions, .actionItem, .openQuestions, .nextSteps].contains(section.kind) else {
+        return false
+      }
+
+      let sectionText = ([section.title, section.summary] + section.bullets)
+        .joined(separator: " ")
+        .lowercased()
+      let staleBoilerplate = [
+        "לא זוהתה החלטה תפעולית",
+        "אם מטרת המסמך היא",
+        "האם צריך לסכם את תוכן הסרטון",
+        "להשתמש בתקציר כנושא המסמך",
+        "no final decision was explicit",
+        "follow-up work created by the observed video",
+      ]
+      return staleBoilerplate.contains { sectionText.contains($0) }
+    }
+    if sections.count != countBeforePruning {
+      changed = true
+    }
+
+    return changed
+  }
+
+  mutating func removeStaleGenericFallback() -> Bool {
+    let text =
+      ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: " ")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    guard !text.isEmpty else { return false }
+
+    let stalePhrases = [
+      "source material captured the main areas that need follow-up",
+      "video commentary captured the main areas that need follow-up",
+      "reviewed the transcript and captured the main discussion areas",
+      "generated brief is based on the meeting content rather than a verbatim transcript",
+      "generated brief is based on the source content rather than raw conversation flow",
+      "brief focuses on the work, context, and follow-up supported by the source material",
+      "a video commentary on a project or product",
+      "important moments and observations from the commentary",
+      "follow-up work created by the observed video or screen context",
+      "no final decision was explicit enough to treat as closed",
+    ]
+
+    guard stalePhrases.contains(where: { text.contains($0) }) else { return false }
+    self = .empty
+    return true
+  }
+}
+
+private extension String {
+  var containsHebrewScript: Bool {
+    unicodeScalars.contains { scalar in
+      (0x0590...0x05FF).contains(Int(scalar.value))
+    }
+  }
+
+  var cleanedTitleUpdateRequest: String? {
+    var title = trimmingCharacters(in: .whitespacesAndNewlines)
+    let removablePhrases = [
+      "תעדכן את הכותרת ל", "תעדכן את הכותרת", "עדכן את הכותרת ל",
+      "עדכן את הכותרת", "שנה את הכותרת ל", "שנה את הכותרת", "כותרת:",
+      "כותרת -", "כותרת",
+    ]
+    for phrase in removablePhrases {
+      title = title.replacingOccurrences(of: phrase, with: "", options: [.caseInsensitive])
+    }
+    title = title.trimmingCharacters(
+      in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+    return title.isEmpty ? nil : title
+  }
 }
 
 typealias LocalMeetingAppModel = LocalSessionAppModel

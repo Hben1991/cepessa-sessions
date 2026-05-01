@@ -190,15 +190,17 @@ private struct LocalSessionDeterministicContentClassifier {
     let speakers = meaningfulSpeakers(from: input.transcriptCandidates)
     let speakerCount = speakers.count
 
+    let explicitVideoScore = score(
+      corpus,
+      patterns: [
+        "video", "screen", "screen recording", "demo", "clip", "watch", "on screen",
+        "system audio", "narrator", "recording", "lecture", "youtube", "livestream",
+        "סרטון", "יוטיוב", "לייב", "ערוץ", "מסך", "הקלטת מסך",
+      ])
     let videoScore =
-      (input.hasSystemAudio ? 3 : 0)
-      + (input.captureArtifactCount > 0 ? 1 : 0)
-      + score(
-        corpus,
-        patterns: [
-          "video", "screen", "screen recording", "demo", "clip", "watch", "on screen",
-          "system audio", "narrator", "recording", "lecture", "סרטון", "מסך", "הקלטת מסך",
-        ])
+      (input.captureArtifactCount > 0 ? 2 : 0)
+      + (input.hasSystemAudio && explicitVideoScore > 0 ? 1 : 0)
+      + explicitVideoScore
     let meetingScore =
       (speakerCount >= 2 ? 2 : 0)
       + score(

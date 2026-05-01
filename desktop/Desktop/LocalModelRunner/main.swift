@@ -69,6 +69,18 @@ func tokenPiece(_ token: llama_token, vocab: OpaquePointer?) -> String {
   return String(decoding: bytes, as: UTF8.self)
 }
 
+func chatFormattedPrompt(_ prompt: String) -> String {
+  """
+  <|im_start|>system
+  You are Cepessa's local assistant. Follow the user's format instructions exactly.
+  <|im_end|>
+  <|im_start|>user
+  \(prompt)
+  <|im_end|>
+  <|im_start|>assistant
+  """
+}
+
 func generate(prompt: String, options: RunnerOptions) throws -> String {
   llama_backend_init()
   defer { llama_backend_free() }
@@ -90,11 +102,12 @@ func generate(prompt: String, options: RunnerOptions) throws -> String {
   defer { llama_free(context) }
 
   let vocab = llama_model_get_vocab(model)
-  let promptByteCount = prompt.utf8.count
+  let formattedPrompt = chatFormattedPrompt(prompt)
+  let promptByteCount = formattedPrompt.utf8.count
   var tokens = [llama_token](repeating: 0, count: promptByteCount + 8)
   let tokenCount = llama_tokenize(
     vocab,
-    prompt,
+    formattedPrompt,
     Int32(promptByteCount),
     &tokens,
     Int32(tokens.count),

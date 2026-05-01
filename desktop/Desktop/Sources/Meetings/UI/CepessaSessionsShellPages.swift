@@ -789,7 +789,7 @@ private struct LocalSessionRecapWorkspace: View {
               .scaleEffect(0.72)
 
             Text(
-              "Rewriting the brief from the transcript. If the model is slow, a local fallback will finish it."
+              "Rewriting the brief from the session material. If the model is slow, a local fallback will finish it."
             )
             .scaledFont(size: 12)
             .foregroundStyle(CepessaColors.textSecondary)
@@ -1291,6 +1291,19 @@ private struct LocalSessionDocumentChatRail: View {
       }
 
       Spacer(minLength: 0)
+
+      if chat.undoSnapshot != nil {
+        Button {
+          model.undoLastDocumentChatEdit(for: session.id)
+        } label: {
+          Image(systemName: "arrow.uturn.backward")
+            .scaledFont(size: 12, weight: .semibold)
+            .frame(width: 30, height: 30)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Undo last document edit")
+        .help("Undo last document edit")
+      }
     }
   }
 
@@ -1443,18 +1456,25 @@ private struct LocalSessionDocumentChatRail: View {
         Spacer(minLength: 36)
       }
 
-      Text(message.text)
-        .scaledFont(size: 11.5)
-        .foregroundStyle(isUser ? Color.white : CepessaColors.textPrimary)
-        .textSelection(.enabled)
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .background(
-          isUser
-            ? CepessaColors.purplePrimary.opacity(0.9)
-            : CepessaColors.backgroundRaised.opacity(0.82),
-          in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-        )
+      VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
+        Text(message.text)
+          .scaledFont(size: 11.5)
+          .foregroundStyle(isUser ? Color.white : CepessaColors.textPrimary)
+          .textSelection(.enabled)
+          .padding(.horizontal, 11)
+          .padding(.vertical, 9)
+          .background(
+            isUser
+              ? CepessaColors.purplePrimary.opacity(0.9)
+              : CepessaColors.backgroundRaised.opacity(0.82),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+          )
+
+        if !isUser, !message.sourceCitations.isEmpty {
+          citationStrip(message.sourceCitations, limit: 2)
+        }
+      }
+      .frame(maxWidth: 280, alignment: isUser ? .trailing : .leading)
 
       if !isUser {
         Spacer(minLength: 36)
@@ -1473,6 +1493,9 @@ private struct LocalSessionDocumentChatRail: View {
         if proposal.recapPatch != nil {
           proposalLine("Recap edits ready")
         }
+        if proposal.sessionTitle != nil {
+          proposalLine("Title update ready")
+        }
         if !proposal.transcriptPatches.isEmpty {
           proposalLine("\(proposal.transcriptPatches.count) targeted transcript correction(s)")
         }
@@ -1486,6 +1509,10 @@ private struct LocalSessionDocumentChatRail: View {
 
       if showsProposalPreview {
         proposalPreview(proposal)
+      }
+
+      if !proposal.sourceCitations.isEmpty {
+        citationStrip(proposal.sourceCitations, limit: 3)
       }
 
       HStack(spacing: 8) {
@@ -1573,6 +1600,37 @@ private struct LocalSessionDocumentChatRail: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
   }
+
+  private func citationStrip(
+    _ citations: [LocalSessionDocumentSourceCitation],
+    limit: Int
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 5) {
+      ForEach(citations.prefix(limit)) { citation in
+        HStack(alignment: .top, spacing: 6) {
+          Image(systemName: "quote.opening")
+            .scaledFont(size: 8.5, weight: .semibold)
+            .foregroundStyle(CepessaColors.purplePrimary.opacity(0.8))
+            .frame(width: 12, height: 12)
+
+          VStack(alignment: .leading, spacing: 2) {
+            Text(citation.title)
+              .scaledFont(size: 9.5, weight: .semibold)
+              .foregroundStyle(CepessaColors.textPrimary)
+              .lineLimit(1)
+            Text(citation.excerpt)
+              .scaledFont(size: 9.5)
+              .foregroundStyle(CepessaColors.textTertiary)
+              .lineLimit(2)
+          }
+        }
+      }
+    }
+    .padding(.horizontal, 9)
+    .padding(.vertical, 7)
+    .background(CepessaColors.backgroundRaised.opacity(0.58))
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+  }
 }
 
 enum LocalSessionMarkdownBlock: Equatable {
@@ -1592,7 +1650,8 @@ struct CepessaSessionsSettingsPage: View {
   @AppStorage("cepessa.sessions.transcriptionSpeedMode") private var transcriptionSpeedMode =
     "Balanced"
   @AppStorage("cepessa.sessions.preferredRecapStyle") private var recapStyle = "Structured recap"
-  @AppStorage("cepessa.sessions.floatingBarEnabled") private var floatingBarEnabled = false
+  @AppStorage(CepessaSessionFloatingBarPreferences.enabledKey) private var floatingBarEnabled =
+    true
   @State private var openSettingsPickerTitle: String?
 
   var body: some View {
@@ -1648,14 +1707,14 @@ struct CepessaSessionsSettingsPage: View {
               .toggleStyle(.switch)
 
               Toggle(isOn: $floatingBarEnabled) {
-                Text("Show optional floating capture tools while recording")
+                Text("Show floating recording bar")
                   .scaledFont(size: 13)
                   .foregroundStyle(CepessaColors.textPrimary)
               }
               .toggleStyle(.switch)
 
               Text(
-                "The status bar is the primary transcription monitor. The floating bar stays off by default and never appears for transcription or recap processing."
+                "A draggable recording control appears while capture is live. The status bar still handles transcription and recap processing."
               )
               .scaledFont(size: 12)
               .foregroundStyle(CepessaColors.textSecondary)
@@ -1713,6 +1772,12 @@ struct CepessaSessionsSettingsPage: View {
     }
     .onChange(of: floatingBarEnabled) { _, _ in
       CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
+    }
+    .onExitCommand {
+      guard openSettingsPickerTitle != nil else { return }
+      withAnimation(.easeOut(duration: 0.12)) {
+        openSettingsPickerTitle = nil
+      }
     }
   }
 
@@ -1773,7 +1838,7 @@ struct CepessaSessionsSettingsPage: View {
               .foregroundStyle(CepessaColors.textTertiary)
           }
           .padding(.horizontal, 12)
-          .frame(width: 180, height: 32, alignment: .trailing)
+          .frame(width: 190, height: 40, alignment: .trailing)
           .background(CepessaColors.backgroundRaised.opacity(0.72))
           .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
           .overlay {
@@ -1820,6 +1885,9 @@ struct CepessaSessionsSettingsPage: View {
       .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
     .buttonStyle(CepessaPressStyle(scale: 0.985, pressedBrightness: -0.01))
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(title)
+    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
   }
 
   private func permissionRow(title: String, isGranted: Bool) -> some View {
