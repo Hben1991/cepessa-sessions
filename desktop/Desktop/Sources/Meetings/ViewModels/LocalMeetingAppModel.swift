@@ -539,6 +539,7 @@ final class LocalSessionAppModel: ObservableObject {
       guard let proposal = session.documentChat.pendingProposal else { return }
       let undoSnapshot = LocalSessionDocumentUndoSnapshot(
         title: session.title,
+        documentMarkdown: session.documentMarkdown,
         recap: session.recap,
         transcriptSegments: session.transcriptSegments,
         createdAt: Date()
@@ -574,6 +575,7 @@ final class LocalSessionAppModel: ObservableObject {
     _ = mutateSession(id: resolvedSessionID) { session in
       guard let snapshot = session.documentChat.undoSnapshot else { return }
       session.title = snapshot.title
+      session.documentMarkdown = snapshot.documentMarkdown
       session.recap = snapshot.recap
       session.transcriptSegments = snapshot.transcriptSegments
       session.documentChat.undoSnapshot = nil
@@ -1089,6 +1091,14 @@ final class LocalSessionAppModel: ObservableObject {
   ) -> Bool {
     var changed = false
     var recapChanged = false
+
+    if let documentMarkdown = proposal.documentMarkdown {
+      let replacement = documentMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+      if session.documentMarkdown != replacement {
+        session.documentMarkdown = replacement
+        changed = true
+      }
+    }
 
     if let title = proposal.sessionTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
       !title.isEmpty,

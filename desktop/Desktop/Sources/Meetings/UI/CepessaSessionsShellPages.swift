@@ -863,19 +863,33 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
 
   var body: some View {
     VStack(alignment: .center, spacing: 0) {
-      VStack(alignment: .leading, spacing: 20) {
-        ForEach(Array(markdownBlocks.enumerated()), id: \.offset) { _, block in
-          renderedBlock(block)
+      if markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        VStack(spacing: 10) {
+          Image(systemName: "doc")
+            .font(.system(size: 25, weight: .light))
+            .foregroundStyle(CepessaColors.textTertiary)
+          Text("Document is empty.")
+            .scaledFont(size: 14, weight: .medium)
+            .foregroundStyle(CepessaColors.textSecondary)
         }
+        .padding(.top, 96)
+        .padding(.bottom, 120)
+        .frame(maxWidth: 780, minHeight: 320)
+      } else {
+        VStack(alignment: .leading, spacing: 20) {
+          ForEach(Array(markdownBlocks.enumerated()), id: \.offset) { _, block in
+            renderedBlock(block)
+          }
+        }
+        .padding(.horizontal, 56)
+        .padding(.top, 40)
+        .padding(.bottom, 70)
+        .frame(maxWidth: 780, alignment: .topLeading)
+        .environment(
+          \.layoutDirection,
+          language == .hebrew ? .rightToLeft : .leftToRight
+        )
       }
-      .padding(.horizontal, 56)
-      .padding(.top, 40)
-      .padding(.bottom, 70)
-      .frame(maxWidth: 780, alignment: .topLeading)
-      .environment(
-        \.layoutDirection,
-        language == .hebrew ? .rightToLeft : .leftToRight
-      )
     }
     .frame(maxWidth: .infinity, alignment: .center)
   }
@@ -1496,6 +1510,9 @@ private struct LocalSessionDocumentChatRail: View {
         if proposal.sessionTitle != nil {
           proposalLine("Title update ready")
         }
+        if proposal.documentMarkdown != nil {
+          proposalLine("Markdown document replacement ready")
+        }
         if !proposal.transcriptPatches.isEmpty {
           proposalLine("\(proposal.transcriptPatches.count) targeted transcript correction(s)")
         }
@@ -1567,6 +1584,14 @@ private struct LocalSessionDocumentChatRail: View {
         !overview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       {
         previewSection("Overview", overview)
+      }
+
+      if let documentMarkdown = proposal.documentMarkdown {
+        let preview = documentMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        previewSection(
+          "Markdown document",
+          preview.isEmpty ? "The document will be blank." : preview
+        )
       }
 
       ForEach(Array((proposal.recapPatch?.sections ?? []).enumerated()), id: \.offset) {

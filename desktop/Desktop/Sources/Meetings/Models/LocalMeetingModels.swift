@@ -337,6 +337,7 @@ struct LocalSessionDocumentSourceCitation: Identifiable, Codable, Equatable, Sen
 struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
   var assistantMessage: String
   var sessionTitle: String? = nil
+  var documentMarkdown: String? = nil
   var recapPatch: LocalSessionDocumentRecapPatch?
   var transcriptPatches: [LocalSessionDocumentTranscriptPatch]
   var speakerRenames: [LocalSessionDocumentSpeakerRename]
@@ -346,6 +347,7 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
   init(
     assistantMessage: String,
     sessionTitle: String? = nil,
+    documentMarkdown: String? = nil,
     recapPatch: LocalSessionDocumentRecapPatch?,
     transcriptPatches: [LocalSessionDocumentTranscriptPatch],
     speakerRenames: [LocalSessionDocumentSpeakerRename],
@@ -354,6 +356,7 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
   ) {
     self.assistantMessage = assistantMessage
     self.sessionTitle = sessionTitle
+    self.documentMarkdown = documentMarkdown
     self.recapPatch = recapPatch
     self.transcriptPatches = transcriptPatches
     self.speakerRenames = speakerRenames
@@ -364,6 +367,7 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case assistantMessage
     case sessionTitle
+    case documentMarkdown
     case recapPatch
     case transcriptPatches
     case speakerRenames
@@ -375,6 +379,7 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     assistantMessage = try container.decode(String.self, forKey: .assistantMessage)
     sessionTitle = try container.decodeIfPresent(String.self, forKey: .sessionTitle)
+    documentMarkdown = try container.decodeIfPresent(String.self, forKey: .documentMarkdown)
     recapPatch = try container.decodeIfPresent(LocalSessionDocumentRecapPatch.self, forKey: .recapPatch)
     transcriptPatches =
       try container.decodeIfPresent([LocalSessionDocumentTranscriptPatch].self, forKey: .transcriptPatches)
@@ -389,12 +394,14 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
   }
 
   var hasEdits: Bool {
-    sessionTitle != nil || recapPatch != nil || !transcriptPatches.isEmpty || !speakerRenames.isEmpty
+    sessionTitle != nil || documentMarkdown != nil || recapPatch != nil || !transcriptPatches.isEmpty
+      || !speakerRenames.isEmpty
   }
 }
 
 struct LocalSessionDocumentUndoSnapshot: Codable, Equatable, Sendable {
   var title: String
+  var documentMarkdown: String?
   var recap: LocalSessionRecap
   var transcriptSegments: [LocalSessionTranscriptSegment]
   var createdAt: Date
@@ -499,6 +506,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
   var captureArtifacts: [LocalSessionCaptureArtifact]
   var audioArtifacts: LocalSessionAudioArtifacts
   var contentClassification: LocalSessionContentClassification?
+  var documentMarkdown: String?
   var documentChat: LocalSessionDocumentChat
 
   var segments: [LocalSessionTranscriptSegment] {
@@ -521,6 +529,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     captureArtifacts: [LocalSessionCaptureArtifact] = [],
     audioArtifacts: LocalSessionAudioArtifacts,
     contentClassification: LocalSessionContentClassification? = nil,
+    documentMarkdown: String? = nil,
     documentChat: LocalSessionDocumentChat = .empty
   ) {
     self.id = id
@@ -533,6 +542,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     self.captureArtifacts = captureArtifacts
     self.audioArtifacts = audioArtifacts
     self.contentClassification = contentClassification
+    self.documentMarkdown = documentMarkdown
     self.documentChat = documentChat
   }
 
@@ -548,6 +558,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     case captureArtifacts
     case audioArtifacts
     case contentClassification
+    case documentMarkdown
     case documentChat
   }
 
@@ -574,6 +585,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     contentClassification =
       try container.decodeIfPresent(
         LocalSessionContentClassification.self, forKey: .contentClassification)
+    documentMarkdown = try container.decodeIfPresent(String.self, forKey: .documentMarkdown)
     documentChat =
       try container.decodeIfPresent(LocalSessionDocumentChat.self, forKey: .documentChat)
       ?? .empty
@@ -592,6 +604,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     try container.encode(captureArtifacts, forKey: .captureArtifacts)
     try container.encode(audioArtifacts, forKey: .audioArtifacts)
     try container.encodeIfPresent(contentClassification, forKey: .contentClassification)
+    try container.encodeIfPresent(documentMarkdown, forKey: .documentMarkdown)
     try container.encode(documentChat, forKey: .documentChat)
   }
 
@@ -721,6 +734,10 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     language: LocalSessionDocumentLanguage = .english,
     includeTranscript: Bool = false
   ) -> String {
+    if let documentMarkdown = session.documentMarkdown {
+      return documentMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     let recap = localizedRecap(for: session, language: language)
     var lines: [String] = []
     lines.append("# \(sanitizedLine(title(for: session, language: language)))")

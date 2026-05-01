@@ -1752,6 +1752,70 @@ final class LocalMeetingAppModelTests: XCTestCase {
       model.selectedSession?.documentChat.messages.last?.text.contains("Undid") ?? false)
   }
 
+  func testDocumentChatApplyMarkdownReplacementClearsDocumentAndUndoRestoresIt()
+    async throws
+  {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let sessionID = UUID(uuidString: "673AE53A-2016-4D1D-AB90-6194255BE5D4")!
+    var session = makeSession(
+      id: sessionID,
+      startedAt: Date(timeIntervalSince1970: 5_400),
+      status: .ready,
+      title: "Clearable doc",
+      segments: [
+        .init(
+          id: UUID(uuidString: "C73A861D-C1C6-4D3B-B309-22184C8D611B")!,
+          speaker: "Speaker",
+          text: "The original session content remains available in the transcript.",
+          timestamp: Date(timeIntervalSince1970: 5_430)
+        )
+      ]
+    )
+    session.recap = LocalSessionRecap(overview: "Original overview.", generatedAt: nil, sections: [])
+    try store.save(session)
+
+    let proposal = LocalSessionDocumentEditProposal(
+      assistantMessage: "Prepared a blank Markdown document.",
+      documentMarkdown: "",
+      recapPatch: nil,
+      transcriptPatches: [],
+      speakerRenames: [],
+      warnings: []
+    )
+    let model = LocalMeetingAppModel(
+      store: store,
+      fileLayout: layout,
+      documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
+    )
+    model.selectSession(id: sessionID)
+
+    model.sendDocumentChatMessage("תמחק הכל", for: sessionID)
+    await waitUntil("document chat Markdown replacement preview is ready") {
+      model.selectedSession?.documentChat.pendingProposal != nil
+    }
+    model.applyPendingDocumentChatProposal(for: sessionID)
+
+    let cleared = try XCTUnwrap(model.selectedSession)
+    XCTAssertEqual(cleared.documentMarkdown, "")
+    XCTAssertEqual(
+      LocalSessionRecapMarkdownDocument.markdown(for: cleared, includeTranscript: true), "")
+    XCTAssertNil(cleared.documentChat.pendingProposal)
+    XCTAssertNotNil(cleared.documentChat.undoSnapshot)
+
+    let reloaded = try XCTUnwrap(store.loadSessions().first)
+    XCTAssertEqual(reloaded.documentMarkdown, "")
+    XCTAssertEqual(LocalSessionRecapMarkdownDocument(session: reloaded).markdown, "")
+
+    model.undoLastDocumentChatEdit(for: sessionID)
+
+    let restored = try XCTUnwrap(model.selectedSession)
+    XCTAssertNil(restored.documentMarkdown)
+    XCTAssertTrue(
+      LocalSessionRecapMarkdownDocument(session: restored).markdown.contains("Original overview."))
+  }
+
   func testDocumentChatDoesNotClaimAppliedEditWhenProposalChangesNothing() async throws {
     let layout = LocalMeetingFileLayout(
       baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))

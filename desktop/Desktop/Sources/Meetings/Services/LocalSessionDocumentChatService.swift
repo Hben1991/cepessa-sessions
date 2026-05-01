@@ -25,6 +25,10 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
   func sendMessage(_ request: LocalSessionDocumentChatRequest) async throws
     -> LocalSessionDocumentEditProposal
   {
+    if Self.requestLooksLikeClearDocumentRequest(request.userMessage) {
+      return Self.clearDocumentFallbackProposal(for: request)
+    }
+
     do {
       let rawResponse = try await languageModel.generateText(
         prompt: Self.prompt(for: request),
@@ -80,6 +84,7 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       {
         "assistantMessage": "plain English explanation for the user",
         "sessionTitle": "optional replacement document/session title or null",
+        "documentMarkdown": "optional full Markdown document replacement, or null",
         "sourceCitations": [{"segmentID":"UUID from transcript below or null","title":"short source label","excerpt":"short source excerpt"}],
         "recapPatch": {
           "overview": "optional replacement overview or null",
@@ -99,8 +104,9 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       Rules:
       - Return document edits whenever the user asks to change, clean up, rewrite, summarize into sections, turn into action items, rename speakers, or fix transcript text.
       - If the user asks in Hebrew or asks to translate to Hebrew, write assistantMessage and recapPatch content in Hebrew.
+      - If the user asks to delete, clear, replace, or rewrite the whole Markdown document, return documentMarkdown. For a clear/delete-all request, set documentMarkdown to an empty string.
       - If the user asks to change or update the title, return sessionTitle with the new title. Do not create a note section for title changes.
-      - The structured session is the source of truth, not the rendered Markdown.
+      - The structured session and the rendered Markdown are both available: use recapPatch for small structured recap edits, and documentMarkdown for whole-document Markdown edits.
       - You may replace recap overview and recap sections.
       - You may rename speakers/participants across transcript segments.
       - You may correct transcript text only with targeted transcriptPatches by segmentID.
@@ -143,6 +149,8 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       attachments: session.attachments,
       captureArtifacts: session.captureArtifacts,
       audioArtifacts: session.audioArtifacts,
+      contentClassification: session.contentClassification,
+      documentMarkdown: session.documentMarkdown,
       documentChat: session.documentChat
     )
     return truncatedText(
@@ -211,6 +219,10 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
         warnings: fallbackWarnings(from: failureMessage),
         sourceCitations: sourceCitations(for: request.session)
       )
+    }
+
+    if requestLooksLikeClearDocumentRequest(request.userMessage) {
+      return clearDocumentFallbackProposal(for: request, failureMessage: failureMessage)
     }
 
     if requestLooksLikeConciseStyleEdit(request.userMessage) {
@@ -358,6 +370,24 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
     )
   }
 
+  private static func clearDocumentFallbackProposal(
+    for request: LocalSessionDocumentChatRequest,
+    failureMessage: String? = nil
+  ) -> LocalSessionDocumentEditProposal {
+    let isHebrew = request.userMessage.containsHebrewScript
+    return LocalSessionDocumentEditProposal(
+      assistantMessage: isHebrew
+        ? "הכנתי מסמך Markdown ריק."
+        : "Prepared a blank Markdown document.",
+      documentMarkdown: "",
+      recapPatch: nil,
+      transcriptPatches: [],
+      speakerRenames: [],
+      warnings: fallbackWarnings(from: failureMessage),
+      sourceCitations: sourceCitations(for: request.session)
+    )
+  }
+
   private static func fallbackAnswerProposal(
     for request: LocalSessionDocumentChatRequest,
     failureMessage: String? = nil
@@ -473,14 +503,44 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       "rewrite", "clean up", "turn this into", "rename", "translate", "summarize",
       "shorten", "shorter", "make it short", "make this short", "concise", "tighten",
       "trim", "less verbose", "too verbose", "tone", "style", "title",
+      "delete everything", "clear everything", "clear document", "empty document",
+      "remove everything", "remove all content",
       "תוסיף", "הוסף", "להוסיף", "תעדכן", "עדכן", "שנה", "תקן", "תתקן", "סכם",
       "סיכום", "משימה", "משימות", "אקשן", "פעולה", "פעולות", "סעיף", "דירוג",
       "דרוג", "תקצר", "קצר", "לקצר", "שיקצר", "תמצת", "לתמצת", "תמציתי",
       "פחות לחפור", "לחפור", "ברוח ההקלטה", "ברוח המסמך", "סגנון", "טון",
-      "כותרת",
+      "כותרת", "תמחק", "מחק", "למחוק", "נקה", "לנקות", "רוקן", "תרוקן",
     ]
 
     return editTerms.contains { normalized.contains($0) }
+  }
+
+  private static func requestLooksLikeClearDocumentRequest(_ message: String) -> Bool {
+    let normalized = message.lowercased()
+      .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+
+    let clearTerms = [
+      "delete everything", "delete all", "clear everything", "clear all", "clear document",
+      "empty document", "remove everything", "remove all content", "wipe document",
+      "תמחק הכל", "מחק הכל", "תמחק את הכל", "מחק את הכל", "נקה הכל", "נקה את הכל",
+      "נקה את המסמך", "רוקן את המסמך", "תרוקן את המסמך", "תמחק את המסמך",
+    ]
+    if clearTerms.contains(where: { normalized.contains($0) }) {
+      return true
+    }
+
+    let mentionsDocument = [
+      "document", "markdown", "md", "מסמך", "המסמך", "מרקדאון", "md",
+    ].contains { normalized.contains($0) }
+    let hasClearVerb = [
+      "delete", "clear", "empty", "remove", "wipe", "תמחק", "מחק", "נקה", "רוקן",
+      "תרוקן", "למחוק", "לנקות",
+    ].contains { normalized.contains($0) }
+    let hasAllTarget = [
+      "everything", "all", "all content", "הכל", "את הכל", "כל התוכן", "תוכן",
+    ].contains { normalized.contains($0) }
+
+    return mentionsDocument && hasClearVerb && hasAllTarget
   }
 
   private static func requestLooksLikeConciseStyleEdit(_ message: String) -> Bool {
@@ -842,6 +902,7 @@ extension LocalSessionDocumentEditProposal {
 private struct LocalSessionDocumentEditProposalPayload: Codable {
   var assistantMessage: String?
   var sessionTitle: String?
+  var documentMarkdown: String?
   var sourceCitations: [SourceCitation]?
   var recapPatch: RecapPatch?
   var transcriptPatches: [TranscriptPatch]?
@@ -904,6 +965,9 @@ private struct LocalSessionDocumentEditProposalPayload: Codable {
       overview == nil && sections.isEmpty
       ? nil
       : LocalSessionDocumentRecapPatch(overview: overview, sections: sections)
+    let markdownReplacement = documentMarkdown.map {
+      $0.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     let transcriptEdits = (transcriptPatches ?? []).compactMap {
       patch
@@ -952,6 +1016,7 @@ private struct LocalSessionDocumentEditProposalPayload: Codable {
     return LocalSessionDocumentEditProposal(
       assistantMessage: assistantMessage?.cleanedAssistantMessage ?? "",
       sessionTitle: sessionTitle?.cleanedGeneratedContent,
+      documentMarkdown: markdownReplacement,
       recapPatch: recap,
       transcriptPatches: transcriptEdits,
       speakerRenames: renames,

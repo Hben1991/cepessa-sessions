@@ -1172,6 +1172,44 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     XCTAssertNil(proposal.recapPatch)
   }
 
+  func testDocumentChatTreatsHebrewClearDocumentRequestAsMarkdownReplacementWhenModelFails()
+    async throws
+  {
+    let client = LocalSessionDocumentChatClient(
+      languageModel: CapturingLanguageModel(response: "not json")
+    )
+    let startedAt = Date(timeIntervalSince1970: 2_335_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "FB602D4C-BCA7-41B5-A1A5-40FC9B068C2A")!,
+      title: "Session 30 Apr 2026 at 14:52",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "38F7BCF1-07BE-4500-9C68-8100F6B9268A")!,
+          speaker: "You",
+          text: "המסמך עדיין מלא בטקסט שצריך למחוק.",
+          timestamp: startedAt.addingTimeInterval(15)
+        )
+      ],
+      audioArtifacts: .empty
+    )
+    session.recap = LocalSessionRecap(
+      overview: "This text should disappear from the Markdown document.",
+      generatedAt: nil,
+      sections: []
+    )
+
+    let proposal = try await client.sendMessage(
+      LocalSessionDocumentChatRequest(session: session, userMessage: "תמחק הכל")
+    )
+
+    XCTAssertTrue(proposal.hasEdits)
+    XCTAssertEqual(proposal.documentMarkdown, "")
+    XCTAssertNil(proposal.recapPatch)
+    XCTAssertTrue(proposal.assistantMessage.contains("ריק"))
+  }
+
   func testDocumentChatFallbackWarningHidesRawLocalModelLoaderFailure() async throws {
     let client = LocalSessionDocumentChatClient(
       languageModel: ThrowingMessageLanguageModel(

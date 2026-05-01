@@ -588,6 +588,10 @@ struct CepessaSessionDocumentChatView: View {
       parts.append("title update")
     }
 
+    if proposal.documentMarkdown != nil {
+      parts.append("Markdown replacement")
+    }
+
     if proposal.recapPatch != nil {
       parts.append("recap update")
     }
@@ -613,6 +617,14 @@ struct CepessaSessionDocumentChatView: View {
         !title.isEmpty
       {
         previewLine(title: "Title", body: title)
+      }
+
+      if let documentMarkdown = proposal.documentMarkdown {
+        let preview = documentMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        previewLine(
+          title: "Markdown document",
+          body: preview.isEmpty ? "The document will be blank." : preview
+        )
       }
 
       if let overview = proposal.recapPatch?.overview?.trimmingCharacters(
