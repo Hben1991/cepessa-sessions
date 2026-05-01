@@ -874,19 +874,33 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     XCTAssertGreaterThan(finalInstructionRange.lowerBound, requestRange.lowerBound)
   }
 
-  func testDocumentChatFallsBackToActionItemPatchWhenModelIsUnavailable() async throws {
-    let client = LocalSessionDocumentChatClient(languageModel: ThrowingLanguageModel())
+  func testDocumentChatDelegatesDocumentOperationChoiceToModel() async throws {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {
+          "operation":"delete",
+          "assistantMessage":"I prepared a blank document.",
+          "sessionTitle":null,
+          "documentMarkdown":"",
+          "recapPatch":null,
+          "transcriptPatches":[],
+          "speakerRenames":[],
+          "warnings":[]
+        }
+        """
+    )
+    let client = LocalSessionDocumentChatClient(languageModel: languageModel)
     let startedAt = Date(timeIntervalSince1970: 2_200_000)
     var session = LocalMeetingSession(
       id: UUID(uuidString: "2D5E2D92-53F4-4D63-9C0D-A9F80AAB2A1D")!,
-      title: "Action fallback",
+      title: "Free document operation",
       startedAt: startedAt,
       status: .ready,
       transcriptSegments: [
         .init(
           id: UUID(uuidString: "E6A1A183-C250-4F2A-9869-8C4334632B92")!,
           speaker: "Ben",
-          text: "We need to review the conversation rating and decide what changes next.",
+          text: "This document can be read, updated, or deleted by the model.",
           timestamp: startedAt.addingTimeInterval(12)
         )
       ],
@@ -901,23 +915,243 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     let proposal = try await client.sendMessage(
       LocalSessionDocumentChatRequest(
         session: session,
-        userMessage: "Turn this into action items."
+        userMessage: "תמחק הכל"
       )
     )
 
+    let prompt = try XCTUnwrap(languageModel.lastPrompt)
+    XCTAssertTrue(prompt.contains("\"operation\": \"read|update|delete\""))
+    XCTAssertTrue(prompt.contains("Choose the operation yourself"))
+    XCTAssertFalse(prompt.contains("plain English"))
+    XCTAssertFalse(prompt.contains("For \"turn this into action items\""))
+    XCTAssertFalse(prompt.contains("If the user asks to delete"))
     XCTAssertTrue(proposal.hasEdits)
-    XCTAssertEqual(proposal.recapPatch?.sections.first?.kind, .actionItem)
-    XCTAssertEqual(proposal.recapPatch?.sections.first?.title, "Action items")
-    XCTAssertTrue(
-      proposal.recapPatch?.sections.first?.bullets.contains(where: {
-        $0.contains("conversation rating")
-      }) ?? false
-    )
+    XCTAssertEqual(proposal.operation, .delete)
+    XCTAssertEqual(proposal.documentMarkdown, "")
+    XCTAssertNil(proposal.recapPatch)
     XCTAssertEqual(proposal.sourceCitations.first?.segmentID, session.transcriptSegments.first?.id)
-    XCTAssertTrue(proposal.sourceCitations.first?.excerpt.contains("conversation rating") ?? false)
+    XCTAssertTrue(
+      proposal.sourceCitations.first?.excerpt.contains("read, updated, or deleted") ?? false)
   }
 
-  func testDocumentChatFallsBackToHebrewSectionPatchWhenModelReturnsInvalidJson() async throws {
+  func testDocumentChatAsksModelToReconsiderNoEditResultBeforeReturning() async throws {
+    let languageModel = SequentialLanguageModel(
+      responses: [
+        """
+        {
+          "operation": "read",
+          "assistantMessage": "No document edit was needed.",
+          "sessionTitle": null,
+          "documentMarkdown": null,
+          "recapPatch": null,
+          "transcriptPatches": [],
+          "speakerRenames": [],
+          "warnings": []
+        }
+        """,
+        """
+        {
+          "operation": "update",
+          "assistantMessage": "הכנתי גרסה חדשה בסגנון ספר מסתורין.",
+          "sessionTitle": null,
+          "documentMarkdown": "# תעלומת הלייב\\n\\nהמסך נפתח על סרטון יוטיוב עברי, וצל כבד של סיפור מסתורין ירד על מריק ומיכאל.",
+          "recapPatch": null,
+          "transcriptPatches": [],
+          "speakerRenames": [],
+          "warnings": []
+        }
+        """,
+      ]
+    )
+    let client = LocalSessionDocumentChatClient(languageModel: languageModel)
+    let startedAt = Date(timeIntervalSince1970: 2_250_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "1D3F614D-25E2-4F2F-B4BE-832A2F9A53BC")!,
+      title: "קטע מלייב של מורה מבוכים ערוץ דונקי",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "81FEE1AD-A3FA-43BE-A13D-DA69F175A85E")!,
+          speaker: "You",
+          text: "ועכשיו אני למשל לוקח סרטון, בואו ניקח איזה סרטון",
+          timestamp: startedAt
+        ),
+        .init(
+          id: UUID(uuidString: "2490A3FD-7133-4B79-A936-6014C6B6D401")!,
+          speaker: "You",
+          text: "ההיסטוריה שראיתי ביוטיוב",
+          timestamp: startedAt.addingTimeInterval(6)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+    session.recap = LocalSessionRecap(
+      overview: "המסמך עוסק בסרטון יוטיוב בעברית.",
+      generatedAt: startedAt,
+      sections: []
+    )
+
+    let proposal = try await client.sendMessage(
+      LocalSessionDocumentChatRequest(
+        session: session,
+        userMessage:
+          "אני רוצה לשכתב את המסמך מחדש בהתבסס בתמלול. תכתוב מחדש את המסמך כאילו מדובר בספר מסתורין"
+      )
+    )
+
+    XCTAssertEqual(languageModel.prompts.count, 2)
+    let reconsiderationPrompt = try XCTUnwrap(languageModel.prompts.dropFirst().first)
+    XCTAssertTrue(reconsiderationPrompt.contains("previous response produced no document change"))
+    XCTAssertTrue(reconsiderationPrompt.contains("Choose the operation yourself"))
+    XCTAssertEqual(proposal.operation, .update)
+    XCTAssertEqual(
+      proposal.documentMarkdown,
+      "# תעלומת הלייב\n\nהמסך נפתח על סרטון יוטיוב עברי, וצל כבד של סיפור מסתורין ירד על מריק ומיכאל."
+    )
+  }
+
+  func testDocumentChatCreatesSafetyNetRewriteWhenModelTwiceReturnsNoEdit() async throws {
+    let languageModel = SequentialLanguageModel(
+      responses: [
+        """
+        {
+          "operation": "read",
+          "assistantMessage": "No document edit was needed.",
+          "sessionTitle": null,
+          "documentMarkdown": null,
+          "recapPatch": null,
+          "transcriptPatches": [],
+          "speakerRenames": [],
+          "warnings": []
+        }
+        """,
+        """
+        {
+          "operation": "read",
+          "assistantMessage": "No document edit was needed.",
+          "sessionTitle": null,
+          "documentMarkdown": null,
+          "recapPatch": null,
+          "transcriptPatches": [],
+          "speakerRenames": [],
+          "warnings": []
+        }
+        """,
+      ]
+    )
+    let client = LocalSessionDocumentChatClient(languageModel: languageModel)
+    let startedAt = Date(timeIntervalSince1970: 2_260_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "E40E47C8-6D29-42E2-B63B-D7D230561947")!,
+      title: "קטע מלייב של מורה מבוכים ערוץ דונקי",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "A865C51E-9E62-4F8D-9B1E-E62428CDE14F")!,
+          speaker: "You",
+          text: "זה הלייב של מורה מבוכים של ערוץ דונקי.",
+          timestamp: startedAt
+        ),
+        .init(
+          id: UUID(uuidString: "25573A44-5D2C-4A43-B64E-2BD04708D963")!,
+          speaker: "Remote speaker",
+          text: "את מצליחה להתחבא מאחורי השיח ולתקוף אותו.",
+          timestamp: startedAt.addingTimeInterval(6)
+        ),
+        .init(
+          id: UUID(uuidString: "F67E5FCF-7DBE-445D-93F1-4B55C2826E30")!,
+          speaker: "Remote speaker",
+          text: "החץ שמחטיא פוגע בעץ מושחת ליד מריק ומיכאל.",
+          timestamp: startedAt.addingTimeInterval(12)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+    session.recap = LocalSessionRecap(
+      overview: "המסמך עוסק בסרטון יוטיוב בעברית ובסצנת משחק תפקידים.",
+      generatedAt: startedAt,
+      sections: []
+    )
+
+    let proposal = try await client.sendMessage(
+      LocalSessionDocumentChatRequest(
+        session: session,
+        userMessage:
+          "אני רוצה לשכתב את המסמך מחדש בהתבסס בתמלול. תכתוב מחדש את המסמך כאילו מדובר בספר מסתורין"
+      )
+    )
+
+    XCTAssertEqual(languageModel.prompts.count, 2)
+    XCTAssertTrue(proposal.hasEdits)
+    XCTAssertEqual(proposal.operation, .update)
+    let documentMarkdown = try XCTUnwrap(proposal.documentMarkdown)
+    XCTAssertTrue(documentMarkdown.contains("ספר מסתורין"))
+    XCTAssertTrue(documentMarkdown.contains("מורה מבוכים"))
+    XCTAssertTrue(documentMarkdown.contains("מריק ומיכאל"))
+    XCTAssertFalse(proposal.assistantMessage.contains("No document edit was needed"))
+  }
+
+  func testDocumentChatCreatesSafetyNetRewriteWhenModelReturnsInvalidJsonForClearRewrite()
+    async throws
+  {
+    let languageModel = SequentialLanguageModel(
+      responses: [
+        "not json",
+        "still not json",
+      ]
+    )
+    let client = LocalSessionDocumentChatClient(languageModel: languageModel)
+    let startedAt = Date(timeIntervalSince1970: 2_270_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "A78FCE04-A0D0-41BF-B023-46EE8E70F3C1")!,
+      title: "קטע מלייב של מורה מבוכים ערוץ דונקי",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "3E6FF3EC-77C2-4777-953E-FE7B6F862068")!,
+          speaker: "You",
+          text: "זה הלייב של מורה מבוכים של ערוץ דונקי.",
+          timestamp: startedAt
+        ),
+        .init(
+          id: UUID(uuidString: "8ED371BD-D77B-4713-A81E-3A8316944A56")!,
+          speaker: "Remote speaker",
+          text: "החץ שמחטיא פוגע בעץ מושחת ליד מריק ומיכאל.",
+          timestamp: startedAt.addingTimeInterval(12)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+    session.recap = LocalSessionRecap(
+      overview: "המסמך עוסק בסרטון יוטיוב בעברית ובסצנת משחק תפקידים.",
+      generatedAt: startedAt,
+      sections: []
+    )
+
+    let proposal = try await client.sendMessage(
+      LocalSessionDocumentChatRequest(
+        session: session,
+        userMessage:
+          "אני רוצה לשכתב את המסמך מחדש בהתבסס בתמלול. תכתוב מחדש את המסמך כאילו מדובר בספר מסתורין"
+      )
+    )
+
+    XCTAssertEqual(languageModel.prompts.count, 2)
+    XCTAssertTrue(proposal.hasEdits)
+    XCTAssertEqual(proposal.operation, .update)
+    let documentMarkdown = try XCTUnwrap(proposal.documentMarkdown)
+    XCTAssertTrue(documentMarkdown.contains("ספר מסתורין"))
+    XCTAssertTrue(documentMarkdown.contains("מורה מבוכים"))
+    XCTAssertTrue(documentMarkdown.contains("מריק ומיכאל"))
+    XCTAssertFalse(proposal.assistantMessage.contains("could not produce a clean document edit"))
+  }
+
+  func testDocumentChatDoesNotInventHebrewSectionPatchWhenModelReturnsInvalidJson()
+    async throws
+  {
     let client = LocalSessionDocumentChatClient(
       languageModel: CapturingLanguageModel(response: "not json")
     )
@@ -938,16 +1172,30 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
       )
     )
 
-    XCTAssertTrue(proposal.hasEdits)
-    XCTAssertEqual(proposal.recapPatch?.sections.first?.kind, .notes)
-    XCTAssertEqual(proposal.recapPatch?.sections.first?.title, "דירוג השיחה")
-    XCTAssertTrue(
-      proposal.recapPatch?.sections.first?.summary.contains("דירוג השיחה") ?? false)
+    XCTAssertFalse(proposal.hasEdits)
+    XCTAssertNil(proposal.recapPatch)
+    XCTAssertTrue(proposal.warnings.contains("The local model returned an invalid edit shape, so nothing was applied."))
   }
 
-  func testDocumentChatFallsBackToHebrewEndParagraphPatchWhenTextIsProvided() async throws {
+  func testDocumentChatUsesModelProvidedHebrewEndParagraphPatch() async throws {
     let client = LocalSessionDocumentChatClient(
-      languageModel: CapturingLanguageModel(response: "not json")
+      languageModel: CapturingLanguageModel(
+        response: """
+          {
+            "operation":"update",
+            "assistantMessage":"הכנתי פסקת המשך בסוף המסמך.",
+            "recapPatch":{
+              "overview":null,
+              "sections":[
+                {"kind":"notes","title":"המשך המסמך","summary":"הדמויות ממשיכות לנוע בזהירות בתוך היער.","bullets":[]}
+              ]
+            },
+            "transcriptPatches":[],
+            "speakerRenames":[],
+            "warnings":[]
+          }
+          """
+      )
     )
     let startedAt = Date(timeIntervalSince1970: 2_310_000)
     let session = LocalMeetingSession(
@@ -967,6 +1215,7 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     )
 
     XCTAssertTrue(proposal.hasEdits)
+    XCTAssertEqual(proposal.operation, .update)
     XCTAssertEqual(proposal.recapPatch?.sections.first?.kind, .notes)
     XCTAssertEqual(proposal.recapPatch?.sections.first?.title, "המשך המסמך")
     XCTAssertEqual(
@@ -976,7 +1225,7 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     XCTAssertTrue(proposal.recapPatch?.sections.first?.bullets.isEmpty ?? false)
   }
 
-  func testDocumentChatDoesNotWriteHebrewAppendInstructionAsDocumentContent() async throws {
+  func testDocumentChatDoesNotInventAppendContentWhenModelReturnsInvalidJson() async throws {
     let client = LocalSessionDocumentChatClient(
       languageModel: CapturingLanguageModel(response: "not json")
     )
@@ -999,13 +1248,28 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
 
     XCTAssertFalse(proposal.hasEdits)
     XCTAssertNil(proposal.recapPatch)
-    XCTAssertTrue(proposal.assistantMessage.contains("איזה מלל"))
-    XCTAssertFalse(proposal.assistantMessage.contains("עדכנתי את המסמך"))
+    XCTAssertTrue(proposal.assistantMessage.contains("could not produce a clean document edit"))
   }
 
-  func testDocumentChatBuildsHebrewStoryContinuationFromTranscriptAppendRequest() async throws {
+  func testDocumentChatUsesModelProvidedHebrewStoryContinuation() async throws {
     let client = LocalSessionDocumentChatClient(
-      languageModel: CapturingLanguageModel(response: "not json")
+      languageModel: CapturingLanguageModel(
+        response: """
+          {
+            "operation":"update",
+            "assistantMessage":"הכנתי המשך סיפורי מתוך התמלול.",
+            "recapPatch":{
+              "overview":null,
+              "sections":[
+                {"kind":"notes","title":"המשך הסיפור","summary":"מריק, מיכאל והמכשפה נשארים מול איום שממשיך להסתבך סביב היער.","bullets":[]}
+              ]
+            },
+            "transcriptPatches":[],
+            "speakerRenames":[],
+            "warnings":[]
+          }
+          """
+      )
     )
     let startedAt = Date(timeIntervalSince1970: 2_316_000)
     let session = LocalMeetingSession(
@@ -1039,6 +1303,7 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
 
     let section = try XCTUnwrap(proposal.recapPatch?.sections.first)
     XCTAssertTrue(proposal.hasEdits)
+    XCTAssertEqual(proposal.operation, .update)
     XCTAssertEqual(section.kind, .notes)
     XCTAssertEqual(section.title, "המשך הסיפור")
     XCTAssertTrue(section.summary.contains("מריק"))
@@ -1050,12 +1315,13 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     XCTAssertEqual(proposal.sourceCitations.first?.segmentID, session.transcriptSegments.first?.id)
   }
 
-  func testDocumentChatRejectsModelEchoOfHebrewAppendInstruction() async throws {
+  func testDocumentChatDoesNotRewriteModelProvidedPatchWithFallback() async throws {
     let client = LocalSessionDocumentChatClient(
       languageModel: CapturingLanguageModel(
         response: """
           {
             "assistantMessage":"הוספתי פסקת המשך בסוף המסמך.",
+            "operation":"update",
             "recapPatch":{
               "overview":null,
               "sections":[
@@ -1094,13 +1360,13 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     )
 
     let section = try XCTUnwrap(proposal.recapPatch?.sections.first)
-    XCTAssertEqual(section.title, "המשך הסיפור")
-    XCTAssertTrue(section.summary.contains("מריק"))
-    XCTAssertFalse(section.summary.contains("תוסיף"))
-    XCTAssertFalse(section.summary.contains("התמלול בסוף המסמך"))
+    XCTAssertEqual(proposal.operation, .update)
+    XCTAssertEqual(section.title, "המשך המסמך")
+    XCTAssertTrue(section.summary.contains("תוסיף"))
+    XCTAssertTrue(section.summary.contains("התמלול בסוף המסמך"))
   }
 
-  func testDocumentChatTreatsHebrewConciseStyleRequestAsDocumentEditWhenModelReturnsNoPatch()
+  func testDocumentChatDoesNotInventStyleEditWhenModelReturnsNoPatch()
     async throws
   {
     let client = LocalSessionDocumentChatClient(
@@ -1139,12 +1405,12 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
       )
     )
 
-    XCTAssertTrue(proposal.hasEdits)
-    XCTAssertNotNil(proposal.recapPatch)
+    XCTAssertFalse(proposal.hasEdits)
+    XCTAssertNil(proposal.recapPatch)
     XCTAssertTrue(proposal.assistantMessage.contains("קיצרתי"))
   }
 
-  func testDocumentChatTreatsHebrewTitleRequestAsTitlePatchWhenModelReturnsInvalidJson()
+  func testDocumentChatDoesNotInventTitlePatchWhenModelReturnsInvalidJson()
     async throws
   {
     let client = LocalSessionDocumentChatClient(
@@ -1167,12 +1433,12 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
       )
     )
 
-    XCTAssertTrue(proposal.hasEdits)
-    XCTAssertEqual(proposal.sessionTitle, "קטע מלייב של מורה מבוכים ערוץ דונקי")
+    XCTAssertFalse(proposal.hasEdits)
+    XCTAssertNil(proposal.sessionTitle)
     XCTAssertNil(proposal.recapPatch)
   }
 
-  func testDocumentChatTreatsHebrewClearDocumentRequestAsMarkdownReplacementWhenModelFails()
+  func testDocumentChatDoesNotInventClearDocumentReplacementWhenModelFails()
     async throws
   {
     let client = LocalSessionDocumentChatClient(
@@ -1204,10 +1470,10 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
       LocalSessionDocumentChatRequest(session: session, userMessage: "תמחק הכל")
     )
 
-    XCTAssertTrue(proposal.hasEdits)
-    XCTAssertEqual(proposal.documentMarkdown, "")
+    XCTAssertFalse(proposal.hasEdits)
+    XCTAssertNil(proposal.documentMarkdown)
     XCTAssertNil(proposal.recapPatch)
-    XCTAssertTrue(proposal.assistantMessage.contains("ריק"))
+    XCTAssertTrue(proposal.assistantMessage.contains("could not produce a clean document edit"))
   }
 
   func testDocumentChatFallbackWarningHidesRawLocalModelLoaderFailure() async throws {
@@ -1245,15 +1511,28 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
 
     let warning = try XCTUnwrap(proposal.warnings.first)
     XCTAssertEqual(
-      warning, "Used deterministic fallback because the local model response was unavailable.")
+      warning, "The document model was unavailable, so no document change was proposed.")
     XCTAssertFalse(warning.contains("dyld"))
     XCTAssertFalse(warning.contains("@rpath"))
     XCTAssertFalse(warning.contains("/private/tmp"))
   }
 
-  func testDocumentChatFallsBackToHebrewQuestionAnswerWhenModelReturnsInvalidJson() async throws {
+  func testDocumentChatUsesModelProvidedHebrewQuestionAnswer() async throws {
     let client = LocalSessionDocumentChatClient(
-      languageModel: CapturingLanguageModel(response: "not json")
+      languageModel: CapturingLanguageModel(
+        response: """
+          {
+            "operation": "read",
+            "assistantMessage": "המסמך עוסק בבדיקת סיכום של המודל המקומי, ובודק אם הוא באמת מסכם את המסמך.",
+            "sessionTitle": null,
+            "documentMarkdown": null,
+            "recapPatch": null,
+            "transcriptPatches": [],
+            "speakerRenames": [],
+            "warnings": []
+          }
+          """
+      )
     )
     let startedAt = Date(timeIntervalSince1970: 2_350_000)
     var session = LocalMeetingSession(
@@ -1291,6 +1570,7 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     )
 
     XCTAssertFalse(proposal.hasEdits)
+    XCTAssertEqual(proposal.operation, .read)
     XCTAssertTrue(proposal.assistantMessage.contains("המסמך"))
     XCTAssertTrue(proposal.assistantMessage.contains("מסכם"))
     XCTAssertFalse(proposal.assistantMessage.contains("clean document edit"))
@@ -1300,7 +1580,20 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     async throws
   {
     let client = LocalSessionDocumentChatClient(
-      languageModel: CapturingLanguageModel(response: "not json")
+      languageModel: CapturingLanguageModel(
+        response: """
+          {
+            "operation": "read",
+            "assistantMessage": "המסמך עוסק בסרטון יוטיוב בעברית, כנראה לייב של מורה מבוכים, ובסצנת משחק תפקידים עם התגנבות ותקיפה.",
+            "sessionTitle": null,
+            "documentMarkdown": null,
+            "recapPatch": null,
+            "transcriptPatches": [],
+            "speakerRenames": [],
+            "warnings": []
+          }
+          """
+      )
     )
     let startedAt = Date(timeIntervalSince1970: 2_360_000)
     var session = LocalMeetingSession(
@@ -1350,17 +1643,19 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     )
 
     XCTAssertFalse(proposal.hasEdits)
+    XCTAssertEqual(proposal.operation, .read)
     XCTAssertTrue(proposal.assistantMessage.contains("יוטיוב") || proposal.assistantMessage.contains("מורה מבוכים"))
     XCTAssertTrue(proposal.assistantMessage.contains("סרטון"))
     XCTAssertFalse(proposal.assistantMessage.contains("בואו ניקח איזה סרטון"))
     XCTAssertFalse(proposal.assistantMessage.contains("ההיסטוריה שראיתי"))
   }
 
-  func testDocumentChatCoercesSchemaLiteralSectionKindFromLocalModel() async throws {
+  func testDocumentChatDropsSchemaLiteralSectionKindInsteadOfGuessingModelIntent() async throws {
     let client = LocalSessionDocumentChatClient(
       languageModel: CapturingLanguageModel(
         response: """
           {
+            "operation": "update",
             "assistantMessage": "I updated the action items.",
             "recapPatch": {
               "overview": null,
@@ -1404,13 +1699,9 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
       )
     )
 
-    XCTAssertTrue(proposal.hasEdits)
-    XCTAssertEqual(proposal.recapPatch?.sections.first?.kind, .actionItem)
-    XCTAssertEqual(proposal.recapPatch?.sections.first?.title, "Review conversation rating")
-    XCTAssertEqual(
-      proposal.recapPatch?.sections.first?.bullets.first,
-      "Review the conversation rating."
-    )
+    XCTAssertFalse(proposal.hasEdits)
+    XCTAssertEqual(proposal.operation, .update)
+    XCTAssertNil(proposal.recapPatch)
   }
 }
 
@@ -1426,6 +1717,22 @@ private final class CapturingLanguageModel: @unchecked Sendable, LocalSessionLan
   func generateText(prompt: String, maxTokens: Int) async throws -> String {
     lastPrompt = prompt
     return response
+  }
+}
+
+private final class SequentialLanguageModel: @unchecked Sendable, LocalSessionLanguageModelGenerating
+{
+  private let responses: [String]
+  nonisolated(unsafe) private(set) var prompts: [String] = []
+
+  init(responses: [String]) {
+    self.responses = responses
+  }
+
+  func generateText(prompt: String, maxTokens: Int) async throws -> String {
+    prompts.append(prompt)
+    let index = min(prompts.count - 1, responses.count - 1)
+    return responses[index]
   }
 }
 

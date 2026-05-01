@@ -334,8 +334,15 @@ struct LocalSessionDocumentSourceCitation: Identifiable, Codable, Equatable, Sen
   }
 }
 
+enum LocalSessionDocumentOperation: String, Codable, Equatable, Sendable {
+  case read
+  case update
+  case delete
+}
+
 struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
   var assistantMessage: String
+  var operation: LocalSessionDocumentOperation?
   var sessionTitle: String? = nil
   var documentMarkdown: String? = nil
   var recapPatch: LocalSessionDocumentRecapPatch?
@@ -346,6 +353,7 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
 
   init(
     assistantMessage: String,
+    operation: LocalSessionDocumentOperation? = nil,
     sessionTitle: String? = nil,
     documentMarkdown: String? = nil,
     recapPatch: LocalSessionDocumentRecapPatch?,
@@ -355,6 +363,7 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
     sourceCitations: [LocalSessionDocumentSourceCitation] = []
   ) {
     self.assistantMessage = assistantMessage
+    self.operation = operation
     self.sessionTitle = sessionTitle
     self.documentMarkdown = documentMarkdown
     self.recapPatch = recapPatch
@@ -366,6 +375,7 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
 
   private enum CodingKeys: String, CodingKey {
     case assistantMessage
+    case operation
     case sessionTitle
     case documentMarkdown
     case recapPatch
@@ -378,6 +388,7 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     assistantMessage = try container.decode(String.self, forKey: .assistantMessage)
+    operation = try container.decodeIfPresent(LocalSessionDocumentOperation.self, forKey: .operation)
     sessionTitle = try container.decodeIfPresent(String.self, forKey: .sessionTitle)
     documentMarkdown = try container.decodeIfPresent(String.self, forKey: .documentMarkdown)
     recapPatch = try container.decodeIfPresent(LocalSessionDocumentRecapPatch.self, forKey: .recapPatch)
@@ -394,8 +405,8 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
   }
 
   var hasEdits: Bool {
-    sessionTitle != nil || documentMarkdown != nil || recapPatch != nil || !transcriptPatches.isEmpty
-      || !speakerRenames.isEmpty
+    operation == .delete || sessionTitle != nil || documentMarkdown != nil || recapPatch != nil
+      || !transcriptPatches.isEmpty || !speakerRenames.isEmpty
   }
 }
 

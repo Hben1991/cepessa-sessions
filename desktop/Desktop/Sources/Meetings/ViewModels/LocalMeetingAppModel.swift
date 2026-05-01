@@ -1092,7 +1092,13 @@ final class LocalSessionAppModel: ObservableObject {
     var changed = false
     var recapChanged = false
 
-    if let documentMarkdown = proposal.documentMarkdown {
+    if proposal.operation == .delete {
+      let replacement = proposal.documentMarkdown?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      if session.documentMarkdown != replacement {
+        session.documentMarkdown = replacement
+        changed = true
+      }
+    } else if let documentMarkdown = proposal.documentMarkdown {
       let replacement = documentMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
       if session.documentMarkdown != replacement {
         session.documentMarkdown = replacement
