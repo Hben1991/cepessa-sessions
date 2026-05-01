@@ -1003,6 +1003,103 @@ final class LocalMeetingRecapGeneratorTests: XCTestCase {
     XCTAssertFalse(proposal.assistantMessage.contains("עדכנתי את המסמך"))
   }
 
+  func testDocumentChatBuildsHebrewStoryContinuationFromTranscriptAppendRequest() async throws {
+    let client = LocalSessionDocumentChatClient(
+      languageModel: CapturingLanguageModel(response: "not json")
+    )
+    let startedAt = Date(timeIntervalSince1970: 2_316_000)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "42326B44-D613-4946-B36C-4917BEE9112F")!,
+      title: "מבוכים ודרקונים",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "92892174-B574-472F-AE50-84AEBC4253D7")!,
+          speaker: "You",
+          text: "ניסיון התגנבות ותקיפה, גלגולי קובייה, חץ שמחטיא ופוגע בעץ מושחת.",
+          timestamp: startedAt.addingTimeInterval(6)
+        ),
+        .init(
+          id: UUID(uuidString: "C83E9F20-052E-4D94-AE62-88C62B0A8F30")!,
+          speaker: "You",
+          text: "מריק, מיכאל והמכשפה נשארים מול איום שממשיך להסתבך סביב היער.",
+          timestamp: startedAt.addingTimeInterval(24)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+
+    let proposal = try await client.sendMessage(
+      LocalSessionDocumentChatRequest(
+        session: session,
+        userMessage: "תוסיף את התמלול בסוף המסמך. תרשום את זה כמו סיפור."
+      )
+    )
+
+    let section = try XCTUnwrap(proposal.recapPatch?.sections.first)
+    XCTAssertTrue(proposal.hasEdits)
+    XCTAssertEqual(section.kind, .notes)
+    XCTAssertEqual(section.title, "המשך הסיפור")
+    XCTAssertTrue(section.summary.contains("מריק"))
+    XCTAssertTrue(section.summary.contains("מיכאל"))
+    XCTAssertTrue(section.summary.contains("המכשפה"))
+    XCTAssertFalse(section.summary.contains("תוסיף"))
+    XCTAssertFalse(section.summary.contains("תרשום"))
+    XCTAssertFalse(section.summary.contains("התמלול בסוף המסמך"))
+    XCTAssertEqual(proposal.sourceCitations.first?.segmentID, session.transcriptSegments.first?.id)
+  }
+
+  func testDocumentChatRejectsModelEchoOfHebrewAppendInstruction() async throws {
+    let client = LocalSessionDocumentChatClient(
+      languageModel: CapturingLanguageModel(
+        response: """
+          {
+            "assistantMessage":"הוספתי פסקת המשך בסוף המסמך.",
+            "recapPatch":{
+              "overview":null,
+              "sections":[
+                {"kind":"notes","title":"המשך המסמך","summary":"תוסיף את התמלול בסוף המסמך","bullets":[]}
+              ]
+            },
+            "transcriptPatches":[],
+            "speakerRenames":[],
+            "warnings":[]
+          }
+          """
+      )
+    )
+    let startedAt = Date(timeIntervalSince1970: 2_317_000)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "9595C3AF-2D96-428E-A61E-AB39D2962765")!,
+      title: "מבוכים ודרקונים",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "59F2E8EE-86BF-485D-85E1-C248FC154375")!,
+          speaker: "You",
+          text: "מריק ומיכאל ממשיכים להתקדם ביער בזמן שהמכשפה אורבת להם.",
+          timestamp: startedAt.addingTimeInterval(6)
+        )
+      ],
+      audioArtifacts: .empty
+    )
+
+    let proposal = try await client.sendMessage(
+      LocalSessionDocumentChatRequest(
+        session: session,
+        userMessage: "תוסיף את התמלול בסוף המסמך. תרשום את זה כמו סיפור."
+      )
+    )
+
+    let section = try XCTUnwrap(proposal.recapPatch?.sections.first)
+    XCTAssertEqual(section.title, "המשך הסיפור")
+    XCTAssertTrue(section.summary.contains("מריק"))
+    XCTAssertFalse(section.summary.contains("תוסיף"))
+    XCTAssertFalse(section.summary.contains("התמלול בסוף המסמך"))
+  }
+
   func testDocumentChatTreatsHebrewConciseStyleRequestAsDocumentEditWhenModelReturnsNoPatch()
     async throws
   {

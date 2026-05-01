@@ -73,16 +73,6 @@ struct CepessaSessionsWorkspaceView: View {
             .zIndex(2)
         }
 
-        if isDocumentChatOpen {
-          floatingDocumentChat(for: layout)
-            .padding(.horizontal, layout == .stacked ? 16 : 22)
-            .padding(.bottom, layout == .stacked ? 24 : 22)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-            .transition(
-              .opacity.combined(with: .offset(y: reduceMotion ? 0 : 14))
-            )
-            .zIndex(3)
-        }
       }
       .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: centerSection)
       .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isDocumentChatOpen)
@@ -534,7 +524,7 @@ extension CepessaSessionsWorkspaceView {
         }
       }
       .help(
-        isDocumentChatOpen ? "Hide the floating session chat." : "Open the floating session chat.")
+        isDocumentChatOpen ? "Hide the session chat." : "Open the session chat.")
 
       if layout != .wide && selectedSession != nil {
         headerIconButton(
@@ -608,7 +598,7 @@ extension CepessaSessionsWorkspaceView {
     .accessibilityLabel(accessibilityLabel)
   }
 
-  fileprivate func floatingDocumentChat(for layout: WorkspaceLayoutMode) -> some View {
+  fileprivate func documentChatPanel(for layout: WorkspaceLayoutMode) -> some View {
     CepessaSessionDocumentChatView(
       model: model,
       session: selectedSession,
@@ -620,10 +610,42 @@ extension CepessaSessionsWorkspaceView {
       }
     )
     .frame(
-      minWidth: layout == .stacked ? 0 : 440,
+      minWidth: layout == .stacked ? 0 : 400,
       idealWidth: layout == .stacked ? 420 : 560,
       maxWidth: layout == .stacked ? .infinity : 640
     )
+  }
+
+  fileprivate func documentChatRail(for layout: WorkspaceLayoutMode) -> some View {
+    VStack(spacing: 0) {
+      documentChatPanel(for: layout)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+    .padding(.horizontal, layout == .wide ? 14 : 0)
+    .padding(.vertical, layout == .wide ? 18 : 0)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    .background {
+      if layout == .wide {
+        Rectangle()
+          .fill(Color.white.opacity(0.66))
+
+        LinearGradient(
+          colors: [
+            Color(hex: 0xF8FCFF).opacity(0.94),
+            Color.white.opacity(0.72),
+          ],
+          startPoint: .top,
+          endPoint: .bottom
+        )
+      }
+    }
+    .overlay(alignment: .leading) {
+      if layout == .wide {
+        Rectangle()
+          .fill(Color(hex: 0xA8C7F5).opacity(0.50))
+          .frame(width: 1)
+      }
+    }
   }
 
   @ViewBuilder
@@ -890,16 +912,31 @@ extension CepessaSessionsWorkspaceView {
     -> some View
   {
     let contentHeight = max(availableHeight - 196, 560)
+    let chatPlacement = WorkspaceDocumentChatPlacement.resolve(
+      layout: layout,
+      isOpen: isDocumentChatOpen
+    )
 
     switch layout {
     case .wide:
       HStack(alignment: .top, spacing: 0) {
         centerWorkspace(for: layout)
-          .frame(minWidth: 640, idealWidth: 820, maxWidth: .infinity)
+          .frame(
+            minWidth: chatPlacement == .trailingDock ? 540 : 640,
+            idealWidth: chatPlacement == .trailingDock ? 700 : 820,
+            maxWidth: .infinity
+          )
 
-        inspectorRail
-          .frame(width: 304)
-          .frame(minHeight: max(640, availableHeight), alignment: .top)
+        if chatPlacement == .trailingDock {
+          documentChatRail(for: layout)
+            .frame(width: 458)
+            .frame(minHeight: max(640, availableHeight), alignment: .top)
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+        } else {
+          inspectorRail
+            .frame(width: 304)
+            .frame(minHeight: max(640, availableHeight), alignment: .top)
+        }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 
@@ -911,6 +948,12 @@ extension CepessaSessionsWorkspaceView {
 
         centerWorkspace(for: layout)
           .frame(minHeight: max(520, contentHeight * 0.72), maxHeight: .infinity)
+
+        if chatPlacement == .inlineBelowDocument {
+          documentChatRail(for: layout)
+            .frame(maxWidth: .infinity)
+            .transition(.opacity.combined(with: .offset(y: reduceMotion ? 0 : 8)))
+        }
 
         if selectedSession == nil {
           sessionsRail
@@ -929,6 +972,12 @@ extension CepessaSessionsWorkspaceView {
 
         centerWorkspace(for: layout)
           .frame(minHeight: max(380, contentHeight * 0.56))
+
+        if chatPlacement == .inlineBelowDocument {
+          documentChatRail(for: layout)
+            .frame(maxWidth: .infinity)
+            .transition(.opacity.combined(with: .offset(y: reduceMotion ? 0 : 8)))
+        }
 
         if selectedSession == nil {
           sessionsRail
@@ -3834,10 +3883,27 @@ private enum WorkspaceSection: String, CaseIterable, Identifiable {
   }
 }
 
-private enum WorkspaceLayoutMode {
+enum WorkspaceLayoutMode {
   case wide
   case split
   case stacked
+}
+
+enum WorkspaceDocumentChatPlacement: Equatable {
+  case hidden
+  case trailingDock
+  case inlineBelowDocument
+
+  static func resolve(layout: WorkspaceLayoutMode, isOpen: Bool) -> Self {
+    guard isOpen else { return .hidden }
+
+    switch layout {
+    case .wide:
+      return .trailingDock
+    case .split, .stacked:
+      return .inlineBelowDocument
+    }
+  }
 }
 
 extension String {

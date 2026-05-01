@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Cepessa Sessions</string>
+    <string>Sessions</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIconFile</key>
@@ -34,14 +34,14 @@
         <true/>
     </dict>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Cepessa Sessions needs screen recording permission so you can attach screenshots and screen regions to a session.</string>
+    <string>Sessions needs screen recording permission so you can attach screenshots and screen regions to a session.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>Cepessa Sessions needs Apple Events permission to inspect related apps while a session is running.</string>
+    <string>Sessions needs Apple Events permission to inspect related apps while a session is running.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Cepessa Sessions needs microphone access to record and transcribe your voice during a session.</string>
+    <string>Sessions needs microphone access to record and transcribe your voice during a session.</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>Cepessa Sessions needs permission to capture system audio for local session transcription.</string>
+    <string>Sessions needs permission to capture system audio for local session transcription.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Cepessa Sessions needs Bluetooth access when you choose a wireless audio device for capture.</string>
+	<string>Sessions needs Bluetooth access when you choose a wireless audio device for capture.</string>
 </dict>
 </plist>

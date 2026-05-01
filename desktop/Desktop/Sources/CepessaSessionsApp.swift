@@ -35,7 +35,7 @@ struct CepessaSessionsApp: App {
   @NSApplicationDelegateAdaptor(CepessaSessionsAppDelegate.self) private var appDelegate
 
   var body: some Scene {
-    WindowGroup("Cepessa Sessions") {
+    WindowGroup("Sessions") {
       CepessaSessionsRootView()
         .withFontScaling()
         .tint(CepessaColors.capture)

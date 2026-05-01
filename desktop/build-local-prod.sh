@@ -10,7 +10,7 @@ set -e
 BINARY_NAME="CepessaSessions"  # Package.swift target — binary paths, pkill, CFBundleExecutable
 LOCAL_MODEL_RUNNER_NAME="CepessaLocalModelRunner"
 RESOURCE_BUNDLE_NAME="CepessaSessions_CepessaSessions.bundle"
-APP_NAME="Cepessa Sessions"
+APP_NAME="Sessions"
 BUNDLE_ID="me.cepessa.sessions"
 BUNDLE_ID_DEV="me.cepessa.sessions.local"
 BUILD_DIR="build"

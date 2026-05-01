@@ -38,7 +38,7 @@ struct LocalSessionAudioImportService: LocalSessionAudioImporting {
 
         guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
             throw LocalSessionAudioImportError.unsupportedSource(
-                "Cepessa Sessions could not convert this recording format."
+                "Sessions could not convert this recording format."
             )
         }
 

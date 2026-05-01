@@ -26,11 +26,16 @@ struct CepessaSessionDocumentChatView: View {
       chatHeader
 
       if let session {
-        messageSurface(for: session)
+        chatMetrics(for: session)
 
         if let proposal = session.documentChat.pendingProposal {
           proposalCard(proposal, for: session)
         }
+
+        messageSurface(
+          for: session,
+          hasPendingProposal: session.documentChat.pendingProposal != nil
+        )
 
         if let error = session.documentChat.errorMessage, !error.isEmpty {
           statusNotice(
@@ -192,6 +197,10 @@ struct CepessaSessionDocumentChatView: View {
       compactMetric(title: "Messages", value: "\(session.documentChat.messages.count)")
       compactMetric(title: "Transcript", value: "\(session.segments.count)")
       compactMetric(
+        title: "Context",
+        value: "\(session.attachments.count + session.captureArtifacts.count)"
+      )
+      compactMetric(
         title: "Proposal",
         value: session.documentChat.pendingProposal == nil ? "None" : "Ready"
       )
@@ -201,8 +210,14 @@ struct CepessaSessionDocumentChatView: View {
   }
 
   @ViewBuilder
-  private func messageSurface(for session: LocalMeetingSession) -> some View {
+  private func messageSurface(
+    for session: LocalMeetingSession,
+    hasPendingProposal: Bool
+  ) -> some View {
     let messages = Array(session.documentChat.messages.suffix(10))
+    let maxHeight = SessionDocumentChatLayout.messageHistoryMaxHeight(
+      hasPendingProposal: hasPendingProposal
+    )
 
     if messages.isEmpty {
       promptSuggestions(for: session)
@@ -226,7 +241,7 @@ struct CepessaSessionDocumentChatView: View {
         }
         .padding(12)
       }
-      .frame(minHeight: 118, maxHeight: 260)
+      .frame(minHeight: 118, maxHeight: maxHeight)
       .background(
         LinearGradient(
           colors: [
@@ -339,8 +354,11 @@ struct CepessaSessionDocumentChatView: View {
             .scaledFont(size: 12)
             .foregroundColor(CepessaColors.textSecondary)
         }
+        .layoutPriority(1)
 
         Spacer(minLength: 0)
+
+        proposalActionButtons(for: session)
       }
 
       if !proposal.warnings.isEmpty {
@@ -359,25 +377,6 @@ struct CepessaSessionDocumentChatView: View {
         citationStrip(proposal.sourceCitations)
       }
 
-      HStack(spacing: 8) {
-        Button {
-          model.applyPendingDocumentChatProposal(for: session.id)
-        } label: {
-          Label("Apply", systemImage: "checkmark")
-        }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.small)
-
-        Button {
-          model.discardPendingDocumentChatProposal(for: session.id)
-        } label: {
-          Label("Discard", systemImage: "xmark")
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-
-        Spacer(minLength: 0)
-      }
     }
     .padding(14)
     .background(
@@ -395,6 +394,27 @@ struct CepessaSessionDocumentChatView: View {
       RoundedRectangle(cornerRadius: 12, style: .continuous)
         .stroke(CepessaColors.capture.opacity(0.18), lineWidth: 1)
     )
+  }
+
+  private func proposalActionButtons(for session: LocalMeetingSession) -> some View {
+    HStack(spacing: 7) {
+      Button {
+        model.applyPendingDocumentChatProposal(for: session.id)
+      } label: {
+        Label("Apply", systemImage: "checkmark")
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.small)
+
+      Button {
+        model.discardPendingDocumentChatProposal(for: session.id)
+      } label: {
+        Label("Discard", systemImage: "xmark")
+      }
+      .buttonStyle(.bordered)
+      .controlSize(.small)
+    }
+    .fixedSize()
   }
 
   private func composer(for session: LocalMeetingSession) -> some View {
@@ -670,6 +690,16 @@ struct CepessaSessionDocumentChatView: View {
   }
 }
 
+enum SessionDocumentChatLayout {
+  static func messageHistoryMaxHeight(hasPendingProposal: Bool) -> CGFloat {
+    hasPendingProposal ? 168 : 260
+  }
+}
+
+enum SessionDocumentChatCopy {
+  static let assistantDisplayName = "Sessions"
+}
+
 private struct SessionDocumentChatBubble: View {
   let message: LocalSessionDocumentChatMessage
 
@@ -699,7 +729,7 @@ private struct SessionDocumentChatBubble: View {
           )
 
         Text(
-          "\(isUser ? "You" : "Cepessa")  \(message.createdAt.formatted(date: .omitted, time: .shortened))"
+          "\(isUser ? "You" : SessionDocumentChatCopy.assistantDisplayName)  \(message.createdAt.formatted(date: .omitted, time: .shortened))"
         )
         .scaledFont(size: 10)
         .foregroundColor(CepessaColors.textTertiary)

@@ -4,7 +4,7 @@ set -e
 BINARY_NAME="CepessaSessions"  # Package.swift target — binary paths, pkill, CFBundleExecutable
 LOCAL_MODEL_RUNNER_NAME="CepessaLocalModelRunner"
 RESOURCE_BUNDLE_NAME="CepessaSessions_CepessaSessions.bundle"
-APP_NAME="Cepessa Sessions Dev"
+APP_NAME="Sessions"
 BUNDLE_ID="me.cepessa.sessions.local"
 BUILD_DIR="build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
@@ -98,7 +98,7 @@ swift build -c debug --package-path Desktop
 swift build -c debug --package-path Desktop --product "$LOCAL_MODEL_RUNNER_NAME"
 
 # Clean old app bundles from build dir
-rm -rf "$BUILD_DIR/Omi Computer.app" "$BUILD_DIR/Omi Beta.app" "$BUILD_DIR/Cepessa Sessions Dev.app" 2>/dev/null
+rm -rf "$BUILD_DIR/Omi Computer.app" "$BUILD_DIR/Omi Beta.app" "$BUILD_DIR/Cepessa Sessions Dev.app" "$BUILD_DIR/Cepessa Sessions.app" 2>/dev/null
 
 # Create app bundle
 mkdir -p "$APP_BUNDLE/Contents/MacOS"

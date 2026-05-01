@@ -40,6 +40,12 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
       if proposal.sourceCitations.isEmpty {
         proposal.sourceCitations = Self.sourceCitations(for: request.session)
       }
+      if isDocumentEditRequest,
+        Self.requestLooksLikeEndAppendRequest(request.userMessage),
+        Self.proposalEchoesAppendInstruction(proposal, request: request)
+      {
+        return Self.fallbackProposal(for: request)
+      }
       if !isDocumentEditRequest && proposal.shouldUseQuestionFallback {
         return Self.fallbackAnswerProposal(for: request)
       }
@@ -212,6 +218,31 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
     }
 
     if requestLooksLikeEndAppendRequest(request.userMessage) {
+      if requestLooksLikeTranscriptStoryAppendRequest(request.userMessage),
+        let story = fallbackTranscriptStoryContinuation(for: request, isHebrew: isHebrew)
+      {
+        return LocalSessionDocumentEditProposal(
+          assistantMessage: isHebrew
+            ? "הכנתי המשך סיפורי מתוך התמלול בסוף המסמך."
+            : "Prepared a story-style continuation from the transcript.",
+          recapPatch: LocalSessionDocumentRecapPatch(
+            overview: nil,
+            sections: [
+              .init(
+                kind: .notes,
+                title: isHebrew ? "המשך הסיפור" : "Story continuation",
+                summary: story,
+                bullets: []
+              )
+            ]
+          ),
+          transcriptPatches: [],
+          speakerRenames: [],
+          warnings: fallbackWarnings(from: failureMessage),
+          sourceCitations: sourceCitations(for: request.session)
+        )
+      }
+
       if let paragraph = fallbackEndAppendText(from: request.userMessage, isHebrew: isHebrew) {
         return LocalSessionDocumentEditProposal(
           assistantMessage: isHebrew
@@ -476,6 +507,19 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
     return hasAppendIntent && hasEndTarget
   }
 
+  private static func requestLooksLikeTranscriptStoryAppendRequest(_ message: String) -> Bool {
+    let normalized = message.lowercased()
+    let referencesTranscript = [
+      "transcript", "transcription", "תמלול", "התמלול", "תמליל", "הטקסט שנאמר",
+    ].contains { normalized.contains($0) }
+    let asksForNarrativeStyle = [
+      "story", "book", "narrative", "like a story", "like a book",
+      "סיפור", "סיפורי", "ספר", "כמו סיפור", "כמו ספר",
+    ].contains { normalized.contains($0) }
+
+    return referencesTranscript && asksForNarrativeStyle
+  }
+
   private static func fallbackEndAppendText(from message: String, isHebrew: Bool) -> String? {
     if let delimited = message.textAfterInstructionDelimiter {
       return delimited
@@ -484,6 +528,10 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
     var candidate = message.trimmingCharacters(in: .whitespacesAndNewlines)
     let removablePhrases = isHebrew
       ? [
+        "תוסיף את התמלול בסוף המסמך", "תוסיף את התמלול בסוף הסיכום",
+        "תוסיף את התמלול", "הוסף את התמלול בסוף המסמך", "הוסף את התמלול",
+        "תרשום את זה כמו סיפור", "תכתוב את זה כמו סיפור", "כתוב את זה כמו סיפור",
+        "תרשום כמו סיפור", "תכתוב כמו סיפור", "כתוב כמו סיפור", "כמו סיפור",
         "תוסיף את המלל בסוף המסמך", "תוסיף את הטקסט בסוף המסמך",
         "תוסיף פסקה בסוף המסמך", "תוסיף בסוף המסמך", "תוסיף בסוף",
         "הוסף את המלל בסוף המסמך", "הוסף את הטקסט בסוף המסמך",
@@ -504,6 +552,32 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
     candidate = candidate.trimmingCharacters(
       in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
     return candidate.isEmpty ? nil : candidate
+  }
+
+  private static func fallbackTranscriptStoryContinuation(
+    for request: LocalSessionDocumentChatRequest,
+    isHebrew: Bool
+  ) -> String? {
+    let transcriptSnippets = request.session.transcriptSegments
+      .map(\.text)
+      .flatMap(splitSentences)
+      .map { truncatedText($0, limit: isHebrew ? 150 : 170) }
+      .filter { !$0.isEmpty }
+      .removingDuplicates()
+
+    let snippets = transcriptSnippets.isEmpty
+      ? fallbackSourceSnippets(from: request.session)
+      : transcriptSnippets
+    guard !snippets.isEmpty else { return nil }
+
+    let body = snippets.prefix(4).joined(separator: " ")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !body.isEmpty else { return nil }
+
+    if isHebrew {
+      return "בהמשך הסיפור, \(body)"
+    }
+    return "Continuing the story, \(body)"
   }
 
   private static func fallbackTitle(from message: String) -> String? {
@@ -687,6 +761,43 @@ struct LocalSessionDocumentChatClient: LocalSessionDocumentChatProviding, Sendab
     }
 
     return ["Used deterministic fallback because the local model response was unavailable."]
+  }
+
+  private static func proposalEchoesAppendInstruction(
+    _ proposal: LocalSessionDocumentEditProposal,
+    request: LocalSessionDocumentChatRequest
+  ) -> Bool {
+    let generatedText = [
+      proposal.recapPatch?.overview,
+      proposal.sessionTitle,
+    ].compactMap { $0 }
+      + (proposal.recapPatch?.sections ?? []).flatMap { section in
+        [section.title, section.summary] + section.bullets
+      }
+
+    return generatedText.contains { text in
+      generatedContentLooksLikeAppendInstructionEcho(text, userMessage: request.userMessage)
+    }
+  }
+
+  private static func generatedContentLooksLikeAppendInstructionEcho(
+    _ text: String,
+    userMessage: String
+  ) -> Bool {
+    let normalized = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalized.isEmpty else { return false }
+
+    let instructionTerms = [
+      "תוסיף", "הוסף", "להוסיף", "תרשום", "תכתוב", "כתוב",
+      "add", "append", "write this", "write it",
+    ]
+    if instructionTerms.contains(where: { normalized.contains($0) }) {
+      return true
+    }
+
+    let normalizedUserMessage = userMessage.lowercased()
+      .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+    return normalizedUserMessage.contains(normalized) && normalized.count > 12
   }
 
   static func decodeProposal(from rawResponse: String) -> LocalSessionDocumentEditProposal {

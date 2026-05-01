@@ -1222,6 +1222,23 @@ final class LocalSessionAppModel: ObservableObject {
       normalizedSession.documentChat.errorMessage = nil
       normalizedSession.documentChat.updatedAt = Date()
     }
+    if normalizedSession.documentChat.pendingProposal?.isStaleAppendInstructionEcho == true {
+      normalizedSession.documentChat.pendingProposal = nil
+      normalizedSession.documentChat.messages.removeAll {
+        $0.isStaleAppendInstructionPreviewMessage
+      }
+      normalizedSession.documentChat.status = .idle
+      normalizedSession.documentChat.errorMessage = nil
+      normalizedSession.documentChat.updatedAt = Date()
+    }
+    if normalizedSession.recap.removeStaleAppliedAppendInstructionSections() {
+      normalizedSession.documentChat.messages.removeAll {
+        $0.isStaleAppendInstructionPreviewMessage
+      }
+      normalizedSession.documentChat.status = .idle
+      normalizedSession.documentChat.errorMessage = nil
+      normalizedSession.documentChat.updatedAt = Date()
+    }
     if let migratedTitle = normalizedSession.recap.removeStaleTitleUpdateNote(),
       normalizedSession.title != migratedTitle
     {
@@ -1506,6 +1523,20 @@ private enum LocalSessionPCM16WaveError: Error {
   case unsupportedFormat
 }
 
+private extension LocalSessionDocumentEditProposal {
+  var isStaleAppendInstructionEcho: Bool {
+    let generatedText = [
+      sessionTitle,
+      recapPatch?.overview,
+    ].compactMap { $0 }
+      + (recapPatch?.sections ?? []).flatMap { section in
+        [section.title, section.summary] + section.bullets
+      }
+
+    return generatedText.contains { $0.looksLikeAppendInstructionEcho }
+  }
+}
+
 private extension LocalSessionDocumentChatMessage {
   var isStaleLocalModelFailureMessage: Bool {
     guard role == .assistant else { return false }
@@ -1520,9 +1551,24 @@ private extension LocalSessionDocumentChatMessage {
       || (normalized.contains("המסמך עוסק ב")
         && normalized.contains("ההיסטוריה שראיתי ביוטיוב"))
   }
+
+  var isStaleAppendInstructionPreviewMessage: Bool {
+    guard role == .assistant else { return false }
+
+    let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.contains("preview ready:")
+      && (normalized.contains("הוספתי פסקת המשך בסוף המסמך")
+        || normalized.contains("added a closing paragraph"))
+  }
 }
 
 private extension LocalSessionRecap {
+  mutating func removeStaleAppliedAppendInstructionSections() -> Bool {
+    let countBefore = sections.count
+    sections.removeAll { $0.looksLikeAppliedAppendInstructionEcho }
+    return sections.count != countBefore
+  }
+
   mutating func removeStaleTitleUpdateNote() -> String? {
     guard let index = sections.firstIndex(where: { section in
       section.kind == .notes && section.title.contains("כותרת")
@@ -1667,11 +1713,46 @@ private extension LocalSessionRecap {
   }
 }
 
+private extension LocalSessionRecapSection {
+  var looksLikeAppliedAppendInstructionEcho: Bool {
+    guard kind == .notes else { return false }
+    guard !title.contains("כותרת") else { return false }
+
+    let normalized = ([title, summary] + bullets)
+      .joined(separator: " ")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    guard !normalized.isEmpty else { return false }
+
+    let appendTerms = [
+      "תוסיף", "להוסיף", "הוסף", "תרשום", "תכתוב", "כתוב",
+      "add", "append", "write this", "write it",
+    ]
+    let documentTerms = [
+      "מסמך", "המסמך", "תמלול", "התמלול", "בסוף", "סיפור",
+      "document", "transcript", "end of the document", "story",
+    ]
+
+    return appendTerms.contains { normalized.contains($0) }
+      && documentTerms.contains { normalized.contains($0) }
+  }
+}
+
 private extension String {
   var containsHebrewScript: Bool {
     unicodeScalars.contains { scalar in
       (0x0590...0x05FF).contains(Int(scalar.value))
     }
+  }
+
+  var looksLikeAppendInstructionEcho: Bool {
+    let normalized = trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !normalized.isEmpty else { return false }
+
+    return [
+      "תוסיף", "הוסף", "להוסיף", "תרשום", "תכתוב", "כתוב",
+      "add", "append", "write this", "write it",
+    ].contains { normalized.contains($0) }
   }
 
   var cleanedTitleUpdateRequest: String? {

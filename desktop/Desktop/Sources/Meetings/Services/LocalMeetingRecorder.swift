@@ -212,10 +212,12 @@ final class LocalMeetingRecorder: ObservableObject {
 
         do {
             try await startMicrophoneCapture(route: route)
-            lastErrorMessage = "The selected microphone returned silence, so Cepessa switched to the Mac microphone."
+            lastErrorMessage =
+              "The selected microphone returned silence, so Sessions switched to the Mac microphone."
         } catch {
             isMicrophoneCaptureActive = false
-            lastErrorMessage = "Cepessa could not recover microphone capture automatically. \(error.localizedDescription)"
+            lastErrorMessage =
+              "Sessions could not recover microphone capture automatically. \(error.localizedDescription)"
         }
     }
 

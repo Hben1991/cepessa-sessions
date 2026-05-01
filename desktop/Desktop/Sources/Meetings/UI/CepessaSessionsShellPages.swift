@@ -44,7 +44,7 @@ struct CepessaSessionsLibraryPage: View {
       HStack(spacing: 18) {
         VStack(alignment: .leading, spacing: 18) {
           VStack(alignment: .leading, spacing: 10) {
-            Text("Cepessa Sessions")
+            Text("Sessions")
               .scaledFont(size: 11, weight: .semibold)
               .tracking(0.18)
               .foregroundStyle(CepessaColors.textSecondary)
@@ -1666,7 +1666,7 @@ struct CepessaSessionsSettingsPage: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 18) {
           VStack(alignment: .leading, spacing: 10) {
-            Text("Cepessa Sessions")
+            Text("Sessions")
               .scaledFont(size: 11, weight: .semibold)
               .tracking(0.18)
               .foregroundStyle(CepessaColors.textTertiary)

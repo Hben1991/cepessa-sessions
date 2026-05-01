@@ -14,7 +14,7 @@ Options (via environment variables):
   OMI_SKIP_TUNNEL=1        Skip Cloudflare tunnel (use OMI_API_URL from .env directly)
   AUTH_PORT=10200           Auth service port (default: 10200)
   PORT=10201                Rust backend port (default: 10201, never use 8080)
-  OMI_APP_NAME="Omi Dev"   App name (default: "Omi Dev")
+  OMI_APP_NAME="Sessions"  App name (default: "Sessions")
   OMI_PYTHON_API_URL="..."  Python backend URL (subscriptions, payments, etc; default: https://api.omi.me)
   OMI_SIGN_IDENTITY="..."  Code signing identity (auto-detected if not set)
   OMI_ENABLE_LOCAL_AUTOMATION=1  Enable agent-swift automation bridge
@@ -107,7 +107,7 @@ fix_local_model_runner_linkage() {
 BINARY_NAME="CepessaSessions"  # Package.swift target — binary paths, pkill, CFBundleExecutable
 LOCAL_MODEL_RUNNER_NAME="CepessaLocalModelRunner"
 RESOURCE_BUNDLE_NAME="CepessaSessions_CepessaSessions.bundle"
-APP_NAME="${OMI_APP_NAME:-Cepessa Sessions Dev}"
+APP_NAME="${OMI_APP_NAME:-Sessions}"
 IS_NAMED_BUNDLE=false
 [ -n "${OMI_APP_NAME:-}" ] && IS_NAMED_BUNDLE=true
 
@@ -205,7 +205,7 @@ rm -f /tmp/omi-dev.log 2>/dev/null || true
 step "Cleaning up conflicting app bundles..."
 # Clean old build names from local build dir
 rm -rf "$BUILD_DIR/Omi Computer.app" 2>/dev/null
-rm -rf "$BUILD_DIR/Cepessa Sessions Dev.app" 2>/dev/null
+rm -rf "$BUILD_DIR/Cepessa Sessions Dev.app" "$BUILD_DIR/Cepessa Sessions.app" 2>/dev/null
 rm -rf "$APP_BUNDLE" 2>/dev/null
 CONFLICTING_APPS=(
     "$APP_PATH"

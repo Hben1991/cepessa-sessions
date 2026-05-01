@@ -1975,6 +1975,138 @@ final class LocalMeetingAppModelTests: XCTestCase {
     XCTAssertEqual(model.selectedSession?.documentChat.messages.map(\.role), [.user])
   }
 
+  func testStoredDocumentChatClearsStaleInstructionEchoPendingProposal() throws {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let sessionID = UUID(uuidString: "0F4C87FE-F94D-48C1-BE23-A7F207C80679")!
+    var session = makeSession(
+      id: sessionID,
+      startedAt: Date(timeIntervalSince1970: 6_650),
+      status: .ready,
+      title: "Session 30 Apr 2026 at 12:26"
+    )
+    session.documentChat = LocalSessionDocumentChat(
+      messages: [
+        .init(
+          id: UUID(uuidString: "A671554B-6E9E-4845-BD86-3E6DA99E6C2E")!,
+          role: .user,
+          text: "תוסיף את התמלול בסוף המסמך. תרשום את זה כמו סיפור.",
+          createdAt: Date(timeIntervalSince1970: 6_660)
+        ),
+        .init(
+          id: UUID(uuidString: "82EE4AE7-C105-4688-80E5-B38A6A91D7DB")!,
+          role: .assistant,
+          text: "Preview ready: הוספתי פסקת המשך בסוף המסמך.",
+          createdAt: Date(timeIntervalSince1970: 6_662)
+        ),
+      ],
+      pendingProposal: LocalSessionDocumentEditProposal(
+        assistantMessage: "הוספתי פסקת המשך בסוף המסמך.",
+        recapPatch: LocalSessionDocumentRecapPatch(
+          overview: nil,
+          sections: [
+            .init(
+              kind: .notes,
+              title: "המשך המסמך",
+              summary: "תוסיף את התמלול בסוף המסמך",
+              bullets: []
+            )
+          ]
+        ),
+        transcriptPatches: [],
+        speakerRenames: [],
+        warnings: []
+      ),
+      undoSnapshot: nil,
+      status: .idle,
+      errorMessage: nil,
+      createdAt: Date(timeIntervalSince1970: 6_655),
+      updatedAt: Date(timeIntervalSince1970: 6_665)
+    )
+    try store.save(session)
+
+    let model = LocalMeetingAppModel(store: store, fileLayout: layout)
+
+    XCTAssertNil(model.selectedSession?.documentChat.pendingProposal)
+    XCTAssertEqual(model.selectedSession?.documentChat.messages.map(\.role), [.user])
+  }
+
+  func testStoredSessionRemovesAppliedAppendInstructionSectionFromRecap() throws {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let sessionID = UUID(uuidString: "D9AC5C8E-BF10-4C9F-BE26-8D5A64D64963")!
+    var session = makeSession(
+      id: sessionID,
+      startedAt: Date(timeIntervalSince1970: 6_700),
+      status: .ready,
+      title: "קטע מלייב של מורה מבוכים ערוץ דונקי"
+    )
+    session.recap = LocalSessionRecap(
+      overview: "המסמך עוסק בסרטון יוטיוב בעברית.",
+      generatedAt: Date(timeIntervalSince1970: 6_705),
+      sections: [
+        LocalSessionRecapSection(
+          id: UUID(uuidString: "41D23D1A-A631-4674-BC05-B33026389864")!,
+          kind: .keyPoints,
+          title: "מה מופיע בסרטון",
+          summary: "הרגעים והפרטים המרכזיים מתוך הסרטון.",
+          bullets: ["ניסיון התגנבות", "חץ שפוגע בעץ"],
+          anchorTimestamp: nil,
+          startOffset: nil,
+          endOffset: nil
+        ),
+        LocalSessionRecapSection(
+          id: UUID(uuidString: "E79122EF-BB0E-45AA-89F0-F3BD6EF8F030")!,
+          kind: .notes,
+          title: "תוסיף את התמלול בצורה של סיפור למסמך",
+          summary: "סעיף נוסף במסמך שמתייחס להוסיף את התמלול בצורה של סיפור למסמך.",
+          bullets: [
+            "להוסיף למסמך התייחסות לתמלול בצורה של סיפור.",
+            "להשתמש בסעיף הזה כנקודת המשך לעבודה על המסמך.",
+          ],
+          anchorTimestamp: nil,
+          startOffset: nil,
+          endOffset: nil
+        ),
+      ]
+    )
+    session.documentChat = LocalSessionDocumentChat(
+      messages: [
+        .init(
+          id: UUID(uuidString: "225132E9-E1E7-4F94-A65A-927BC1749D8D")!,
+          role: .user,
+          text: "תוסיף את התמלול בסוף המסמך. תרשום את זה כמו ספר",
+          createdAt: Date(timeIntervalSince1970: 6_710)
+        ),
+        .init(
+          id: UUID(uuidString: "99BE15C9-49B5-42DC-A257-95646AD100DE")!,
+          role: .assistant,
+          text: "Preview ready: הוספתי פסקת המשך בסוף המסמך.",
+          createdAt: Date(timeIntervalSince1970: 6_712)
+        ),
+      ],
+      pendingProposal: nil,
+      undoSnapshot: nil,
+      status: .idle,
+      errorMessage: nil,
+      createdAt: Date(timeIntervalSince1970: 6_708),
+      updatedAt: Date(timeIntervalSince1970: 6_715)
+    )
+    try store.save(session)
+
+    let model = LocalMeetingAppModel(store: store, fileLayout: layout)
+
+    let reloadedSections = model.selectedSession?.recap.sections ?? []
+    XCTAssertEqual(reloadedSections.map(\.title), ["מה מופיע בסרטון"])
+    XCTAssertFalse(
+      LocalSessionRecapMarkdownDocument(session: model.selectedSession!).markdown.contains(
+        "תוסיף את התמלול")
+    )
+    XCTAssertEqual(model.selectedSession?.documentChat.messages.map(\.role), [.user])
+  }
+
   func testStoredHebrewVideoRecapMigratesStaleTemplateTitles() throws {
     let layout = LocalMeetingFileLayout(
       baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))

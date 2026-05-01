@@ -20,7 +20,7 @@ struct CepessaSessionStatusBarSnapshot: Equatable {
 
   static let idle = CepessaSessionStatusBarSnapshot(
     mode: .idle,
-    title: "Cepessa ready",
+    title: "Sessions ready",
     detail: "Start or monitor a local session from the status bar.",
     progress: nil,
     canRetryLocal: false,
@@ -229,7 +229,7 @@ final class CepessaSessionStatusBarController {
     }
 
     let image = symbolNames.lazy.compactMap {
-      NSImage(systemSymbolName: $0, accessibilityDescription: "Cepessa Sessions")
+      NSImage(systemSymbolName: $0, accessibilityDescription: "Sessions")
     }.first
     image?.isTemplate = mode != .failed
     return image
