@@ -740,13 +740,28 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     markdown = Self.markdown(for: session, language: language)
   }
 
+  static func preferredLanguage(for session: LocalSession) -> LocalSessionDocumentLanguage {
+    let documentText = session.documentMarkdown ?? ""
+    let recapText =
+      ([session.recap.overview]
+      + session.recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: " ")
+    let transcriptText = session.transcriptSegments.prefix(80).map(\.text).joined(separator: " ")
+
+    return [documentText, recapText, transcriptText].joined(separator: " ").containsHebrewScript
+      ? .hebrew : .english
+  }
+
   static func markdown(
     for session: LocalSession,
     language: LocalSessionDocumentLanguage = .english,
     includeTranscript: Bool = false
   ) -> String {
     if let documentMarkdown = session.documentMarkdown {
-      return documentMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+      let trimmedDocument = documentMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+      if documentMarkdownLanguageMatches(trimmedDocument, language: language) {
+        return trimmedDocument
+      }
     }
 
     let recap = localizedRecap(for: session, language: language)
@@ -775,6 +790,14 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
       lines.append("## \(overviewTitle(for: recap, language: language))")
       lines.append("")
       lines.append(overview)
+      lines.append("")
+    }
+
+    let speakerContext = speakerContextLines(for: session, language: language)
+    if !speakerContext.isEmpty {
+      lines.append("## \(language == .hebrew ? "הקשר דוברים" : "Speaker context")")
+      lines.append("")
+      lines.append(contentsOf: speakerContext)
       lines.append("")
     }
 
@@ -811,11 +834,11 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
       }
     }
 
-    let transcript = session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
-    if includeTranscript && !transcript.isEmpty {
+    let transcriptLines = transcriptMarkdownLines(for: session)
+    if includeTranscript && !transcriptLines.isEmpty {
       lines.append("## \(language == .hebrew ? "תמלול" : "Transcript")")
       lines.append("")
-      lines.append(transcript)
+      lines.append(contentsOf: transcriptLines)
       lines.append("")
     }
 
@@ -887,11 +910,24 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     for session: LocalSession,
     language: LocalSessionDocumentLanguage
   ) -> LocalSessionRecap {
-    guard language == .hebrew, shouldBuildHebrewRecapFromTranscript(session) else {
-      return session.recap
+    if language == .hebrew, shouldBuildHebrewRecapFromTranscript(session) {
+      return hebrewRecapFromTranscript(for: session)
     }
 
-    return hebrewRecapFromTranscript(for: session)
+    if language == .english, shouldBuildEnglishRecapFromTranscript(session) {
+      return englishRecapFromTranscript(for: session)
+    }
+
+    return session.recap
+  }
+
+  private static func documentMarkdownLanguageMatches(
+    _ markdown: String,
+    language: LocalSessionDocumentLanguage
+  ) -> Bool {
+    guard !markdown.isEmpty else { return true }
+    let hasHebrew = markdown.containsHebrewScript
+    return language == .hebrew ? hasHebrew : !hasHebrew
   }
 
   private static func shouldBuildHebrewRecapFromTranscript(_ session: LocalSession) -> Bool {
@@ -904,6 +940,137 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
       .joined(separator: " ")
 
     return !recapText.containsHebrewScript
+  }
+
+  private static func shouldBuildEnglishRecapFromTranscript(_ session: LocalSession) -> Bool {
+    let sourceText = [session.documentMarkdown ?? "", session.recap.overview, session.transcriptText]
+      .joined(separator: " ")
+    guard sourceText.containsHebrewScript else { return false }
+    return !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private static func englishRecapFromTranscript(for session: LocalSession) -> LocalSessionRecap {
+    let corpus = [session.transcriptText, session.recap.overview, session.documentMarkdown ?? ""]
+      .joined(separator: " ")
+      .lowercased()
+    let signals = meetingTopicSignals(in: corpus)
+
+    var keyPoints: [String] = []
+    var actionItems: [String] = []
+    var openQuestions: [String] = []
+
+    if signals.hasProductDirection {
+      keyPoints.append(
+        "The discussion focused on sharpening the product direction: the value it creates, the first use case to prove, and the business opportunity behind it."
+      )
+      actionItems.append("Turn the product direction into a short list of concrete use cases and priorities.")
+      openQuestions.append("Which first use case should be proven before expanding the product scope?")
+    }
+
+    if signals.hasBusinessAgent {
+      keyPoints.append(
+        "A central thread was the need for a business owner to get a clear operational view instead of scattered information across calls, chats, dashboards, and financial tools."
+      )
+      actionItems.append("Define the business-agent workflow around owner questions, available data, and expected outputs.")
+      openQuestions.append("Which data points must the business agent answer reliably on day one?")
+    }
+
+    if signals.hasDashboard {
+      keyPoints.append(
+        "The dashboard idea was framed around simple business health signals, including budget, cash-flow, and status indicators that should be easy to read."
+      )
+      actionItems.append("Map the dashboard states into a small set of clear business-health indicators.")
+    }
+
+    if signals.hasWebsiteRefresh {
+      keyPoints.append(
+        "The website conversation centered on refresh work, content updates, recommendations, and making the editing flow clearer."
+      )
+      actionItems.append("Prepare a concise website update list covering content, recommendations, forms, and ownership.")
+      openQuestions.append("Which website updates are urgent, and which can wait for a later iteration?")
+    }
+
+    if signals.hasWebflowDataFlow {
+      keyPoints.append(
+        "The Webflow, Make, Monday, hosting, and domain references point to a practical need to explain how information moves through the website stack."
+      )
+      actionItems.append("Document the information flow between Webflow, Make, Monday, hosting, and related domain/security touchpoints.")
+      openQuestions.append("What information is stored or transferred at each step, and who owns the security answer?")
+    }
+
+    if containsAny(corpus, ["גלילה", "scroll", "קופצת", "לאט", "איטי"]) {
+      keyPoints.append(
+        "The website discussion included scrolling behavior and performance issues that make the experience feel less controlled."
+      )
+      actionItems.append("Reproduce the scrolling behavior and decide whether it is a performance issue, layout issue, or interaction issue.")
+    }
+
+    if containsAny(corpus, ["analytics", "אנליטיקס", "clarity", "mixpanel"]) {
+      keyPoints.append(
+        "Analytics came up as a way to understand real user behavior before making broader site decisions."
+      )
+      actionItems.append("Choose the analytics setup and connect it before the next design or content pass.")
+    }
+
+    if containsAny(corpus, ["coming soon", "סימולציות", "ראיונות", "interview simulation"]) {
+      keyPoints.append(
+        "The interview simulation area needs clearer status and copy, including the coming soon state."
+      )
+      actionItems.append("Clarify the interview simulation section so users understand what is available now and what is coming later.")
+    }
+
+    if keyPoints.isEmpty {
+      keyPoints.append(
+        "The meeting raised practical follow-up topics, but the transcript does not provide a single stable theme strong enough to turn into a more specific brief."
+      )
+      actionItems.append("Review the transcript once and convert only clearly supported items into a short work list.")
+      openQuestions.append("What is the one topic this meeting should drive forward?")
+    }
+
+    let overview = englishOverview(for: signals)
+
+    return LocalSessionRecap(
+      overview: overview,
+      generatedAt: session.recap.generatedAt,
+      sections: [
+        makeLocalizedSection(
+          kind: .overview,
+          language: .english,
+          summary: overview,
+          bullets: [overview]
+        ),
+        makeLocalizedSection(
+          kind: .keyPoints,
+          language: .english,
+          summary: "The work-relevant points supported by the meeting.",
+          bullets: keyPoints
+        ),
+        makeLocalizedSection(
+          kind: .decisions,
+          language: .english,
+          summary: "",
+          bullets: []
+        ),
+        makeLocalizedSection(
+          kind: .actionItem,
+          language: .english,
+          summary: "Follow-up work to convert the meeting into progress.",
+          bullets: actionItems
+        ),
+        makeLocalizedSection(
+          kind: .openQuestions,
+          language: .english,
+          summary: openQuestions.isEmpty ? "" : "Questions to resolve before the next step.",
+          bullets: openQuestions
+        ),
+        makeLocalizedSection(
+          kind: .nextSteps,
+          language: .english,
+          summary: "Recommended next move.",
+          bullets: ["Turn the useful points from the meeting into a short owner-based task list with priorities and a review date."]
+        ),
+      ]
+    )
   }
 
   private static func hebrewRecapFromTranscript(for session: LocalSession) -> LocalSessionRecap {
@@ -1051,6 +1218,11 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
       )
     }
 
+    let signals = meetingTopicSignals(in: corpus)
+    if signals.hasConcreteTopic {
+      return hebrewTopicalMeetingRecap(for: session, signals: signals)
+    }
+
     let themes = HebrewDocumentTheme.allCases.filter { $0.matches(corpus) }
     let activeThemes = themes.isEmpty ? [.general] : themes
     let overview =
@@ -1108,6 +1280,90 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     )
   }
 
+  private static func hebrewTopicalMeetingRecap(
+    for session: LocalSession,
+    signals: MeetingTopicSignals
+  ) -> LocalSessionRecap {
+    var keyPoints: [String] = []
+    var actionItems: [String] = []
+    var openQuestions: [String] = []
+
+    if signals.hasProductDirection {
+      keyPoints.append("הדיון עסק בחידוד כיוון המוצר: איזה ערך הוא נותן, למי, ומה ההזדמנות העסקית שצריך להוכיח.")
+      actionItems.append("להפוך את כיוון המוצר לרשימת תרחישי שימוש ותעדוף קצרה.")
+      openQuestions.append("איזה תרחיש שימוש ראשון צריך להוכיח לפני שמרחיבים את המוצר?")
+    }
+
+    if signals.hasBusinessAgent {
+      keyPoints.append("עלה צורך לתת לבעל העסק תמונת מצב ברורה מתוך מידע שמפוזר היום בין שיחות, צ'אט, דשבורדים וכלים פיננסיים.")
+      actionItems.append("להגדיר את זרימת העבודה של הסוכן העסקי: אילו שאלות הוא עונה עליהן, מאיפה מגיע המידע, ומה הפלט המצופה.")
+      openQuestions.append("אילו נתונים הסוכן העסקי חייב לדעת לענות עליהם כבר בגרסה הראשונה?")
+    }
+
+    if signals.hasDashboard {
+      keyPoints.append("הרעיון של דשבורד עסקי עלה סביב מדדי בריאות פשוטים כמו תקציב, תזרים וסימוני מצב שקל להבין מהר.")
+      actionItems.append("למפות את מצבי הדשבורד לרשימה קצרה של אינדיקציות עסקיות ברורות.")
+    }
+
+    if signals.hasWebsiteRefresh {
+      keyPoints.append("חלק מהדיון עסק ברענון האתר, עדכון תכנים והסבר ברור יותר של אופן ניהול המלצות או אזורי תוכן.")
+      actionItems.append("להכין רשימת עדכוני אתר קצרה: תכנים, המלצות, טפסים, דומיין ובעלות על כל משימה.")
+      openQuestions.append("אילו עדכוני אתר דחופים עכשיו ואילו שייכים לאיטרציה מאוחרת יותר?")
+    }
+
+    if signals.hasWebflowDataFlow {
+      keyPoints.append("האזכורים של Webflow, Make, Monday, אחסון ודומיין מצביעים על צורך להסביר בצורה נקייה איך מידע עובר בתוך מערך האתר.")
+      actionItems.append("לתעד את זרימת המידע בין Webflow, Make, Monday, האחסון ונקודות הדומיין/אבטחה.")
+      openQuestions.append("איזה מידע נשמר או עובר בכל שלב, ומי אחראי לתשובת האבטחה?")
+    }
+
+    let overview = hebrewOverview(for: signals)
+
+    return LocalSessionRecap(
+      overview: overview,
+      generatedAt: session.recap.generatedAt,
+      sections: [
+        makeLocalizedSection(
+          kind: .overview,
+          language: .hebrew,
+          title: "תקציר מנהלים",
+          summary: overview,
+          bullets: [overview]
+        ),
+        makeLocalizedSection(
+          kind: .keyPoints,
+          language: .hebrew,
+          summary: "הנקודות המקצועיות שנתמכות בפגישה.",
+          bullets: keyPoints
+        ),
+        makeLocalizedSection(
+          kind: .decisions,
+          language: .hebrew,
+          summary: "",
+          bullets: []
+        ),
+        makeLocalizedSection(
+          kind: .actionItem,
+          language: .hebrew,
+          summary: "פעולות המשך שניתן להוציא מהפגישה.",
+          bullets: actionItems
+        ),
+        makeLocalizedSection(
+          kind: .openQuestions,
+          language: .hebrew,
+          summary: openQuestions.isEmpty ? "" : "שאלות שצריך לסגור לפני המשך עבודה.",
+          bullets: openQuestions
+        ),
+        makeLocalizedSection(
+          kind: .nextSteps,
+          language: .hebrew,
+          summary: "המשך מומלץ.",
+          bullets: ["להפוך את הנקודות החשובות לרשימת משימות קצרה עם בעלים, סדר עדיפויות ותאריך בדיקה."]
+        ),
+      ]
+    )
+  }
+
   private static func documentTitle(
     for session: LocalSession,
     recap: LocalSessionRecap,
@@ -1122,9 +1378,11 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     }
 
     let corpus =
-      ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      ([session.transcriptText, recap.overview]
+        + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
       .joined(separator: " ")
       .lowercased()
+    let signals = meetingTopicSignals(in: corpus)
     let hasAnalytics = corpus.contains("analytics") || corpus.contains("אנליטיקס")
     let hasSimulation =
       corpus.contains("interview simulation") || corpus.contains("simulation")
@@ -1139,6 +1397,18 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     if language == .hebrew {
       if corpus.contains("בדיקת סיכום") || corpus.contains("המודל המקומי") {
         return "בדיקת סיכום במודל המקומי"
+      }
+      if signals.hasProductDirection && signals.hasBusinessAgent && signals.hasDashboard {
+        return "כיוון מוצר, סוכן עסקי ודשבורד"
+      }
+      if signals.hasBusinessAgent && signals.hasDashboard {
+        return "סוכן עסקי, דשבורד וניהול מידע"
+      }
+      if signals.hasBusinessAgent {
+        return "סוכן עסקי וניהול מידע"
+      }
+      if signals.hasProductDirection {
+        return "כיוון מוצר והזדמנות עסקית"
       }
       if hasSimulation && hasAnalytics && hasScrolling {
         return "תיקוני אתר דחופים, אנליטיקס וסימולציות ריאיון"
@@ -1158,20 +1428,32 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
       if hasAnalytics {
         return "תוכנית מדידה ואנליטיקס לאתר"
       }
-      switch session.contentClassification?.type {
-      case .some(.voiceNote):
-        return "סיכום הודעה קולית ופעולות המשך"
-      case .some(.videoCommentary):
-        return "סיכום הערות מסרטון ופעולות המשך"
-      case .some(.generalTranscript):
-        return "סיכום מפגש ופעולות המשך"
-      case .some(.meeting), .none:
-        return "סיכום פגישה ותוכנית פעולה"
+      if signals.hasWebsiteRefresh && signals.hasWebflowDataFlow {
+        return "רענון אתר, Webflow וחיבורי מידע"
       }
+      if signals.hasWebsiteRefresh {
+        return "רענון אתר והדרכת שימוש"
+      }
+      if signals.hasWebflowDataFlow {
+        return "אחסון, אבטחה וחיבורי Webflow"
+      }
+      return "סיכום פגישה ותוכנית פעולה"
     }
 
     if hasSimulation && hasAnalytics && hasScrolling {
       return "Urgent Website Fixes, Analytics, and Interview Simulations"
+    }
+    if signals.hasProductDirection && signals.hasBusinessAgent && signals.hasDashboard {
+      return "Product Direction, Business Agent, and Dashboard"
+    }
+    if signals.hasBusinessAgent && signals.hasDashboard {
+      return "Business Agent, Dashboard, and Information Flow"
+    }
+    if signals.hasBusinessAgent {
+      return "Business Agent and Information Flow"
+    }
+    if signals.hasProductDirection {
+      return "Product Direction and Business Opportunity"
     }
     if hasSimulation && hasAnalytics {
       return "Website Analytics and Interview Simulation Plan"
@@ -1188,15 +1470,155 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     if hasAnalytics {
       return "Website Analytics Plan"
     }
-    switch session.contentClassification?.type {
-    case .some(.voiceNote):
-      return "Voice Note Brief and Follow-Up"
-    case .some(.videoCommentary):
-      return "Video Commentary Brief and Follow-Up"
-    case .some(.generalTranscript):
-      return "Session Brief and Follow-Up"
-    case .some(.meeting), .none:
-      return "Meeting Brief and Action Plan"
+    if signals.hasWebsiteRefresh && signals.hasWebflowDataFlow {
+      return "Website Refresh, Webflow, and Data Flow"
+    }
+    if signals.hasWebsiteRefresh {
+      return "Website Refresh and Usage Guidance"
+    }
+    if signals.hasWebflowDataFlow {
+      return "Hosting, Security, and Webflow Integrations"
+    }
+    return "Meeting Brief and Action Plan"
+  }
+
+  private static func hebrewOverview(for signals: MeetingTopicSignals) -> String {
+    var topics: [String] = []
+    if signals.hasProductDirection {
+      topics.append("כיוון המוצר וההזדמנות העסקית")
+    }
+    if signals.hasBusinessAgent {
+      topics.append("סוכן עסקי וניהול מידע לבעלי עסקים")
+    }
+    if signals.hasDashboard {
+      topics.append("דשבורד ותמונת מצב עסקית")
+    }
+    if signals.hasWebsiteRefresh {
+      topics.append("רענון האתר וניהול התוכן")
+    }
+    if signals.hasWebflowDataFlow {
+      topics.append("זרימת מידע בין Webflow, Make, Monday ותשתיות האתר")
+    }
+
+    guard !topics.isEmpty else {
+      return "הפגישה כללה דיון עבודה שדורש זיקוק למשימות המשך. לא זוהה נושא יחיד מספיק יציב, ולכן המסמך מתמקד רק בנקודות שנתמכות בבירור בפגישה."
+    }
+
+    return "הפגישה התמקדה ב\(topics.prefix(3).joined(separator: ", ")). התוצרים החשובים הם חידוד הכיוון, סגירת שאלות פתוחות והפיכת הנושאים למשימות עבודה ברורות."
+  }
+
+  private static func englishOverview(for signals: MeetingTopicSignals) -> String {
+    var topics: [String] = []
+    if signals.hasProductDirection {
+      topics.append("product direction and business opportunity")
+    }
+    if signals.hasBusinessAgent {
+      topics.append("a business-agent workflow and information management")
+    }
+    if signals.hasDashboard {
+      topics.append("dashboard and business-health signals")
+    }
+    if signals.hasWebsiteRefresh {
+      topics.append("website refresh and content operations")
+    }
+    if signals.hasWebflowDataFlow {
+      topics.append("the Webflow, Make, Monday, hosting, and domain data flow")
+    }
+
+    guard !topics.isEmpty else {
+      return "The meeting covered practical follow-up work, but no single topic was stable enough to dominate the brief. The document keeps only points that are clearly supported by the session."
+    }
+
+    return "The meeting focused on \(topics.prefix(3).joined(separator: ", ")). The useful outcomes are sharper direction, open questions to resolve, and follow-up work that can become clear tasks."
+  }
+
+  private struct MeetingTopicSignals {
+    var hasProductDirection = false
+    var hasBusinessAgent = false
+    var hasDashboard = false
+    var hasWebsiteRefresh = false
+    var hasWebflowDataFlow = false
+
+    var hasConcreteTopic: Bool {
+      hasProductDirection || hasBusinessAgent || hasDashboard || hasWebsiteRefresh
+        || hasWebflowDataFlow
+    }
+  }
+
+  private static func meetingTopicSignals(in corpus: String) -> MeetingTopicSignals {
+    var signals = MeetingTopicSignals()
+    signals.hasProductDirection = containsAny(
+      corpus,
+      ["סטארט", "מה אנחנו בונים", "מוצר", "רעיון", "product direction", "business opportunity"]
+    )
+    signals.hasBusinessAgent = containsAny(
+      corpus,
+      [
+        "סוכן", "סוכנים", "צ'אט עסקי", "צאט עסקי", "טלפון עסקי", "בעל העסק",
+        "business agent", "agent workflow",
+      ]
+    )
+    signals.hasDashboard = containsAny(
+      corpus,
+      ["דשבורד", "תמונת מצב", "תקציב", "תזרים", "פיננס", "dashboard", "cash-flow", "budget"]
+    )
+    signals.hasWebsiteRefresh = containsAny(
+      corpus,
+      [
+        "רענון", "האתר", "אתר", "המלצות", "להפעיל", "לשנות", "website refresh",
+        "content updates",
+      ]
+    )
+    signals.hasWebflowDataFlow = containsAny(
+      corpus,
+      [
+        "webflow", "make", "monday", "דומיין", "אחסון", "שרת", "אבטחה", "תעודת זהות",
+        "hosting", "domain", "data flow",
+      ]
+    )
+    return signals
+  }
+
+  private static func containsAny(_ text: String, _ patterns: [String]) -> Bool {
+    patterns.contains { text.contains($0.lowercased()) }
+  }
+
+  private static func speakerContextLines(
+    for session: LocalSession,
+    language: LocalSessionDocumentLanguage
+  ) -> [String] {
+    var labels: [String] = []
+    var seen = Set<String>()
+    for segment in session.transcriptSegments {
+      let label = sanitizedLine(segment.speaker)
+      let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !label.isEmpty, !text.isEmpty else { continue }
+      let key = label.lowercased()
+      guard seen.insert(key).inserted else { continue }
+      labels.append(label)
+    }
+
+    guard labels.count > 1 else { return [] }
+    if language == .hebrew {
+      return [
+        "תוויות הדוברים שנקלטו בהקלטה: \(labels.joined(separator: ", ")).",
+        "אלה תוויות מקור מהפרדת המיקרופון/האודיו, לא שמות אישיים מאומתים.",
+      ]
+    }
+
+    return [
+      "Recorded speaker labels: \(labels.joined(separator: ", ")).",
+      "These are source labels from mic/system separation, not verified personal names.",
+    ]
+  }
+
+  private static func transcriptMarkdownLines(for session: LocalSession) -> [String] {
+    session.transcriptSegments.compactMap { segment in
+      let text = sanitizedLine(segment.text)
+      guard !text.isEmpty else { return nil }
+      let speaker = sanitizedLine(segment.speaker).isEmpty ? "Speaker" : sanitizedLine(segment.speaker)
+      let offset = max(0, segment.timestamp.timeIntervalSince(session.startedAt))
+      return "[\(timeString(for: offset))] \(speaker): \(text)"
     }
   }
 

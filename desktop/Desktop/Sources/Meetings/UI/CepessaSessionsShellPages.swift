@@ -21,6 +21,10 @@ struct CepessaSessionsLibraryPage: View {
 
     return model.sessions.filter { session in
       session.displayTitle.localizedCaseInsensitiveContains(normalized)
+        || LocalSessionRecapMarkdownDocument.title(for: session, language: .hebrew)
+          .localizedCaseInsensitiveContains(normalized)
+        || LocalSessionRecapMarkdownDocument.title(for: session, language: .english)
+          .localizedCaseInsensitiveContains(normalized)
         || session.transcriptText.localizedCaseInsensitiveContains(normalized)
         || session.attachments.contains(where: {
           $0.title.localizedCaseInsensitiveContains(normalized)
@@ -140,7 +144,7 @@ struct CepessaSessionsLibraryPage: View {
     VStack(alignment: .leading, spacing: 10) {
       HStack(alignment: .top, spacing: 10) {
         VStack(alignment: .leading, spacing: 4) {
-          Text(session.displayTitle)
+          Text(documentTitle(for: session))
             .scaledFont(size: 15, weight: .semibold)
             .foregroundStyle(CepessaColors.textPrimary)
             .lineLimit(2)
@@ -201,7 +205,7 @@ struct CepessaSessionsLibraryPage: View {
       hoveredSessionID = isInside ? session.id : nil
     }
     .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(session.displayTitle), \(displayStatus(for: session).label)")
+    .accessibilityLabel("\(documentTitle(for: session)), \(displayStatus(for: session).label)")
     .accessibilityHint("Opens this session details.")
     .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
     .accessibilityAction {
@@ -249,10 +253,6 @@ struct CepessaSessionsLibraryPage: View {
 
   private func displayStatus(for session: LocalMeetingSession) -> LocalMeetingSessionStatus {
     if model.processingSnapshot(for: session.id) != nil {
-      return .transcribing
-    }
-
-    if model.isGeneratingRecap(for: session.id) {
       return .transcribing
     }
 
@@ -317,15 +317,20 @@ struct CepessaSessionsLibraryPage: View {
         .stroke(CepessaColors.border.opacity(0.2), lineWidth: 1)
     )
   }
+
+  private func documentTitle(for session: LocalMeetingSession) -> String {
+    LocalSessionRecapMarkdownDocument.title(
+      for: session,
+      language: LocalSessionRecapMarkdownDocument.preferredLanguage(for: session)
+    )
+  }
 }
 
 private struct CepessaLibraryDetailPane: View {
   @ObservedObject var model: LocalMeetingAppModel
   let session: LocalMeetingSession?
-  @State private var documentChatDraft = ""
-  @State private var isDocumentChatOpen = false
   @AppStorage("cepessa.sessions.documentLanguage") private var documentLanguage =
-    LocalSessionDocumentLanguage.english.rawValue
+    LocalSessionDocumentLanguage.hebrew.rawValue
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
@@ -340,7 +345,7 @@ private struct CepessaLibraryDetailPane: View {
                   .tracking(0.18)
                   .foregroundStyle(CepessaColors.textSecondary)
 
-                Text(session.displayTitle)
+                Text(LocalSessionRecapMarkdownDocument.title(for: session, language: selectedDocumentLanguage))
                   .scaledFont(size: 28, weight: .semibold)
                   .foregroundStyle(CepessaColors.textPrimary)
                   .lineLimit(2)
@@ -356,23 +361,15 @@ private struct CepessaLibraryDetailPane: View {
                   "\(session.segments.count) \(session.segments.count == 1 ? "segment" : "segments")"
                 )
                 infoPill("\(session.attachments.count + session.captureArtifacts.count) artifacts")
-                infoPill(session.recap.sections.isEmpty ? "Recap pending" : "Structured recap")
+                infoPill(session.transcriptText.isEmpty ? "Transcript pending" : "Transcript ready")
               }
 
               detailBlock(
-                "Markdown recap",
+                "Transcript",
                 subtitle:
-                  "Read the generated document and use the local model to propose structured edits before anything is saved."
+                  "Read the captured transcript for this session."
               ) {
-                LocalSessionRecapWorkspace(
-                  session: session,
-                  language: selectedDocumentLanguage,
-                  languageSelection: $documentLanguage,
-                  isRegenerating: model.isGeneratingRecap(for: session.id),
-                  onRegenerate: {
-                    model.regenerateRecap(for: session.id)
-                  }
-                )
+                LocalSessionTranscriptPlainPreview(session: session)
               }
 
               detailBlock(
@@ -466,30 +463,7 @@ private struct CepessaLibraryDetailPane: View {
               }
             }
             .padding(24)
-            .padding(.bottom, isDocumentChatOpen ? 220 : 76)
-          }
-
-          if isDocumentChatOpen {
-            CepessaSessionDocumentChatView(
-              model: model,
-              session: session,
-              draftText: $documentChatDraft,
-              onClose: {
-                withAnimation(.easeOut(duration: 0.18)) {
-                  isDocumentChatOpen = false
-                }
-              }
-            )
-            .id(session.id)
-            .frame(minWidth: 440, idealWidth: 620, maxWidth: 760)
-            .padding(.horizontal, 34)
-            .padding(.bottom, 18)
-            .transition(.opacity.combined(with: .offset(y: reduceMotion ? 0 : 10)))
-          } else {
-            openChatButton
-              .padding(.horizontal, 34)
-              .padding(.bottom, 18)
-              .transition(.opacity.combined(with: .offset(y: reduceMotion ? 0 : 8)))
+            .padding(.bottom, 76)
           }
         }
       } else {
@@ -514,11 +488,6 @@ private struct CepessaLibraryDetailPane: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .cepessaCanvas(radius: 24)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: session?.id)
-    .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isDocumentChatOpen)
-    .onChange(of: session?.id) { _, _ in
-      documentChatDraft = ""
-      isDocumentChatOpen = false
-    }
   }
 
   private func detailBlock<Content: View>(
@@ -725,34 +694,34 @@ private struct CepessaLibraryDetailPane: View {
   }
 
   private var selectedDocumentLanguage: LocalSessionDocumentLanguage {
-    LocalSessionDocumentLanguage(rawValue: documentLanguage) ?? .english
+    LocalSessionDocumentLanguage(rawValue: documentLanguage)
+      ?? session.map(LocalSessionRecapMarkdownDocument.preferredLanguage(for:))
+      ?? .hebrew
   }
 
-  private var openChatButton: some View {
-    HStack {
-      Spacer(minLength: 0)
+}
 
-      Button {
-        withAnimation(.easeOut(duration: 0.18)) {
-          isDocumentChatOpen = true
-        }
-      } label: {
-        Label("Ask this session", systemImage: "bubble.left.and.text.bubble.right")
-          .scaledFont(size: 12, weight: .semibold)
+private struct LocalSessionTranscriptPlainPreview: View {
+  let session: LocalMeetingSession
+
+  var body: some View {
+    let transcript = session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+    Group {
+      if transcript.isEmpty {
+        Text("Transcript not available yet.")
+          .scaledFont(size: 13)
+          .foregroundStyle(CepessaColors.textSecondary)
+      } else {
+        Text(transcript)
+          .scaledFont(size: 13)
           .foregroundStyle(CepessaColors.textPrimary)
-          .padding(.horizontal, 14)
-          .padding(.vertical, 10)
-          .background(Color.white.opacity(0.86))
-          .clipShape(Capsule())
-          .overlay(
-            Capsule()
-              .stroke(CepessaColors.capture.opacity(0.22), lineWidth: 1)
-          )
-          .shadow(color: CepessaColors.warmShadow.opacity(0.10), radius: 14, x: 0, y: 8)
+          .textSelection(.enabled)
       }
-      .buttonStyle(CepessaPressStyle(scale: 0.97, pressedBrightness: -0.02))
-      .accessibilityLabel("Open session chat")
     }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(18)
+    .background(CepessaColors.backgroundSecondary.opacity(0.82))
+    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
   }
 }
 
@@ -862,7 +831,7 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
   }
 
   var body: some View {
-    VStack(alignment: .center, spacing: 0) {
+    VStack(alignment: stackAlignment, spacing: 0) {
       if markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         VStack(spacing: 10) {
           Image(systemName: "doc")
@@ -874,9 +843,9 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
         }
         .padding(.top, 96)
         .padding(.bottom, 120)
-        .frame(maxWidth: 780, minHeight: 320)
+        .frame(maxWidth: 780, minHeight: 320, alignment: .center)
       } else {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: stackAlignment, spacing: 20) {
           ForEach(Array(markdownBlocks.enumerated()), id: \.offset) { _, block in
             renderedBlock(block)
           }
@@ -884,14 +853,12 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
         .padding(.horizontal, 56)
         .padding(.top, 40)
         .padding(.bottom, 70)
-        .frame(maxWidth: 780, alignment: .topLeading)
-        .environment(
-          \.layoutDirection,
-          language == .hebrew ? .rightToLeft : .leftToRight
-        )
+        .frame(maxWidth: 780, alignment: frameAlignment)
+        .frame(maxWidth: .infinity, alignment: textFrameAlignment)
       }
     }
-    .frame(maxWidth: .infinity, alignment: .center)
+    .environment(\.layoutDirection, language == .hebrew ? .rightToLeft : .leftToRight)
+    .frame(maxWidth: .infinity, alignment: textFrameAlignment)
   }
 
   @ViewBuilder
@@ -900,10 +867,11 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
     case .heading(let level, let text):
       Text(inlineMarkdown(text))
         .scaledFont(size: headingSize(for: level), weight: .semibold)
-        .tracking(level == 1 ? -0.5 : -0.25)
+        .tracking(0)
         .foregroundStyle(CepessaColors.textPrimary.opacity(level == 1 ? 0.98 : 0.92))
+        .multilineTextAlignment(textAlignment)
         .textSelection(.enabled)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: textFrameAlignment)
         .padding(.top, level == 1 ? 0 : 10)
 
     case .paragraph(let text):
@@ -911,41 +879,21 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
         .scaledFont(size: 15)
         .lineSpacing(5)
         .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
+        .multilineTextAlignment(textAlignment)
         .textSelection(.enabled)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: textFrameAlignment)
 
     case .unorderedList(let items):
-      VStack(alignment: .leading, spacing: 9) {
+      VStack(alignment: stackAlignment, spacing: 9) {
         ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-          HStack(alignment: .firstTextBaseline, spacing: 11) {
-            Circle()
-              .fill(CepessaColors.purplePrimary.opacity(0.72))
-              .frame(width: 5, height: 5)
-            Text(inlineMarkdown(item))
-              .scaledFont(size: 14.5)
-              .lineSpacing(4)
-              .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
-              .textSelection(.enabled)
-              .frame(maxWidth: .infinity, alignment: .leading)
-          }
+          unorderedListRow(item)
         }
       }
 
     case .orderedList(let items):
-      VStack(alignment: .leading, spacing: 9) {
+      VStack(alignment: stackAlignment, spacing: 9) {
         ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-          HStack(alignment: .firstTextBaseline, spacing: 11) {
-            Text("\(index + 1).")
-              .scaledFont(size: 12.5, weight: .semibold, design: .rounded)
-              .foregroundStyle(CepessaColors.purplePrimary)
-              .frame(width: 26, alignment: .trailing)
-            Text(inlineMarkdown(item))
-              .scaledFont(size: 14.5)
-              .lineSpacing(4)
-              .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
-              .textSelection(.enabled)
-              .frame(maxWidth: .infinity, alignment: .leading)
-          }
+          orderedListRow(index: index, item: item)
         }
       }
 
@@ -954,15 +902,16 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
         .scaledFont(size: 14.5)
         .lineSpacing(4)
         .foregroundStyle(CepessaColors.textSecondary)
+        .multilineTextAlignment(textAlignment)
         .textSelection(.enabled)
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: textFrameAlignment)
         .background(
           CepessaColors.purplePrimary.opacity(0.07),
           in: RoundedRectangle(cornerRadius: 16, style: .continuous)
         )
-        .overlay(alignment: .leading) {
+        .overlay(alignment: language == .hebrew ? .trailing : .leading) {
           Capsule()
             .fill(CepessaColors.purplePrimary.opacity(0.65))
             .frame(width: 3)
@@ -975,7 +924,7 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
         .foregroundStyle(CepessaColors.textPrimary.opacity(0.86))
         .textSelection(.enabled)
         .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: textFrameAlignment)
         .background(
           Color.black.opacity(0.045), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
 
@@ -985,6 +934,75 @@ struct LocalSessionMarkdownDocumentPreview: View, Equatable {
         .frame(height: 1)
         .padding(.vertical, 4)
     }
+  }
+
+  private var stackAlignment: HorizontalAlignment {
+    language == .hebrew ? .trailing : .leading
+  }
+
+  private var frameAlignment: Alignment {
+    language == .hebrew ? .topTrailing : .topLeading
+  }
+
+  private var textFrameAlignment: Alignment {
+    language == .hebrew ? .trailing : .leading
+  }
+
+  private var textAlignment: TextAlignment {
+    language == .hebrew ? .trailing : .leading
+  }
+
+  @ViewBuilder
+  private func unorderedListRow(_ item: String) -> some View {
+    if language == .hebrew {
+      HStack(alignment: .firstTextBaseline, spacing: 11) {
+        listItemText(item)
+        listBullet
+      }
+    } else {
+      HStack(alignment: .firstTextBaseline, spacing: 11) {
+        listBullet
+        listItemText(item)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func orderedListRow(index: Int, item: String) -> some View {
+    if language == .hebrew {
+      HStack(alignment: .firstTextBaseline, spacing: 11) {
+        listItemText(item)
+        orderedListMarker(index: index)
+      }
+    } else {
+      HStack(alignment: .firstTextBaseline, spacing: 11) {
+        orderedListMarker(index: index)
+        listItemText(item)
+      }
+    }
+  }
+
+  private var listBullet: some View {
+    Circle()
+      .fill(CepessaColors.purplePrimary.opacity(0.72))
+      .frame(width: 5, height: 5)
+  }
+
+  private func orderedListMarker(index: Int) -> some View {
+    Text("\(index + 1).")
+      .scaledFont(size: 12.5, weight: .semibold, design: .rounded)
+      .foregroundStyle(CepessaColors.purplePrimary)
+      .frame(width: 26, alignment: language == .hebrew ? .leading : .trailing)
+  }
+
+  private func listItemText(_ item: String) -> some View {
+    Text(inlineMarkdown(item))
+      .scaledFont(size: 14.5)
+      .lineSpacing(4)
+      .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
+      .multilineTextAlignment(textAlignment)
+      .textSelection(.enabled)
+      .frame(maxWidth: .infinity, alignment: textFrameAlignment)
   }
 
   private func inlineMarkdown(_ text: String) -> AttributedString {
@@ -1668,13 +1686,101 @@ enum LocalSessionMarkdownBlock: Equatable {
   case rule
 }
 
+@MainActor
+final class CepessaStorageSettingsModel: ObservableObject {
+  @Published private(set) var sessionsBytes: Int64 = 0
+  @Published private(set) var clipsBytes: Int64 = 0
+  @Published private(set) var cleanupMessage: String?
+
+  private let fileManager: FileManager
+  let sessionsRoot: URL
+  let clipsRoot: URL
+
+  init(fileManager: FileManager = .default) {
+    self.fileManager = fileManager
+    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("Cepessa", isDirectory: true)
+    self.sessionsRoot = appSupport.appendingPathComponent("Sessions", isDirectory: true)
+    self.clipsRoot = appSupport.appendingPathComponent("Clips", isDirectory: true)
+    refresh()
+  }
+
+  var sessionsSizeText: String { Self.byteCountFormatter.string(fromByteCount: sessionsBytes) }
+  var clipsSizeText: String { Self.byteCountFormatter.string(fromByteCount: clipsBytes) }
+  var totalSizeText: String { Self.byteCountFormatter.string(fromByteCount: sessionsBytes + clipsBytes) }
+
+  func refresh() {
+    sessionsBytes = directorySize(at: sessionsRoot)
+    clipsBytes = directorySize(at: clipsRoot)
+  }
+
+  func clearSessions() {
+    clearContents(of: sessionsRoot, label: "sessions")
+  }
+
+  func clearClips() {
+    clearContents(of: clipsRoot, label: "CLIPS")
+  }
+
+  private func clearContents(of directory: URL, label: String) {
+    do {
+      guard fileManager.fileExists(atPath: directory.path) else {
+        cleanupMessage = "No \(label) storage to clear."
+        refresh()
+        return
+      }
+      let children = try fileManager.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: nil,
+        options: [.skipsHiddenFiles]
+      )
+      for child in children {
+        try fileManager.removeItem(at: child)
+      }
+      cleanupMessage = "Cleared \(label) storage."
+    } catch {
+      cleanupMessage = "Could not clear \(label): \(error.localizedDescription)"
+    }
+    refresh()
+  }
+
+  private func directorySize(at root: URL) -> Int64 {
+    guard let enumerator = fileManager.enumerator(
+      at: root,
+      includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+      options: [.skipsHiddenFiles]
+    ) else {
+      return 0
+    }
+
+    var total: Int64 = 0
+    for case let fileURL as URL in enumerator {
+      guard
+        let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+        values.isRegularFile == true
+      else {
+        continue
+      }
+      total += Int64(values.fileSize ?? 0)
+    }
+    return total
+  }
+
+  private static let byteCountFormatter: ByteCountFormatter = {
+    let formatter = ByteCountFormatter()
+    formatter.allowedUnits = [.useKB, .useMB, .useGB]
+    formatter.countStyle = .file
+    return formatter
+  }()
+}
+
 struct CepessaSessionsSettingsPage: View {
+  @StateObject private var storageModel = CepessaStorageSettingsModel()
   @AppStorage("cepessa.sessions.keepAudio") private var keepAudio = true
   @AppStorage("cepessa.sessions.preferredTranscriptLanguage") private var transcriptLanguage =
     "Mixed"
   @AppStorage("cepessa.sessions.transcriptionSpeedMode") private var transcriptionSpeedMode =
     "Balanced"
-  @AppStorage("cepessa.sessions.preferredRecapStyle") private var recapStyle = "Structured recap"
   @AppStorage(CepessaSessionFloatingBarPreferences.enabledKey) private var floatingBarEnabled =
     true
   @State private var openSettingsPickerTitle: String?
@@ -1713,12 +1819,9 @@ struct CepessaSessionsSettingsPage: View {
               pickerRow(
                 title: "Transcription speed", value: $transcriptionSpeedMode,
                 options: ["Fast draft", "Balanced", "Most accurate"])
-              pickerRow(
-                title: "Recap style", value: $recapStyle,
-                options: ["Structured recap", "Concise recap", "Action items only"])
 
               Text(
-                "Fast draft starts with lighter local models when available. Hebrew-first and English-first skip repeated language detection; Mixed keeps bilingual detection on."
+                "Fast draft starts with lighter local models when available. Hebrew-first and English-first add a language hint while keeping bilingual detection on."
               )
               .scaledFont(size: 12)
               .foregroundStyle(CepessaColors.textSecondary)
@@ -1739,7 +1842,7 @@ struct CepessaSessionsSettingsPage: View {
               .toggleStyle(.switch)
 
               Text(
-                "A draggable recording control appears while capture is live. The status bar still handles transcription and recap processing."
+                "A draggable recording control appears while capture is live. The status bar still shows recording and transcription progress."
               )
               .scaledFont(size: 12)
               .foregroundStyle(CepessaColors.textSecondary)
@@ -1768,22 +1871,57 @@ struct CepessaSessionsSettingsPage: View {
 
           settingsCard(title: "Local storage") {
             VStack(alignment: .leading, spacing: 12) {
-              Text("Sessions, transcripts, recaps, audio, and attachments stay here by default.")
+              Text("Sessions, transcripts, CLIPS, audio, and attachments stay on this Mac by default.")
                 .scaledFont(size: 12)
                 .foregroundStyle(CepessaColors.textSecondary)
 
-              Text(storageRoot.path)
-                .scaledFont(size: 12)
-                .foregroundStyle(CepessaColors.textSecondary)
-                .textSelection(.enabled)
+              storageUsageRow(
+                title: "Sessions",
+                detail: storageModel.sessionsRoot.path,
+                size: storageModel.sessionsSizeText
+              )
+
+              storageUsageRow(
+                title: "CLIPS",
+                detail: storageModel.clipsRoot.path,
+                size: storageModel.clipsSizeText
+              )
+
+              storageUsageRow(
+                title: "Total",
+                detail: "Local Cepessa storage",
+                size: storageModel.totalSizeText
+              )
 
               HStack(spacing: 10) {
                 settingsAction(title: "Reveal Sessions Folder") {
-                  NSWorkspace.shared.activateFileViewerSelecting([storageRoot])
+                  NSWorkspace.shared.activateFileViewerSelecting([storageModel.sessionsRoot])
+                }
+                settingsAction(title: "Reveal CLIPS Folder") {
+                  NSWorkspace.shared.activateFileViewerSelecting([storageModel.clipsRoot])
                 }
                 settingsAction(title: "Reveal Models Folder") {
                   NSWorkspace.shared.activateFileViewerSelecting([modelsRoot])
                 }
+              }
+
+              HStack(spacing: 10) {
+                settingsAction(title: "Refresh Storage") {
+                  storageModel.refresh()
+                }
+                settingsAction(title: "Clear Sessions") {
+                  storageModel.clearSessions()
+                  CepessaSessionsStore.shared.model.loadStoredSessions()
+                }
+                settingsAction(title: "Clear CLIPS") {
+                  storageModel.clearClips()
+                }
+              }
+
+              if let cleanupMessage = storageModel.cleanupMessage {
+                Text(cleanupMessage)
+                  .scaledFont(size: 12, weight: .semibold)
+                  .foregroundStyle(CepessaColors.textSecondary)
               }
             }
           }
@@ -1794,6 +1932,7 @@ struct CepessaSessionsSettingsPage: View {
     .onAppear {
       CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
       CepessaSessionStatusBarController.shared.connect(model: CepessaSessionsStore.shared.model)
+      storageModel.refresh()
     }
     .onChange(of: floatingBarEnabled) { _, _ in
       CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
@@ -1804,10 +1943,6 @@ struct CepessaSessionsSettingsPage: View {
         openSettingsPickerTitle = nil
       }
     }
-  }
-
-  private var storageRoot: URL {
-    fileLayout.sessionsDirectory
   }
 
   private var modelsRoot: URL {
@@ -1944,6 +2079,29 @@ struct CepessaSessionsSettingsPage: View {
         .clipShape(Capsule())
     }
     .buttonStyle(CepessaPressStyle(scale: 0.975))
+  }
+
+  private func storageUsageRow(title: String, detail: String, size: String) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 12) {
+      VStack(alignment: .leading, spacing: 3) {
+        Text(title)
+          .scaledFont(size: 13, weight: .semibold)
+          .foregroundStyle(CepessaColors.textPrimary)
+        Text(detail)
+          .scaledFont(size: 11)
+          .foregroundStyle(CepessaColors.textSecondary)
+          .lineLimit(1)
+          .truncationMode(.middle)
+          .textSelection(.enabled)
+      }
+      Spacer(minLength: 0)
+      Text(size)
+        .scaledFont(size: 13, weight: .semibold, design: .monospaced)
+        .foregroundStyle(CepessaColors.textPrimary)
+    }
+    .padding(12)
+    .background(CepessaColors.backgroundRaised.opacity(0.72))
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
   }
 
   private func openSystemSettings(anchor: String) {

@@ -39,11 +39,18 @@ struct LocalSessionContentClassifier: LocalSessionContentClassifying {
 
   func classifyContent(for session: LocalSession) async -> LocalSessionContentClassification {
     let input = Self.makeInput(from: session)
+    let deterministicClassification = fallback.classifyContent(for: input)
 
     if let modelClient {
       do {
         let classification = try await modelClient.classifyContent(for: input)
-        if classification.isUsable {
+        if classification.isUsable,
+          !Self.modelClassificationIsContradicted(
+            classification,
+            by: deterministicClassification,
+            input: input
+          )
+        {
           return classification
         }
       } catch {
@@ -51,7 +58,7 @@ struct LocalSessionContentClassifier: LocalSessionContentClassifying {
       }
     }
 
-    return fallback.classifyContent(for: input)
+    return deterministicClassification
   }
 
   static func defaultModelClient() -> (any LocalSessionContentClassificationModelProviding)? {
@@ -82,6 +89,36 @@ struct LocalSessionContentClassifier: LocalSessionContentClassifying {
       captureArtifactCount: session.captureArtifacts.count,
       hasSystemAudio: hasSystemAudio
     )
+  }
+
+  private static func modelClassificationIsContradicted(
+    _ classification: LocalSessionContentClassification,
+    by deterministicClassification: LocalSessionContentClassification,
+    input: LocalSessionContentClassificationInput
+  ) -> Bool {
+    guard deterministicClassification.type == .meeting,
+      deterministicClassification.confidence >= 0.7
+    else {
+      return false
+    }
+
+    let sourceSpeakerCount = sourceSpeakerLabels(from: input.transcriptCandidates).count
+    guard sourceSpeakerCount >= 2 else { return false }
+
+    switch classification.type {
+    case .voiceNote:
+      return true
+    case .videoCommentary:
+      return deterministicClassification.confidence >= 0.8
+    case .meeting, .generalTranscript:
+      return false
+    }
+  }
+
+  private static func sourceSpeakerLabels(
+    from candidates: [LocalSessionContentClassificationInput.TranscriptCandidate]
+  ) -> Set<String> {
+    Set(candidates.compactMap { normalizedSourceSpeakerLabel($0.speaker) })
   }
 }
 
@@ -164,6 +201,7 @@ struct LocalSessionEmbeddedContentClassificationClient:
 
     return lines.joined(separator: "\n")
   }
+
 }
 
 private struct LocalSessionContentClassificationPayload: Codable {
@@ -208,7 +246,7 @@ private struct LocalSessionDeterministicContentClassifier {
         patterns: [
           "meeting", "sync", "call", "agenda", "participants", "decision", "decided",
           "action item", "owner", "we agreed", "follow up", "פגישה", "שיחה", "סיכמנו",
-          "החלטנו", "משימות",
+          "החלטנו", "משימות", "מה אנחנו רוצים", "צוות", "לשתף", "לקבוע", "בהמשך",
         ])
     let voiceNoteScore =
       (speakerCount <= 1 ? 1 : 0)
@@ -265,18 +303,7 @@ private struct LocalSessionDeterministicContentClassifier {
   private func meaningfulSpeakers(
     from candidates: [LocalSessionContentClassificationInput.TranscriptCandidate]
   ) -> Set<String> {
-    Set(candidates.compactMap { candidate in
-      let speaker = candidate.speaker.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !speaker.isEmpty else { return nil }
-      let lowercased = speaker.lowercased()
-      let genericLabels: Set<String> = [
-        "speaker", "speaker 1", "speaker 2", "you", "transcript", "unknown",
-        "remote speaker", "local speaker", "microphone", "mic", "system audio",
-      ]
-      guard !genericLabels.contains(lowercased) else { return nil }
-      guard !lowercased.hasPrefix("speaker ") else { return nil }
-      return speaker
-    })
+    Set(candidates.compactMap { normalizedSourceSpeakerLabel($0.speaker) })
   }
 
   private func score(_ corpus: String, patterns: [String]) -> Int {
@@ -284,6 +311,18 @@ private struct LocalSessionDeterministicContentClassifier {
       partialResult + (corpus.contains(pattern.lowercased()) ? 1 : 0)
     }
   }
+}
+
+private func normalizedSourceSpeakerLabel(_ speaker: String) -> String? {
+  let normalized = speaker.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+  guard !normalized.isEmpty else { return nil }
+
+  let ignoredLabels: Set<String> = [
+    "transcript", "unknown", "microphone", "mic", "system", "system audio", "local model",
+  ]
+  guard !ignoredLabels.contains(normalized) else { return nil }
+  guard !normalized.hasPrefix("system ") else { return nil }
+  return normalized
 }
 
 extension LocalSessionContentClassification {

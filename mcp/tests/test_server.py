@@ -1,32 +1,79 @@
-from mcp_server_omi.server import get_memories, get_conversations, MemoryCategory
+import logging
+
+from mcp_server_omi import server
+from mcp_server_omi.server import (
+    ConversationCategory,
+    MemoryCategory,
+    get_conversations,
+    get_memories,
+)
 
 
-def test_get_memories(uid):
-    # Test getting memories with default parameters
-    result = get_memories(uid)
-    assert isinstance(result, list)
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
 
-    # Test getting memories with specific limit
-    result = get_memories(uid, limit=5)
-    assert isinstance(result, list)
-    assert len(result) <= 5
-
-    # Test getting memories with categories filter
-    categories = [MemoryCategory.personal, MemoryCategory.work]
-    result = get_memories(uid, categories=categories)
-    assert isinstance(result, list)
+    def json(self):
+        return self.payload
 
 
-def test_get_conversations(uid):
-    # Test getting conversations with default parameters
-    result = get_conversations(uid)
-    assert isinstance(result, list)
+def test_get_memories_passes_pagination_and_categories(monkeypatch):
+    calls = []
 
-    # Test getting conversations with include_discarded
-    result = get_conversations(uid, include_discarded=True)
-    assert isinstance(result, list)
+    def fake_get(url, params, headers):
+        calls.append({"url": url, "params": params, "headers": headers})
+        return FakeResponse([{"id": "memory-1", "content": "Remember this"}])
 
-    # Test getting conversations with specific limit
-    result = get_conversations(uid, limit=10)
-    assert isinstance(result, list)
-    assert len(result) <= 10
+    monkeypatch.setattr(server.requests, "get", fake_get)
+
+    result = get_memories(
+        logging.getLogger("test"),
+        "test-key",
+        offset=2,
+        limit=5,
+        categories=[MemoryCategory.core, MemoryCategory.work],
+    )
+
+    assert result == [{"id": "memory-1", "content": "Remember this"}]
+    assert calls == [
+        {
+            "url": f"{server.base_url}memories",
+            "params": {"offset": 2, "limit": 5, "categories": "core,work"},
+            "headers": {"Authorization": "Bearer test-key"},
+        }
+    ]
+
+
+def test_get_conversations_passes_date_filters_and_categories(monkeypatch):
+    calls = []
+
+    def fake_get(url, params, headers):
+        calls.append({"url": url, "params": params, "headers": headers})
+        return FakeResponse([{"id": "conversation-1", "title": "Demo"}])
+
+    monkeypatch.setattr(server.requests, "get", fake_get)
+
+    result = get_conversations(
+        logging.getLogger("test"),
+        "test-key",
+        start_date="2026-06-01",
+        end_date="2026-06-02",
+        categories=[ConversationCategory.business],
+        limit=10,
+        offset=3,
+    )
+
+    assert result == [{"id": "conversation-1", "title": "Demo"}]
+    assert calls == [
+        {
+            "url": f"{server.base_url}conversations",
+            "params": {
+                "limit": 10,
+                "offset": 3,
+                "start_date": "2026-06-01T00:00:00",
+                "end_date": "2026-06-02T23:59:59",
+                "categories": "business",
+            },
+            "headers": {"Authorization": "Bearer test-key"},
+        }
+    ]

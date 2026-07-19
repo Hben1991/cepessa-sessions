@@ -39,7 +39,7 @@ struct LocalSessionRecapGenerator: LocalSessionRecapGenerating {
     if let modelClient {
       do {
         let recap = try await modelClient.generateRecap(for: input)
-        if recap.isMeaningful {
+        if recap.isMeaningful, recap.isGrounded(in: input) {
           return recap
         }
       } catch {
@@ -74,6 +74,10 @@ struct LocalSessionRecapGenerator: LocalSessionRecapGenerating {
   static func defaultModelClient() -> (any LocalSessionRecapModelProviding)? {
     LocalSessionEmbeddedRecapClient()
   }
+
+  static func deterministicRecap(for session: LocalSession) -> LocalSessionRecap {
+    LocalSessionDeterministicRecapGenerator().generateRecap(for: makeInput(from: session))
+  }
 }
 
 struct LocalSessionEmbeddedRecapClient: LocalSessionRecapModelProviding, Sendable {
@@ -102,31 +106,31 @@ struct LocalSessionEmbeddedRecapClient: LocalSessionRecapModelProviding, Sendabl
 
   private static func prompt(for input: LocalSessionRecapGenerationInput) -> String {
     let transcript = transcriptContext(for: input)
-    let contentClassification = input.contentClassification
-    let contentType = contentClassification?.type ?? .generalTranscript
-    let contentInstructions = instructions(for: contentType)
+    let language = documentLanguage(for: input)
+    let appPrompt = LocalSessionMeetingPromptSettings.prompt(for: language)
+    let outputLanguage =
+      language == .hebrew
+      ? "Hebrew. Keep explicit names, product names, and short domain terms in their original language when needed."
+      : "English. Keep explicit names, product names, and short domain terms in their original language when needed."
 
     return """
-      You are creating a clear, practical brief from the recorded session material below.
+      You are creating a clear, practical meeting brief from the recorded session material below.
 
       Clean the transcript before summarizing it:
       - Remove noise, side conversations, repetitions, polite filler, irrelevant jokes, broken transcription fragments, and casual "thank you" exchanges.
       - Do not write a transcript.
       - Do not include raw conversation noise.
       - Keep only what matters for actual work.
-      - Do not frame the final brief as being about "the transcript"; write about the meeting, session, project, product, client, or source material when supported.
+      - Do not frame the final brief as being about "the transcript"; write about the meeting, project, product, client, or topic when supported.
 
-      The transcript was classified before this step.
-      Content type: \(contentType.displayTitle)
-      Classification confidence: \(classificationConfidenceText(contentClassification))
-      Classification rationale: \(classificationRationaleText(contentClassification))
+      Treat this input as a meeting transcript. Do not classify it as a voice note, video commentary, test recording, or general transcript in the generated document.
+      Output language: \(outputLanguage)
 
-      \(contentInstructions)
+      App-level meeting document prompt:
+      \(appPrompt)
 
       Not every section must be full. Include only what is supported by the source material.
-      Match the spirit of the recording itself unless the user supplied a different instruction.
       Prefer a compact useful brief over a long exhaustive report.
-      Do not force meeting-style or follow-up sections when the recording is a test, video, note, or ambient source capture.
       Use empty arrays for decisions, actionItems, openQuestions, or nextSteps when the source does not clearly support them.
       Separate urgent fixes from next-iteration improvements when that distinction exists.
       Use a professional, clear, direct tone that is not overly formal.
@@ -134,29 +138,62 @@ struct LocalSessionEmbeddedRecapClient: LocalSessionRecapModelProviding, Sendabl
       Include a compact people lens inline: mention who attended or was referenced, who owns work, and who raised a key topic only when relevant.
       Do not infer real attendee names from generic speaker labels such as "You", "Remote speaker", "Speaker 1", or "Transcript".
       Do not invent project names, roles, attendees, or responsibilities.
+      If speaker identity is unclear, describe ownership as "Unassigned" in English or "לא שויך" in Hebrew instead of inventing a person.
 
       Return only valid JSON. No markdown. No commentary.
       The JSON object must match this shape:
       {
-        "overview": "concise paragraph with purpose and current state",
-        "keyPoints": [{"title":"Problems / context / important points","summary":"...","bullets":["..."],"startOffsetSeconds":0,"endOffsetSeconds":0}],
-        "decisions": [{"title":"Decision","summary":"...","bullets":["..."],"startOffsetSeconds":0,"endOffsetSeconds":0}],
-        "actionItems": [{"title":"Owner/person/team","summary":"urgent fixes and next-iteration tasks","bullets":["..."],"startOffsetSeconds":0,"endOffsetSeconds":0}],
-        "openQuestions": [{"title":"Open question","summary":"...","bullets":["..."],"startOffsetSeconds":0,"endOffsetSeconds":0}],
-        "nextSteps": [{"title":"Professional recommendation","summary":"short professional recommendation","bullets":["..."],"startOffsetSeconds":0,"endOffsetSeconds":0}]
+        "overview": "",
+        "keyPoints": [{"title":"","summary":"","bullets":[""],"startOffsetSeconds":0,"endOffsetSeconds":0}],
+        "decisions": [{"title":"","summary":"","bullets":[""],"startOffsetSeconds":0,"endOffsetSeconds":0}],
+        "actionItems": [{"title":"","summary":"","bullets":[""],"startOffsetSeconds":0,"endOffsetSeconds":0}],
+        "openQuestions": [{"title":"","summary":"","bullets":[""],"startOffsetSeconds":0,"endOffsetSeconds":0}],
+        "nextSteps": [{"title":"","summary":"","bullets":[""],"startOffsetSeconds":0,"endOffsetSeconds":0}]
       }
 
-      Action item titles must be the Owner/person/team when clear. Use "Team" or "Unassigned follow-up" when ownership is unclear.
+      Replace the empty strings with real content grounded in the source. Leave an array empty when the source does not support that section.
+
+      Extract the relevant meeting brief:
+      - meeting purpose
+      - project/client/product name when explicitly present in the session title or transcript
+      - current state / general context
+      - problems raised
+      - decisions made
+      - action items by person or team when owners are clear
+      - open questions
+      - a short professional recommendation for what to do next
+
+      Action item titles must be the Owner/person/team when clear. Use "Unassigned" or "לא שויך" when ownership is unclear.
 
       Session title: \(input.title)
       Attachment count: \(input.attachmentCount)
       Capture artifact count: \(input.captureArtifactCount)
+      Source speaker labels: \(speakerLabelSummary(for: input))
 
       Transcript:
       \(transcript)
 
-      Final instruction: Return only valid JSON matching the schema above. Write a cleaned practical brief for the detected content type, not a transcript or a note about a transcript. Leave unsupported arrays empty. No markdown fences. No commentary.
+      Repeat the required JSON shape exactly:
+      {"overview":"","keyPoints":[{"title":"","summary":"","bullets":[""],"startOffsetSeconds":0,"endOffsetSeconds":0}],"decisions":[{"title":"","summary":"","bullets":[""],"startOffsetSeconds":0,"endOffsetSeconds":0}],"actionItems":[{"title":"","summary":"","bullets":[""],"startOffsetSeconds":0,"endOffsetSeconds":0}],"openQuestions":[{"title":"","summary":"","bullets":[""],"startOffsetSeconds":0,"endOffsetSeconds":0}],"nextSteps":[{"title":"","summary":"","bullets":[""],"startOffsetSeconds":0,"endOffsetSeconds":0}]}
+
+      Final instruction: Return only valid JSON matching the repeated schema immediately above. Replace the empty strings with real source-grounded content. Write a cleaned practical meeting brief, not a transcript or a note about a transcript. Leave unsupported arrays empty. No markdown fences. No commentary.
       """
+  }
+
+  private static func documentLanguage(
+    for input: LocalSessionRecapGenerationInput
+  ) -> LocalSessionDocumentLanguage {
+    let corpus = ([input.title] + input.transcriptCandidates.prefix(120).map(\.text))
+      .joined(separator: " ")
+    return corpus.containsHebrewScript ? .hebrew : .english
+  }
+
+  private static func speakerLabelSummary(for input: LocalSessionRecapGenerationInput) -> String {
+    let labels = input.transcriptCandidates.map(\.speaker)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+    let uniqueLabels = Array(NSOrderedSet(array: labels)).compactMap { $0 as? String }
+    return uniqueLabels.isEmpty ? "not available" : uniqueLabels.prefix(8).joined(separator: ", ")
   }
 
   private static func instructions(for contentType: LocalSessionContentType) -> String {
@@ -225,34 +262,48 @@ struct LocalSessionEmbeddedRecapClient: LocalSessionRecapModelProviding, Sendabl
 
   private static func transcriptContext(for input: LocalSessionRecapGenerationInput) -> String {
     let candidates = input.transcriptCandidates
-    let maxHeadSegments = 70
-    let maxTailSegments = 30
-    let maxSegmentTextCharacters = 220
-    let selectedCandidates: [LocalSessionRecapGenerationInput.TranscriptCandidate]
+    guard !candidates.isEmpty else { return "" }
 
-    if candidates.count > maxHeadSegments + maxTailSegments {
-      selectedCandidates =
-        Array(candidates.prefix(maxHeadSegments))
-        + Array(candidates.suffix(maxTailSegments))
-    } else {
-      selectedCandidates = candidates
-    }
-
-    var lines = selectedCandidates.map { candidate in
-      let offset = String(format: "%.1f", candidate.sessionOffset)
-      let text = truncatedText(candidate.text, limit: maxSegmentTextCharacters)
-      return "[\(offset)s] \(candidate.speaker): \(text)"
-    }
-
-    if candidates.count > selectedCandidates.count {
-      let omittedCount = candidates.count - selectedCandidates.count
-      lines.insert(
-        "[\(omittedCount) middle transcript segments omitted to keep local generation inside the model window.]",
-        at: min(maxHeadSegments, lines.count)
+    let maxTotalCharacters = 24_000
+    let minimumSegmentCharacters = 24
+    let maximumSegmentCharacters = 180
+    let estimatedLineOverhead = 26
+    let perSegmentBudget = max(
+      minimumSegmentCharacters,
+      min(
+        maximumSegmentCharacters,
+        maxTotalCharacters / max(1, candidates.count) - estimatedLineOverhead
       )
+    )
+
+    var lines = [
+      "[Full transcript coverage: all \(candidates.count) transcript segments are represented below. Long lines may be clipped for context budget, but the model should use the entire script.]"
+    ]
+    lines.append(
+      contentsOf: candidates.map { candidate in
+        let offset = String(format: "%.1f", candidate.sessionOffset)
+        let text = truncatedText(candidate.text, limit: perSegmentBudget)
+        return "[\(offset)s] \(candidate.speaker): \(text)"
+      }
+    )
+
+    var context = lines.joined(separator: "\n")
+    if context.count > maxTotalCharacters {
+      let tighterBudget = max(16, perSegmentBudget / 2)
+      lines = [
+        "[Full transcript coverage: all \(candidates.count) transcript segments are represented below in a tighter form so the entire script remains visible to the local model.]"
+      ]
+      lines.append(
+        contentsOf: candidates.map { candidate in
+          let offset = String(format: "%.0f", candidate.sessionOffset)
+          let text = truncatedText(candidate.text, limit: tighterBudget)
+          return "[\(offset)s] \(candidate.speaker): \(text)"
+        }
+      )
+      context = lines.joined(separator: "\n")
     }
 
-    return lines.joined(separator: "\n")
+    return context
   }
 
   private static func truncatedText(_ text: String, limit: Int) -> String {
@@ -270,7 +321,7 @@ struct LocalSessionDeterministicRecapGenerator {
   func generateRecap(for input: LocalSessionRecapGenerationInput) -> LocalSessionRecap {
     let candidates = normalizedCandidates(from: input)
     let summary = synthesizedSummary(for: input, candidates: candidates)
-    let contentType = input.contentClassification?.type ?? .generalTranscript
+    let contentType = input.contentClassification?.type ?? .meeting
     let usesHebrewDocument = summary.overview.containsHebrewScript
     let overviewSection = section(
       kind: .overview,
@@ -421,14 +472,18 @@ struct LocalSessionDeterministicRecapGenerator {
     let activeThemes = themes.isEmpty ? [.generalDiscussion] : themes
     let workContextName =
       explicitProjectName(for: input, candidates: candidates) ?? meaningfulSessionTitle(input.title)
-    let contentType = input.contentClassification?.type ?? .generalTranscript
+    let contentType = input.contentClassification?.type ?? .meeting
     if contentType == .videoCommentary,
       candidates.contains(where: { $0.text.containsHebrewScript })
     {
       return hebrewVideoSummary(from: candidates)
     }
+    if contentType == .meeting,
+      candidates.contains(where: { $0.text.containsHebrewScript })
+    {
+      return hebrewMeetingSummary(from: candidates)
+    }
     if activeThemes == [.generalDiscussion],
-      contentType == .generalTranscript,
       candidates.contains(where: { $0.text.containsHebrewScript })
     {
       return hebrewGeneralSummary(from: candidates)
@@ -507,6 +562,148 @@ struct LocalSessionDeterministicRecapGenerator {
     )
   }
 
+  private func hebrewMeetingSummary(from candidates: [Candidate]) -> DeterministicRecapSummary {
+    let corpus = candidates.map(\.text).joined(separator: " ").lowercased()
+    var topics: [String] = []
+    var keyPoints: [String] = []
+    var actionItems: [String] = []
+    var openQuestions: [String] = []
+
+    if containsAnyThemeKeyword(corpus, ["סטארט", "מה אנחנו בונים", "מוצר", "רעיון"]) {
+      topics.append("כיוון המוצר וההזדמנות העסקית")
+      keyPoints.append("הדיון עסק בחידוד כיוון המוצר: איזה ערך הוא נותן, למי, ומה ההזדמנות העסקית שצריך להוכיח.")
+      actionItems.append("להפוך את כיוון המוצר לרשימת תרחישי שימוש ותעדוף קצרה.")
+      openQuestions.append("איזה תרחיש שימוש ראשון צריך להוכיח לפני שמרחיבים את המוצר?")
+    }
+    if containsAnyThemeKeyword(
+      corpus,
+      ["עסק", "בעל העסק", "תקציב", "תזרים", "פיננס", "סוכנים", "טלפון עסקי", "צ'אט עסקי", "מידע"]
+    ) {
+      topics.append("סוכן עסקי וניהול מידע לבעלי עסקים")
+      keyPoints.append("עלה צורך לתת לבעל העסק תמונת מצב ברורה מתוך מידע שמפוזר היום בין שיחות, צ'אט, דשבורדים וכלים פיננסיים.")
+      actionItems.append("להגדיר את זרימת העבודה של הסוכן העסקי: אילו שאלות הוא עונה עליהן, מאיפה מגיע המידע, ומה הפלט המצופה.")
+      openQuestions.append("אילו נתונים הסוכן העסקי חייב לדעת לענות עליהם כבר בגרסה הראשונה?")
+    }
+    if containsAnyThemeKeyword(corpus, ["דשבורד", "מבט", "בריא", "אדום", "כתום", "ירוק"]) {
+      topics.append("דשבורד ותמונת מצב עסקית")
+      keyPoints.append("הרעיון של דשבורד עסקי עלה סביב מדדי בריאות פשוטים כמו תקציב, תזרים וסימוני מצב שקל להבין מהר.")
+      actionItems.append("למפות את מצבי הדשבורד לרשימה קצרה של אינדיקציות עסקיות ברורות.")
+    }
+    if containsAnyThemeKeyword(corpus, ["רענון", "אתר", "האתר", "המלצות", "להפעיל", "לשנות"]) {
+      topics.append("רענון האתר וניהול התוכן")
+      keyPoints.append("חלק מהדיון עסק ברענון האתר, עדכון תכנים והסבר ברור יותר של אופן ניהול המלצות או אזורי תוכן.")
+      actionItems.append("להכין רשימת עדכוני אתר קצרה: תכנים, המלצות, טפסים, דומיין ובעלות על כל משימה.")
+      openQuestions.append("אילו עדכוני אתר דחופים עכשיו ואילו שייכים לאיטרציה מאוחרת יותר?")
+    }
+    if containsAnyThemeKeyword(corpus, ["webflow", "make", "monday", "דומיין", "שרת", "אחסון", "תעודת זהות", "אבטחה"]) {
+      topics.append("זרימת מידע בין Webflow, Make, Monday ותשתיות האתר")
+      keyPoints.append("האזכורים של Webflow, Make, Monday, אחסון ודומיין מצביעים על צורך להסביר בצורה נקייה איך מידע עובר בתוך מערך האתר.")
+      actionItems.append("לתעד את זרימת המידע בין Webflow, Make, Monday, האחסון ונקודות הדומיין/אבטחה.")
+      openQuestions.append("איזה מידע נשמר או עובר בכל שלב, ומי אחראי לתשובת האבטחה?")
+    }
+    if containsAnyThemeKeyword(corpus, ["גלילה", "scroll", "קופצת", "לאט", "איטי"]) {
+      topics.append("ביצועי האתר וחוויית הגלילה")
+      keyPoints.append("עלו בעיות של גלילה, איטיות או קפיצות באתר שפוגעות בתחושת השליטה של המשתמש.")
+      actionItems.append("לשחזר את בעיות הגלילה ולהחליט אם מדובר בביצועים, פריסה או אינטראקציה.")
+    }
+    if containsAnyThemeKeyword(corpus, ["analytics", "אנליטיקס", "clarity", "mixpanel"]) {
+      topics.append("מדידה ואנליטיקס להתנהגות משתמשים")
+      keyPoints.append("עלה צורך לחבר Analytics כדי להבין התנהגות משתמשים אמיתית לפני החלטות אתר רחבות.")
+      actionItems.append("לבחור את כלי המדידה ולחבר אותו לפני סבב העיצוב או התוכן הבא.")
+    }
+    if containsAnyThemeKeyword(corpus, ["coming soon", "סימולציות", "ראיונות", "interview simulation"]) {
+      topics.append("אזור סימולציות הראיונות")
+      keyPoints.append("אזור סימולציות הראיונות דורש סטטוס וקופי ברורים יותר, כולל מצב coming soon.")
+      actionItems.append("לחדד את אזור סימולציות הראיונות כדי שהמשתמש יבין מה זמין עכשיו ומה יגיע בהמשך.")
+    }
+
+    let overview: String
+    if keyPoints.isEmpty {
+      overview =
+        "הפגישה כללה דיון עבודה שדורש זיקוק למשימות המשך. לא זוהה נושא מרכזי מספיק ברור, ולכן המסמך מתמקד רק בנקודות שנתמכות בפגישה."
+      keyPoints = cleanHebrewMeetingBullets(from: candidates, matching: .keyPoint)
+      if keyPoints.isEmpty {
+        keyPoints = ["הפגישה העלתה נושאי המשך, אך אין מספיק חומר יציב כדי לנסח מסקנות רחבות מעבר למה שנאמר בבירור."]
+      }
+      actionItems = cleanHebrewMeetingBullets(from: candidates, matching: .action)
+      if actionItems.isEmpty {
+        actionItems = ["להוציא מהפגישה רשימת משימות קצרה רק אחרי בדיקה ידנית של הנקודות החשובות."]
+      }
+    } else {
+      overview =
+        "הפגישה התמקדה ב\(deduplicatedBullets(from: topics).prefix(3).joined(separator: ", ")). התוצרים החשובים הם חידוד הכיוון, סגירת שאלות פתוחות והפיכת הנושאים למשימות עבודה ברורות."
+    }
+
+    if containsAnyThemeKeyword(corpus, ["אסכם", "אני אסכם", "נושאים שדיברנו"]) {
+      actionItems.append("לסכם את נושאי הפגישה לרשימת עבודה מסודרת.")
+    }
+    if containsAnyThemeKeyword(corpus, ["תפתח טראפ", "תפתח", "ערוץ", "תשלח הודעה"]) {
+      actionItems.append("לפתוח ערוץ עבודה ייעודי ולהמשיך לרכז בו החלטות, משימות ושאלות המשך.")
+    }
+    if containsAnyThemeKeyword(corpus, ["לקבוע עוד פגישה", "עוד פגישה", "פגישת המשך"]) {
+      actionItems.append("לקבוע פגישת המשך אם צריך לסגור החלטות או משימות.")
+    }
+
+    if openQuestions.isEmpty {
+      openQuestions = explicitHebrewOpenQuestions(from: candidates)
+    }
+
+    return DeterministicRecapSummary(
+      overview: overview,
+      keyPoints: deduplicatedBullets(from: keyPoints),
+      decisions: [],
+      actionItems: deduplicatedBullets(from: actionItems),
+      openQuestions: deduplicatedBullets(from: openQuestions),
+      nextSteps: ["להפוך את הנקודות החשובות לרשימת משימות קצרה עם בעלים, סדר עדיפויות ותאריך בדיקה."]
+    )
+  }
+
+  private func cleanHebrewMeetingBullets(
+    from candidates: [Candidate],
+    matching score: Candidate.Score
+  ) -> [String] {
+    let bullets = candidates.compactMap { candidate -> String? in
+      guard candidate.score.contains(score) else { return nil }
+      return cleanHebrewMeetingBullet(candidate.text)
+    }
+
+    return Array(deduplicatedBullets(from: bullets).prefix(4))
+  }
+
+  private func explicitHebrewOpenQuestions(from candidates: [Candidate]) -> [String] {
+    let questionTerms = ["?", "איך ", "מה ", "למה ", "מתי ", "כמה "]
+    let bullets = candidates.compactMap { candidate -> String? in
+      guard let text = cleanHebrewMeetingBullet(candidate.text) else { return nil }
+      let lowercased = text.lowercased()
+      guard questionTerms.contains(where: { lowercased.contains($0) }) else { return nil }
+      guard !lowercased.contains("צריך להבין") || text.contains("?") else { return nil }
+      return text
+    }
+
+    return Array(deduplicatedBullets(from: bullets).prefix(3))
+  }
+
+  private func cleanHebrewMeetingBullet(_ rawText: String) -> String? {
+    let text = rawText
+      .replacingOccurrences(of: "\n", with: " ")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard text.containsHebrewScript, text.count >= 22 else { return nil }
+
+    let lowercased = text.lowercased()
+    let noiseTerms = [
+      "מה נשמע", "מה קורה", "תודה", "שלום", "אהלן", "אוקיי", "בסדר", "לא יודע",
+      "לא נראה לי", "מקווה שלא", "תזיין", "זיין",
+    ]
+    guard !noiseTerms.contains(where: { lowercased == $0 || lowercased.contains("\($0).") })
+    else {
+      return nil
+    }
+    guard !lowercased.contains("preview ready") else { return nil }
+    guard !lowercased.contains("markdown") else { return nil }
+
+    return text
+  }
+
   private func hebrewGeneralSummary(from candidates: [Candidate]) -> DeterministicRecapSummary {
     let corpus = candidates.map(\.text).joined(separator: " ")
     let mentionsLocalModel = candidates.contains { candidate in
@@ -545,22 +742,48 @@ struct LocalSessionDeterministicRecapGenerator {
       )
     }
 
-    let usefulSentences = candidates.map(\.text)
-      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-      .filter { !$0.isEmpty }
-      .prefix(4)
-    let joined = usefulSentences.joined(separator: " ")
-    let overview = joined.isEmpty
-      ? "המסמך מסכם מקור בעברית ומרכז את הנקודות שדורשות המשך טיפול."
-      : "המסמך עוסק ב\(joined)"
+    let salientCandidates = candidates.filter(\.isSalient)
+    let actionCount = salientCandidates.filter { $0.score.contains(.action) }.count
+    let questionCount = salientCandidates.filter { $0.score.contains(.question) }.count
+    let decisionCount = salientCandidates.filter { $0.score.contains(.decision) }.count
+    let sourceLabel =
+      candidates.count >= 8 ? "תמלול בעברית של שיחה" : "תמלול בעברית של הקלטה קצרה"
+
+    var keyPoints: [String] = []
+    if actionCount > 0 {
+      keyPoints.append("עולות מהמקור נקודות שמרמזות על פעולות המשך או שינויים שצריך להפוך למשימות מסודרות.")
+    }
+    if questionCount > 0 {
+      keyPoints.append("יש במקור אי-בהירויות ושאלות פתוחות שדורשות הבהרה לפני שמסיקים מסקנות.")
+    }
+    if decisionCount > 0 {
+      keyPoints.append("מופיעים כיוונים והעדפות, אבל לא תמיד החלטות סופיות שאפשר לסגור עליהן.")
+    }
+    if keyPoints.isEmpty {
+      keyPoints.append("המקור כולל שיחה חופשית וחלקים רועשים, ולכן צריך לזקק ממנו רק את הנושאים שחוזרים בבירור.")
+    }
+
+    let decisions =
+      decisionCount > 0
+      ? ["יש רמזים לכיוון או העדפה, אך לא זוהתה החלטה סופית מספיק יציבה לפרסום כמסקנה."]
+      : ["לא זוהתה החלטה סופית מפורשת."]
+    let actionItems =
+      actionCount > 0
+      ? ["להוציא מהתמלול רק פעולות המשך ברורות ולנסח אותן כרשימת משימות נקייה."]
+      : ["לסנן את התמלול ולהשאיר רק נקודות עבודה או תובנות שאפשר להשתמש בהן."]
+    let openQuestions =
+      questionCount > 0
+      ? ["אילו מהשאלות שעלו בתמלול דורשות תשובה לפני שממשיכים הלאה?"]
+      : ["איזה חלקים במקור הם רעש, ואיזה חלקים באמת חשובים למסמך הסופי?"]
 
     return DeterministicRecapSummary(
-      overview: overview,
-      keyPoints: Array(usefulSentences),
-      decisions: ["לא זוהתה החלטה סופית מפורשת."],
-      actionItems: ["להפוך את הנקודות במסמך לרשימת משימות ברורה."],
-      openQuestions: ["אילו נקודות דורשות בדיקה או פעולה נוספת?"],
-      nextSteps: ["לעבור על המסמך ולחדד את הפעולות הבאות."]
+      overview:
+        "המסמך מבוסס על \(sourceLabel). הוא לא אמור לשחזר את המשפטים עצמם, אלא לזקק מתוכו נושאים, כוונות ופעולות המשך שאפשר לעבוד איתן.",
+      keyPoints: keyPoints,
+      decisions: decisions,
+      actionItems: actionItems,
+      openQuestions: openQuestions,
+      nextSteps: ["לבנות מהמקור מסמך קצר, נקי ומעשי שמדבר על התוכן ולא מעתיק את התמלול עצמו."]
     )
   }
 
@@ -631,7 +854,7 @@ struct LocalSessionDeterministicRecapGenerator {
   ) -> String {
     if contentType == .videoCommentary {
       switch kind {
-      case .overview: return "על מה המסמך"
+      case .overview: return "תקציר"
       case .keyPoints: return "מה מופיע בסרטון"
       case .decisions: return "מה אפשר להסיק"
       case .actionItem: return "מה כדאי לעשות עם זה"
@@ -642,10 +865,10 @@ struct LocalSessionDeterministicRecapGenerator {
     }
 
     switch kind {
-    case .overview: return "על מה המסמך"
-    case .keyPoints: return "נקודות חשובות"
-    case .decisions: return "מה הובן מהמקור"
-    case .actionItem: return "המשך טיפול"
+    case .overview: return "תקציר מנהלים"
+    case .keyPoints: return "נקודות מרכזיות"
+    case .decisions: return "החלטות"
+    case .actionItem: return "משימות להמשך"
     case .openQuestions: return "שאלות פתוחות"
     case .nextSteps: return "המשך מומלץ"
     case .notes: return "הערות"
@@ -668,12 +891,12 @@ struct LocalSessionDeterministicRecapGenerator {
     }
 
     switch kind {
-    case .keyPoints: return "הנקודות החשובות שעלו במסמך."
-    case .decisions: return "דברים שאפשר להבין מהמקור בלי להוסיף מידע חיצוני."
-    case .actionItem: return "פעולות המשך שנובעות מהמסמך."
-    case .openQuestions: return "שאלות שנותרו לבדיקה."
-    case .nextSteps: return "המשך פעולה מומלץ."
-    case .overview, .notes: return "תוכן מרכזי מתוך המסמך."
+    case .keyPoints: return "הנושאים המרכזיים שעלו בפגישה."
+    case .decisions: return "החלטות מפורשות או כיוונים שסוכמו בבירור."
+    case .actionItem: return "פעולות המשך שצריך לבצע."
+    case .openQuestions: return "נושאים שדורשים הבהרה לפני המשך עבודה."
+    case .nextSteps: return "המלצה מעשית להמשך."
+    case .overview, .notes: return "תוכן מרכזי מתוך הפגישה."
     }
   }
 
@@ -1020,8 +1243,53 @@ private enum SummaryTheme: CaseIterable {
 
   func matches(_ text: String) -> Bool {
     guard self != .generalDiscussion else { return false }
-    return keywords.contains { text.contains($0.lowercased()) }
+    let hasWebsiteContext = containsAnyThemeKeyword(
+      text,
+      ["באתר", "האתר", "עמוד", "דף", "webflow", "site", "page", "landing", "ux", "חוויית משתמש"]
+    )
+    let hasDesignContext = containsAnyThemeKeyword(
+      text,
+      ["עיצוב", "ויזואל", "צבע", "צבעוניות", "רקע", "ממשק", "design", "visual", "ui"]
+    )
+    let hasSimulationContext = containsAnyThemeKeyword(
+      text,
+      ["סימולציה", "סימולציות", "תרחיש", "תרחישים", "hr", "tech", "coming soon", "simulation"]
+    )
+
+    switch self {
+    case .sitePerformance:
+      return hasWebsiteContext
+        && containsAnyThemeKeyword(
+          text, ["לאט", "איטי", "תקוע", "קופץ", "גלילה", "scroll", "jump", "slow"])
+    case .sectionNavigation:
+      return containsAnyThemeKeyword(
+        text, ["ai בילדר", "ai-בילדר", "masterclass", "מאסטר", "section", "בוקסות", "ריבועים"])
+    case .offerClarity:
+      return containsAnyThemeKeyword(
+        text, ["קריאה לפעולה", "cta", "מה אתם רוצים", "להירשם", "book", "booking"])
+        || (hasWebsiteContext && text.contains("לא ברור"))
+    case .interviewSimulations:
+      return hasSimulationContext
+        || (text.contains("ראיונות") && containsAnyThemeKeyword(text, ["סימול", "hr", "tech"]))
+    case .analytics:
+      return containsAnyThemeKeyword(
+        text, ["analytics", "אנליטיקס", "clarity", "mixpanel", "webflow analyze", "משתמשים באמת"])
+    case .visualDirection:
+      return hasWebsiteContext && hasDesignContext
+        && containsAnyThemeKeyword(text, ["כחול", "רקע", "לבן", "אפור", "כבד", "משחקי", "wow"])
+    case .localization:
+      return containsAnyThemeKeyword(
+        text, ["rtl", "תרגום", "locale", "לוקל", "webflow", "גרסה עברית", "עברית באתר"])
+    case .registrationData:
+      return containsAnyThemeKeyword(text, ["נרשמו", "רשומים", "monday", "signups", "registrations"])
+    case .generalDiscussion:
+      return false
+    }
   }
+}
+
+private func containsAnyThemeKeyword(_ text: String, _ patterns: [String]) -> Bool {
+  patterns.contains { text.contains($0.lowercased()) }
 }
 
 private struct Candidate {
@@ -1240,15 +1508,48 @@ private struct LocalSessionRecapPayload: Codable {
   var openQuestions: [SectionPayload]
   var nextSteps: [SectionPayload]
 
+  private enum CodingKeys: String, CodingKey {
+    case overview
+    case keyPoints
+    case decisions
+    case actionItems
+    case openQuestions
+    case nextSteps
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    overview = try container.decode(String.self, forKey: .overview)
+    keyPoints = try container.decodeIfPresent([SectionPayload].self, forKey: .keyPoints) ?? []
+    decisions = try container.decodeIfPresent([SectionPayload].self, forKey: .decisions) ?? []
+    actionItems =
+      try container.decodeIfPresent([SectionPayload].self, forKey: .actionItems) ?? []
+    openQuestions =
+      try container.decodeIfPresent([SectionPayload].self, forKey: .openQuestions) ?? []
+    nextSteps = try container.decodeIfPresent([SectionPayload].self, forKey: .nextSteps) ?? []
+  }
+
   func makeRecap(startedAt: Date) -> LocalSessionRecap {
     let cleanedOverview = overview.cleanedGeneratedContent ?? ""
+    let isHebrew =
+      cleanedOverview.containsHebrewScript
+      || (keyPoints + decisions + actionItems + openQuestions + nextSteps).contains { payload in
+        ([payload.title, payload.summary].compactMap(\.self) + (payload.bullets ?? []))
+          .joined(separator: " ")
+          .containsHebrewScript
+      }
     let sections = [
-      makeOverviewSection(overview: cleanedOverview, startedAt: startedAt),
-      makeSectionPayloads(kind: .keyPoints, payloads: keyPoints, startedAt: startedAt),
-      makeSectionPayloads(kind: .decisions, payloads: decisions, startedAt: startedAt),
-      makeSectionPayloads(kind: .actionItem, payloads: actionItems, startedAt: startedAt),
-      makeSectionPayloads(kind: .openQuestions, payloads: openQuestions, startedAt: startedAt),
-      makeSectionPayloads(kind: .nextSteps, payloads: nextSteps, startedAt: startedAt),
+      makeOverviewSection(overview: cleanedOverview, startedAt: startedAt, isHebrew: isHebrew),
+      makeSectionPayloads(
+        kind: .keyPoints, payloads: keyPoints, startedAt: startedAt, isHebrew: isHebrew),
+      makeSectionPayloads(
+        kind: .decisions, payloads: decisions, startedAt: startedAt, isHebrew: isHebrew),
+      makeSectionPayloads(
+        kind: .actionItem, payloads: actionItems, startedAt: startedAt, isHebrew: isHebrew),
+      makeSectionPayloads(
+        kind: .openQuestions, payloads: openQuestions, startedAt: startedAt, isHebrew: isHebrew),
+      makeSectionPayloads(
+        kind: .nextSteps, payloads: nextSteps, startedAt: startedAt, isHebrew: isHebrew),
     ].compactMap(\.self)
 
     return LocalSessionRecap(
@@ -1260,14 +1561,15 @@ private struct LocalSessionRecapPayload: Codable {
 
   private func makeOverviewSection(
     overview: String,
-    startedAt: Date
+    startedAt: Date,
+    isHebrew: Bool
   ) -> LocalSessionRecapSection? {
     guard !overview.isEmpty else { return nil }
 
     return LocalSessionRecapSection(
       id: UUID(),
       kind: .overview,
-      title: "Overview",
+      title: isHebrew ? "תקציר מנהלים" : "Overview",
       summary: overview,
       bullets: [overview],
       anchorTimestamp: nil,
@@ -1279,7 +1581,8 @@ private struct LocalSessionRecapPayload: Codable {
   private func makeSectionPayloads(
     kind: LocalSessionRecapSection.Kind,
     payloads: [SectionPayload],
-    startedAt: Date
+    startedAt: Date,
+    isHebrew: Bool
   ) -> LocalSessionRecapSection? {
     let cleanedPayloads = payloads.compactMap { payload -> SectionPayload? in
       let summary = payload.summary?.cleanedGeneratedContent
@@ -1311,7 +1614,7 @@ private struct LocalSessionRecapPayload: Codable {
     return LocalSessionRecapSection(
       id: UUID(),
       kind: kind,
-      title: payload.title ?? title(for: kind),
+      title: payload.title ?? title(for: kind, isHebrew: isHebrew),
       summary: payload.summary ?? "",
       bullets: fallbackBullets,
       anchorTimestamp: startOffset.map { startedAt.addingTimeInterval($0) },
@@ -1320,7 +1623,19 @@ private struct LocalSessionRecapPayload: Codable {
     )
   }
 
-  private func title(for kind: LocalSessionRecapSection.Kind) -> String {
+  private func title(for kind: LocalSessionRecapSection.Kind, isHebrew: Bool) -> String {
+    if isHebrew {
+      switch kind {
+      case .overview: return "תקציר מנהלים"
+      case .keyPoints: return "נקודות מרכזיות"
+      case .decisions: return "החלטות"
+      case .actionItem: return "משימות להמשך"
+      case .openQuestions: return "שאלות פתוחות"
+      case .nextSteps: return "המשך מומלץ"
+      case .notes: return "הערות"
+      }
+    }
+
     switch kind {
     case .overview: return "Overview"
     case .keyPoints: return "Key points"
@@ -1341,6 +1656,89 @@ extension LocalSessionRecap {
       section.kind != .overview
         && (section.summary.cleanedGeneratedContent != nil
           || section.bullets.contains { $0.cleanedGeneratedContent != nil })
+      }
+  }
+
+  fileprivate func isGrounded(in input: LocalSessionRecapGenerationInput) -> Bool {
+    !LocalSessionRecapClaimGrounding.hasUnsupportedClaims(recap: self, input: input)
+  }
+}
+
+private enum LocalSessionRecapClaimGrounding {
+  struct ClaimGroup {
+    let recapPatterns: [String]
+    let sourcePatterns: [String]
+  }
+
+  private static let claimGroups: [ClaimGroup] = [
+    ClaimGroup(
+      recapPatterns: [
+        "site performance", "scrolling behavior", "section-jump", "hard to scroll",
+        "page position",
+      ],
+      sourcePatterns: [
+        "גלילה", "לגלול", "scroll", "section jump", "jump between sections", "ניווט",
+        "ניווט בין", "חוויית גלילה",
+      ]
+    ),
+    ClaimGroup(
+      recapPatterns: [
+        "calls to action", "call to action", "cta", "user promise", "explicit next step",
+      ],
+      sourcePatterns: [
+        "קריאה לפעולה", "cta", "call to action", "להירשם", "הרשמה", "book demo",
+        "book a call", "next step",
+      ]
+    ),
+    ClaimGroup(
+      recapPatterns: [
+        "interview simulation", "hr and tech", "hr path", "tech path", "coming-soon state",
+      ],
+      sourcePatterns: [
+        "סימולציה", "סימולציות", "ראיון", "ראיונות", "hr", "tech", "coming soon",
+        "תרחיש", "תרחישים",
+      ]
+    ),
+    ClaimGroup(
+      recapPatterns: [
+        "lighter visual", "visual direction", "lighter background", "reduced visual weight",
+        "brand direction",
+      ],
+      sourcePatterns: [
+        "עיצוב", "ויזואל", "צבע", "צבעוניות", "רקע", "לבן", "כחול", "אפור",
+        "design", "visual",
+      ]
+    ),
+    ClaimGroup(
+      recapPatterns: [
+        "analytics", "registration signals", "registration numbers", "signups came from",
+        "user-behavior analytics",
+      ],
+      sourcePatterns: [
+        "analytics", "אנליטיקס", "clarity", "mixpanel", "נרשמו", "רשומים", "הרשמות",
+        "signups", "registration",
+      ]
+    ),
+  ]
+
+  static func hasUnsupportedClaims(
+    recap: LocalSessionRecap,
+    input: LocalSessionRecapGenerationInput
+  ) -> Bool {
+    let recapText =
+      ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: " ")
+      .lowercased()
+    guard !recapText.isEmpty else { return true }
+
+    let sourceText =
+      ([input.title] + input.transcriptCandidates.map(\.text))
+      .joined(separator: " ")
+      .lowercased()
+
+    return claimGroups.contains { group in
+      group.recapPatterns.contains { recapText.contains($0.lowercased()) }
+        && !group.sourcePatterns.contains { sourceText.contains($0.lowercased()) }
     }
   }
 }
@@ -1359,6 +1757,14 @@ extension String {
     let lowercased = trimmed.lowercased()
     let placeholders: Set<String> = [
       "...", "…", "....", "n/a", "na", "none", "null", "nil", "no summary",
+      "concise paragraph with purpose and current state",
+      "problems / context / important points",
+      "decision",
+      "owner/person/team",
+      "open question",
+      "professional recommendation",
+      "urgent fixes and next-iteration tasks",
+      "short professional recommendation",
     ]
     guard !placeholders.contains(lowercased) else { return nil }
 

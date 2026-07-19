@@ -151,12 +151,12 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
 
     XCTAssertEqual(plan.modelURL, hebrewWhisperKitURL)
     XCTAssertEqual(plan.engine, .whisperKit)
-    XCTAssertEqual(plan.language, "he")
+    XCTAssertEqual(plan.language, "auto")
     XCTAssertEqual(plan.modelFlavor, .whisperKitHebrewTurbo)
     XCTAssertNotNil(plan.prompt)
   }
 
-  func testResolvedTranscriptionPlanFallsBackToHebrewModelWhenMultilingualModelIsMissing() throws {
+  func testResolvedTranscriptionPlanKeepsAutoLanguageWhenFallingBackToHebrewModel() throws {
     let baseDirectory = tempRootURL.appendingPathComponent("Meetings", isDirectory: true)
     let layout = LocalMeetingFileLayout(baseDirectory: baseDirectory)
     let hebrewURL = layout.modelURL()
@@ -175,6 +175,7 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
     XCTAssertEqual(plan.modelURL, hebrewURL)
     XCTAssertEqual(plan.engine, .whisperCpp)
     XCTAssertEqual(plan.language, "auto")
+    XCTAssertNil(plan.prompt)
     XCTAssertEqual(plan.modelFlavor, .hebrewTurbo)
     XCTAssertEqual(plan.speedMode, .balanced)
   }
@@ -203,7 +204,7 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
     XCTAssertEqual(plan.speedMode, .fastDraft)
   }
 
-  func testLanguagePreferencePinsTranscriptionLanguage() throws {
+  func testLanguagePreferenceHintsDoNotDisableLanguageDetection() throws {
     let baseDirectory = tempRootURL.appendingPathComponent("Meetings", isDirectory: true)
     let layout = LocalMeetingFileLayout(baseDirectory: baseDirectory)
     let multilingualURL = layout.modelURL(for: "ggml-small")
@@ -219,7 +220,7 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
       fileManager: fileManager
     )
 
-    XCTAssertEqual(plan.language, "he")
+    XCTAssertEqual(plan.language, "auto")
     XCTAssertNotNil(plan.prompt)
   }
 
@@ -269,6 +270,90 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
     )
     XCTAssertTrue(transcriptMarkdown.contains("## Transcript"))
     XCTAssertTrue(transcriptMarkdown.contains("Original transcript line."))
+  }
+
+  func testExportTranscriptMarkdownPlacesImageLinksNextToMatchingSegments() throws {
+    let startedAt = Date(timeIntervalSince1970: 1_800)
+    let segmentID = UUID(uuidString: "B8D1E4AE-8B9B-4F0D-BE5C-8A4A5C6C1A01")!
+    let imageURL = tempRootURL.appendingPathComponent("session-screenshot.png")
+    try Data([0x89, 0x50, 0x4E, 0x47]).write(to: imageURL)
+
+    let session = makeSession(
+      id: UUID(uuidString: "4C5B2B9B-8DB7-4B54-89BB-EE1FA0DD4CE2")!,
+      startedAt: startedAt,
+      status: .ready,
+      title: "Transcript Export",
+      segments: [
+        .init(
+          id: segmentID,
+          speaker: "You",
+          text: "Here is the screenshot.",
+          timestamp: startedAt.addingTimeInterval(6))
+      ],
+      attachments: [
+        .init(
+          id: UUID(uuidString: "A31E5D8A-5D7E-4D4B-8C0F-8F5C7E81C1E9")!,
+          kind: .image,
+          source: .floatingBar,
+          title: "Screenshot",
+          timestamp: startedAt.addingTimeInterval(12),
+          sessionOffset: 12,
+          fileName: imageURL.lastPathComponent,
+          mimeType: "image/png",
+          urlString: imageURL.path,
+          note: "Captured during the live session.",
+          transcriptSegmentID: segmentID
+        )
+      ]
+    )
+
+    let exportedURL = try LocalSessionRecapExporter().exportTranscriptMarkdown(
+      session: session,
+      to: tempRootURL
+    )
+    let markdown = try String(contentsOf: exportedURL, encoding: .utf8)
+
+    XCTAssertTrue(markdown.contains("- [00:06] **You:** Here is the screenshot."))
+    XCTAssertTrue(markdown.contains("  - [00:12] ![Screenshot](\(imageURL.absoluteString))"))
+    let transcriptRange = try XCTUnwrap(
+      markdown.range(of: "- [00:06] **You:** Here is the screenshot."))
+    let imageRange = try XCTUnwrap(markdown.range(of: imageURL.absoluteString))
+    XCTAssertLessThan(transcriptRange.lowerBound, imageRange.lowerBound)
+  }
+
+  func testRecapMarkdownDocumentIncludesSpeakerLabelsWithoutInventingNames() {
+    let startedAt = Date(timeIntervalSince1970: 1_850)
+    let session = makeSession(
+      id: UUID(uuidString: "1F58D50D-66C6-4024-9E30-0E5274FE9DB0")!,
+      startedAt: startedAt,
+      status: .ready,
+      title: "Speaker Context",
+      segments: [
+        .init(
+          id: UUID(uuidString: "AE3B3F99-518F-4416-9221-D8B76B256716")!,
+          speaker: "Remote speaker",
+          text: "The remote side explains the product demo.",
+          timestamp: startedAt.addingTimeInterval(3)),
+        .init(
+          id: UUID(uuidString: "FF0734B9-E29E-4691-BC25-5FDF4F6F582D")!,
+          speaker: "You",
+          text: "I ask a follow-up question.",
+          timestamp: startedAt.addingTimeInterval(8)),
+      ]
+    )
+    var sessionWithRecap = session
+    sessionWithRecap.recap = LocalSessionRecap(
+      overview: "The recording captures a product demo discussion.",
+      generatedAt: startedAt,
+      sections: []
+    )
+
+    let markdown = LocalSessionRecapMarkdownDocument(session: sessionWithRecap).markdown
+
+    XCTAssertTrue(markdown.contains("## Speaker context"))
+    XCTAssertTrue(markdown.contains("Recorded speaker labels: Remote speaker, You."))
+    XCTAssertTrue(markdown.contains("not verified personal names"))
+    XCTAssertFalse(markdown.contains("Ben:"))
   }
 
   func testRecapMarkdownDocumentCanOmitTranscriptForPreview() {
@@ -429,11 +514,77 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
     XCTAssertTrue(hebrewMarkdown.contains("## סקירה"))
     XCTAssertTrue(hebrewMarkdown.contains("## נקודות מרכזיות"))
     XCTAssertTrue(hebrewMarkdown.contains("## המלצה מקצועית"))
-    XCTAssertTrue(hebrewMarkdown.contains("מסמך עבודה מסודר"))
+    XCTAssertTrue(hebrewMarkdown.contains("פגישה") || hebrewMarkdown.contains("שיחה"))
     XCTAssertFalse(hebrewMarkdown.contains("אני רוצה לבדוק שהמסמך מסכם את הפגישה."))
     XCTAssertFalse(hebrewMarkdown.contains("This is an English-only recap."))
     XCTAssertTrue(englishMarkdown.contains("## Overview"))
-    XCTAssertTrue(englishMarkdown.contains("This is an English-only recap."))
+    XCTAssertFalse(englishMarkdown.contains("This is an English-only recap."))
+  }
+
+  func testRecapMarkdownDocumentPrefersHebrewForHebrewSessions() {
+    let startedAt = Date(timeIntervalSince1970: 2_350)
+    var session = makeSession(
+      id: UUID(uuidString: "4E67EDC0-E85E-4C10-8BB7-DCAC01BE590D")!,
+      startedAt: startedAt,
+      status: .ready,
+      title: "Session 15 May 2026 at 14:12",
+      segments: [
+        LocalMeetingTranscriptSegment(
+          id: UUID(uuidString: "6C3B68F0-4155-494F-85A4-F31AAFE63C6A")!,
+          speaker: "Remote speaker",
+          text: "בואו נדבר רגע על התקציב של העסק ועל הדשבורד שבעל העסק צריך לראות.",
+          timestamp: startedAt
+        )
+      ]
+    )
+    session.recap = LocalSessionRecap(
+      overview: "The meeting focused on business planning.",
+      generatedAt: startedAt,
+      sections: []
+    )
+
+    XCTAssertEqual(LocalSessionRecapMarkdownDocument.preferredLanguage(for: session), .hebrew)
+  }
+
+  func testEnglishDocumentDoesNotReuseStoredHebrewMarkdownBody() {
+    let startedAt = Date(timeIntervalSince1970: 2_380)
+    var session = makeSession(
+      id: UUID(uuidString: "E04651DB-DA6A-4F16-9714-713A22414C2E")!,
+      startedAt: startedAt,
+      status: .ready,
+      title: "Session 15 May 2026 at 14:12",
+      segments: [
+        LocalMeetingTranscriptSegment(
+          id: UUID(uuidString: "380302C0-1755-49E3-92C5-45EE348A4B02")!,
+          speaker: "Remote speaker",
+          text: "דיברנו על הרעיון של המוצר, הסוכן העסקי והדשבורד שבעל העסק צריך לראות.",
+          timestamp: startedAt
+        )
+      ]
+    )
+    session.recap = LocalSessionRecap(
+      overview: "הפגישה התמקדה בסוכן עסקי ודשבורד.",
+      generatedAt: startedAt,
+      sections: []
+    )
+    session.documentMarkdown = """
+      # סוכן עסקי ודשבורד
+
+      ## נקודות מרכזיות
+
+      זה גוף מסמך בעברית בלבד.
+      """
+
+    let englishMarkdown = LocalSessionRecapMarkdownDocument.markdown(
+      for: session,
+      language: .english,
+      includeTranscript: false
+    )
+
+    XCTAssertTrue(englishMarkdown.hasPrefix("# Product Direction, Business Agent, and Dashboard"))
+    XCTAssertTrue(englishMarkdown.contains("## Key points"))
+    XCTAssertTrue(englishMarkdown.contains("business owner"))
+    XCTAssertFalse(englishMarkdown.contains("זה גוף מסמך בעברית בלבד"))
   }
 
   func testRecapMarkdownDocumentUsesTopicTitleForGenericSessionName() {
@@ -486,6 +637,28 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
 
     XCTAssertTrue(markdown.hasPrefix("# תיקוני אתר דחופים, אנליטיקס וסימולציות ריאיון"))
     XCTAssertFalse(markdown.hasPrefix("# Session 29 Apr 2026 at 11:11"))
+  }
+
+  func testRecapMarkdownDocumentPrioritizesBusinessAgentTitleOverWebsiteSignals() {
+    let startedAt = Date(timeIntervalSince1970: 2_720)
+    let session = makeSession(
+      id: UUID(uuidString: "6CCB8CE3-F998-4056-AE75-8E98B9760DF0")!,
+      startedAt: startedAt,
+      status: .ready,
+      title: "Session 15 May 2026 at 14:12",
+      segments: [
+        LocalMeetingTranscriptSegment(
+          id: UUID(uuidString: "4A282843-A064-4FE6-A543-633929BDAA18")!,
+          speaker: "You",
+          text: "דיברנו על מוצר של סוכן עסקי, דשבורד לבעל העסק, וגם על האתר ו-Webflow.",
+          timestamp: startedAt
+        )
+      ]
+    )
+
+    let title = LocalSessionRecapMarkdownDocument.title(for: session, language: .hebrew)
+
+    XCTAssertEqual(title, "כיוון מוצר, סוכן עסקי ודשבורד")
   }
 
   func testExistingAudioURLFallsBackToLegacyMixedTrack() throws {
@@ -1085,245 +1258,245 @@ final class LocalMeetingAppModelTests: XCTestCase {
     XCTAssertEqual(sessions.first?.id, validSession.id)
   }
 
-  func testImportExistingRecordingMakesTranscriptAvailableBeforeRecapFinishes() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sourceURL = tempRootURL.appendingPathComponent("Imported.m4a", isDirectory: false)
-    try Data("original-audio".utf8).write(to: sourceURL)
+  // Retained as historical coverage for the retired automatic recap pipeline.
+  #if LEGACY_AUTOMATIC_RECAP_TESTS
+    func testImportExistingRecordingMakesTranscriptAvailableBeforeRecapFinishes() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sourceURL = tempRootURL.appendingPathComponent("Imported.m4a", isDirectory: false)
+      try Data("original-audio".utf8).write(to: sourceURL)
 
-    let transcriptionService = StubLocalSessionTranscriptionService(
-      result: LocalSessionTranscriptionResult(
-        text: "Imported transcript",
-        detectedLanguage: "he",
-        segments: [
-          .init(startTime: 0, endTime: 5, text: "Imported transcript")
-        ],
-        modelPath: "/tmp/model.bin"
+      let transcriptionService = StubLocalSessionTranscriptionService(
+        result: LocalSessionTranscriptionResult(
+          text: "Imported transcript",
+          detectedLanguage: "he",
+          segments: [
+            .init(startTime: 0, endTime: 5, text: "Imported transcript")
+          ],
+          modelPath: "/tmp/model.bin"
+        )
       )
-    )
-    let recapGenerator = BlockingRecapGenerator()
-    let importService = StubLocalSessionAudioImportService()
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      transcriptionService: transcriptionService,
-      recapGenerator: recapGenerator,
-      contentClassifier: ImmediateContentClassifier(type: .meeting),
-      audioImportService: importService
-    )
-
-    await model.importExistingRecording(from: sourceURL, title: "Imported sync")
-
-    await waitUntil("import reaches recap generation") {
-      model.isGeneratingRecap
-    }
-
-    XCTAssertFalse(model.isTranscribing)
-    XCTAssertTrue(model.isGeneratingRecap)
-    XCTAssertEqual(model.processingStatusTitle, "Generating meeting brief")
-    XCTAssertEqual(model.selectedSession?.title, "Imported sync")
-    XCTAssertEqual(model.selectedSession?.status, .ready)
-    XCTAssertEqual(model.selectedSession?.transcriptText, "Imported transcript")
-    XCTAssertEqual(model.processingQueue.count, 1)
-    XCTAssertEqual(model.processingQueue.first?.id, model.selectedSession?.id)
-    XCTAssertEqual(model.processingQueue.first?.phase, .generatingRecap)
-    XCTAssertGreaterThanOrEqual(model.processingQueue.first?.logEntries.count ?? 0, 4)
-    XCTAssertTrue(
-      model.processingQueue.first?.logEntries.contains(where: { $0.message.contains("mixed.wav") })
-        ?? false
-    )
-    XCTAssertTrue(
-      model.processingQueue.first?.logEntries.contains(where: {
-        $0.message.contains("Imported.m4a")
-      })
-        ?? false
-    )
-    XCTAssertEqual(model.selectedSession?.audioArtifacts.mixedFileName, "mixed.wav")
-    XCTAssertEqual(
-      model.selectedSession?.transcriptSegments.first?.endTimestamp,
-      model.selectedSession?.startedAt.addingTimeInterval(5)
-    )
-    XCTAssertTrue(
-      importService.importedDestinations.contains(
-        layout.mixedAudioURL(for: try XCTUnwrap(model.selectedSession?.id))))
-    XCTAssertEqual(transcriptionService.receivedAudioURLs.count, 1)
-
-    recapGenerator.finish(
-      with: LocalSessionRecap(
-        overview: "Imported overview",
-        generatedAt: Date(timeIntervalSince1970: 55),
-        sections: []
+      let recapGenerator = BlockingRecapGenerator()
+      let importService = StubLocalSessionAudioImportService()
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        transcriptionService: transcriptionService,
+        recapGenerator: recapGenerator,
+        contentClassifier: ImmediateContentClassifier(type: .meeting),
+        audioImportService: importService
       )
-    )
 
-    await waitUntil("recap generation finishes") {
-      !model.isGeneratingRecap
-    }
+      await model.importExistingRecording(from: sourceURL, title: "Imported sync")
 
-    XCTAssertEqual(model.selectedSession?.recap.overview, "Imported overview")
-    XCTAssertNil(model.processingStatusTitle)
-  }
+      await waitUntil("import reaches recap generation") {
+        model.isGeneratingRecap
+      }
 
-  func testImportExistingRecordingUsesAutomaticLanguageDetection() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sourceURL = tempRootURL.appendingPathComponent("Imported-English.m4a", isDirectory: false)
-    try Data("original-audio".utf8).write(to: sourceURL)
-
-    let multilingualURL = layout.modelURL(for: "ggml-small")
-    try fileManager.createDirectory(
-      at: multilingualURL.deletingLastPathComponent(),
-      withIntermediateDirectories: true
-    )
-    try Data().write(to: multilingualURL)
-
-    let transcriptionService = StubLocalSessionTranscriptionService(
-      result: LocalSessionTranscriptionResult(
-        text: "Imported transcript",
-        detectedLanguage: "en",
-        segments: [
-          .init(startTime: 0, endTime: 5, text: "Imported transcript")
-        ],
-        modelPath: multilingualURL.path
+      XCTAssertFalse(model.isTranscribing)
+      XCTAssertTrue(model.isGeneratingRecap)
+      XCTAssertEqual(model.processingStatusTitle, "Generating meeting brief")
+      XCTAssertEqual(model.selectedSession?.title, "Imported sync")
+      XCTAssertEqual(model.selectedSession?.status, .ready)
+      XCTAssertEqual(model.selectedSession?.transcriptText, "Imported transcript")
+      XCTAssertEqual(model.processingQueue.count, 1)
+      XCTAssertEqual(model.processingQueue.first?.id, model.selectedSession?.id)
+      XCTAssertEqual(model.processingQueue.first?.phase, .generatingRecap)
+      XCTAssertGreaterThanOrEqual(model.processingQueue.first?.logEntries.count ?? 0, 4)
+      XCTAssertTrue(
+        model.processingQueue.first?.logEntries.contains(where: { $0.message.contains("mixed.wav") }
+        )
+          ?? false
       )
-    )
-    let recapGenerator = BlockingRecapGenerator()
-    recapGenerator.finish(with: .empty)
-    let importService = StubLocalSessionAudioImportService()
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      transcriptionService: transcriptionService,
-      recapGenerator: recapGenerator,
-      contentClassifier: ImmediateContentClassifier(type: .generalTranscript),
-      audioImportService: importService
-    )
-
-    await model.importExistingRecording(from: sourceURL, title: "Imported sync")
-
-    XCTAssertEqual(transcriptionService.receivedLanguages, ["auto"])
-    XCTAssertEqual(transcriptionService.receivedModelURLs, [multilingualURL])
-  }
-
-  func testConcurrentImportsExposePerSessionProcessingQueue() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sourceOne = tempRootURL.appendingPathComponent("Imported-One.m4a", isDirectory: false)
-    let sourceTwo = tempRootURL.appendingPathComponent("Imported-Two.m4a", isDirectory: false)
-    try Data("original-audio".utf8).write(to: sourceOne)
-    try Data("original-audio".utf8).write(to: sourceTwo)
-
-    let transcriptionService = StubLocalSessionTranscriptionService(
-      result: LocalSessionTranscriptionResult(
-        text: "Imported transcript",
-        detectedLanguage: "en",
-        segments: [
-          .init(startTime: 0, endTime: 5, text: "Imported transcript")
-        ],
-        modelPath: "/tmp/model.bin"
+      XCTAssertTrue(
+        model.processingQueue.first?.logEntries.contains(where: {
+          $0.message.contains("Imported.m4a")
+        })
+          ?? false
       )
-    )
-    let recapGenerator = MultiBlockingRecapGenerator()
-    let importService = StubLocalSessionAudioImportService()
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      transcriptionService: transcriptionService,
-      recapGenerator: recapGenerator,
-      contentClassifier: ImmediateContentClassifier(type: .meeting),
-      audioImportService: importService
-    )
-
-    await model.importExistingRecording(from: sourceOne, title: "Imported one")
-    await model.importExistingRecording(from: sourceTwo, title: "Imported two")
-
-    await waitUntil("concurrent imports reach recap generation") {
-      model.processingQueue.count == 2
-        && Set(model.processingQueue.map(\.phase)) == [.generatingRecap]
-    }
-
-    XCTAssertEqual(model.processingQueue.count, 2)
-    XCTAssertEqual(Set(model.processingQueue.map(\.phase)), [.generatingRecap])
-    XCTAssertEqual(Set(model.sessions.map(\.title)), ["Imported one", "Imported two"])
-
-    recapGenerator.finishNext(with: .empty)
-    recapGenerator.finishNext(with: .empty)
-  }
-
-  func testImportClassifiesTranscriptBeforeGeneratingRecap() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sourceURL = tempRootURL.appendingPathComponent("Voice-Note.m4a", isDirectory: false)
-    try Data("original-audio".utf8).write(to: sourceURL)
-    let startedAt = Date(timeIntervalSince1970: 6_500)
-    let transcriptionService = StubLocalSessionTranscriptionService(
-      result: LocalSessionTranscriptionResult(
-        text: "Tell Dana that the export is ready and I will review it tomorrow.",
-        detectedLanguage: "en",
-        segments: [
-          .init(
-            startTime: 0,
-            endTime: 5,
-            text: "Tell Dana that the export is ready and I will review it tomorrow."
-          )
-        ],
-        modelPath: "/tmp/model.bin"
+      XCTAssertEqual(model.selectedSession?.audioArtifacts.mixedFileName, "mixed.wav")
+      XCTAssertEqual(
+        model.selectedSession?.transcriptSegments.first?.endTimestamp,
+        model.selectedSession?.startedAt.addingTimeInterval(5)
       )
-    )
-    let contentClassifier = BlockingContentClassifier(
-      classification: LocalSessionContentClassification(
-        type: .voiceNote,
-        confidence: 0.89,
-        rationale: "Single-speaker dictated message.",
-        generatedAt: startedAt
+      XCTAssertTrue(
+        importService.importedDestinations.contains(
+          layout.mixedAudioURL(for: try XCTUnwrap(model.selectedSession?.id))))
+      XCTAssertEqual(transcriptionService.receivedAudioURLs.count, 1)
+
+      recapGenerator.finish(
+        with: LocalSessionRecap(
+          overview: "Imported overview",
+          generatedAt: Date(timeIntervalSince1970: 55),
+          sections: []
+        )
       )
-    )
-    let recapGenerator = BlockingRecapGenerator()
-    let importService = StubLocalSessionAudioImportService()
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      transcriptionService: transcriptionService,
-      recapGenerator: recapGenerator,
-      contentClassifier: contentClassifier,
-      audioImportService: importService
-    )
 
-    await model.importExistingRecording(from: sourceURL, title: "Voice note")
+      await waitUntil("recap generation finishes") {
+        !model.isGeneratingRecap
+      }
 
-    await waitUntil("content classification is active") {
-      model.processingQueue.first?.phase == .classifyingContent
+      XCTAssertEqual(model.selectedSession?.recap.overview, "Imported overview")
+      XCTAssertNil(model.processingStatusTitle)
     }
 
-    XCTAssertEqual(
-      model.selectedSession?.transcriptText,
-      "Tell Dana that the export is ready and I will review it tomorrow.")
+    func testImportExistingRecordingUsesAutomaticLanguageDetection() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sourceURL = tempRootURL.appendingPathComponent("Imported-English.m4a", isDirectory: false)
+      try Data("original-audio".utf8).write(to: sourceURL)
 
-    await waitUntil("classifier receives transcript-ready session") {
-      contentClassifier.receivedSessions.first?.title == "Voice note"
+      let multilingualURL = layout.modelURL(for: "ggml-small")
+      try fileManager.createDirectory(
+        at: multilingualURL.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+      )
+      try Data().write(to: multilingualURL)
+
+      let transcriptionService = StubLocalSessionTranscriptionService(
+        result: LocalSessionTranscriptionResult(
+          text: "Imported transcript",
+          detectedLanguage: "en",
+          segments: [
+            .init(startTime: 0, endTime: 5, text: "Imported transcript")
+          ],
+          modelPath: multilingualURL.path
+        )
+      )
+      let recapGenerator = BlockingRecapGenerator()
+      recapGenerator.finish(with: .empty)
+      let importService = StubLocalSessionAudioImportService()
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        transcriptionService: transcriptionService,
+        recapGenerator: recapGenerator,
+        contentClassifier: ImmediateContentClassifier(type: .generalTranscript),
+        audioImportService: importService
+      )
+
+      await model.importExistingRecording(from: sourceURL, title: "Imported sync")
+
+      XCTAssertEqual(transcriptionService.receivedLanguages, ["auto"])
+      XCTAssertEqual(transcriptionService.receivedModelURLs, [multilingualURL])
     }
 
-    contentClassifier.finish()
+    func testConcurrentImportsExposePerSessionProcessingQueue() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sourceOne = tempRootURL.appendingPathComponent("Imported-One.m4a", isDirectory: false)
+      let sourceTwo = tempRootURL.appendingPathComponent("Imported-Two.m4a", isDirectory: false)
+      try Data("original-audio".utf8).write(to: sourceOne)
+      try Data("original-audio".utf8).write(to: sourceTwo)
 
-    await waitUntil("recap generation starts after classification") {
-      guard let selectedSessionID = model.selectedSessionID else { return false }
-      return model.isGeneratingRecap(for: selectedSessionID)
+      let transcriptionService = StubLocalSessionTranscriptionService(
+        result: LocalSessionTranscriptionResult(
+          text: "Imported transcript",
+          detectedLanguage: "en",
+          segments: [
+            .init(startTime: 0, endTime: 5, text: "Imported transcript")
+          ],
+          modelPath: "/tmp/model.bin"
+        )
+      )
+      let recapGenerator = MultiBlockingRecapGenerator()
+      let importService = StubLocalSessionAudioImportService()
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        transcriptionService: transcriptionService,
+        recapGenerator: recapGenerator,
+        contentClassifier: ImmediateContentClassifier(type: .meeting),
+        audioImportService: importService
+      )
+
+      await model.importExistingRecording(from: sourceOne, title: "Imported one")
+      await model.importExistingRecording(from: sourceTwo, title: "Imported two")
+
+      await waitUntil("concurrent imports reach recap generation") {
+        model.processingQueue.count == 2
+          && Set(model.processingQueue.map(\.phase)) == [.generatingRecap]
+      }
+
+      XCTAssertEqual(model.processingQueue.count, 2)
+      XCTAssertEqual(Set(model.processingQueue.map(\.phase)), [.generatingRecap])
+      XCTAssertEqual(Set(model.sessions.map(\.title)), ["Imported one", "Imported two"])
+
+      recapGenerator.finishNext(with: .empty)
+      recapGenerator.finishNext(with: .empty)
     }
 
-    XCTAssertEqual(model.selectedSession?.contentClassification?.type, .voiceNote)
+    func testImportClassifiesTranscriptBeforeGeneratingRecap() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sourceURL = tempRootURL.appendingPathComponent("Voice-Note.m4a", isDirectory: false)
+      try Data("original-audio".utf8).write(to: sourceURL)
+      let startedAt = Date(timeIntervalSince1970: 6_500)
+      let transcriptionService = StubLocalSessionTranscriptionService(
+        result: LocalSessionTranscriptionResult(
+          text: "Tell Dana that the export is ready and I will review it tomorrow.",
+          detectedLanguage: "en",
+          segments: [
+            .init(
+              startTime: 0,
+              endTime: 5,
+              text: "Tell Dana that the export is ready and I will review it tomorrow."
+            )
+          ],
+          modelPath: "/tmp/model.bin"
+        )
+      )
+      let contentClassifier = BlockingContentClassifier(
+        classification: LocalSessionContentClassification(
+          type: .voiceNote,
+          confidence: 0.89,
+          rationale: "Single-speaker dictated message.",
+          generatedAt: startedAt
+        )
+      )
+      let recapGenerator = BlockingRecapGenerator()
+      let importService = StubLocalSessionAudioImportService()
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        transcriptionService: transcriptionService,
+        recapGenerator: recapGenerator,
+        contentClassifier: contentClassifier,
+        audioImportService: importService
+      )
 
-    await waitUntil("recap generator receives classified session") {
-      recapGenerator.receivedSessions.first?.contentClassification?.type == .voiceNote
+      await model.importExistingRecording(from: sourceURL, title: "Voice note")
+
+      await waitUntil("content classification is active") {
+        model.processingQueue.first?.phase == .classifyingContent
+      }
+
+      XCTAssertEqual(
+        model.selectedSession?.transcriptText,
+        "Tell Dana that the export is ready and I will review it tomorrow.")
+
+      XCTAssertTrue(contentClassifier.receivedSessions.isEmpty)
+
+      await waitUntil("recap generation starts after classification") {
+        guard let selectedSessionID = model.selectedSessionID else { return false }
+        return model.isGeneratingRecap(for: selectedSessionID)
+      }
+
+      XCTAssertEqual(model.selectedSession?.contentClassification?.type, .meeting)
+
+      await waitUntil("recap generator receives classified session") {
+        recapGenerator.receivedSessions.first?.contentClassification?.type == .meeting
+      }
+
+      XCTAssertEqual(recapGenerator.receivedSessions.first?.contentClassification?.type, .meeting)
+
+      recapGenerator.finish(with: .empty)
     }
-
-    XCTAssertEqual(recapGenerator.receivedSessions.first?.contentClassification?.type, .voiceNote)
-
-    recapGenerator.finish(with: .empty)
-  }
+  #endif
 
   func testRetranscribeExistingSessionUsesSavedMixedAudio() async throws {
     let layout = LocalMeetingFileLayout(
@@ -1361,29 +1534,24 @@ final class LocalMeetingAppModelTests: XCTestCase {
         modelPath: "/tmp/model.bin"
       )
     )
-    let recapGenerator = BlockingRecapGenerator()
     let model = LocalMeetingAppModel(
       store: store,
       fileLayout: layout,
-      transcriptionService: transcriptionService,
-      recapGenerator: recapGenerator,
-      contentClassifier: ImmediateContentClassifier(type: .meeting)
+      transcriptionService: transcriptionService
     )
 
     model.retranscribeSession(id: sessionID)
 
-    await waitUntil("retranscription reaches recap generation") {
-      model.selectedSession?.transcriptText == "Recovered transcript" && model.isGeneratingRecap
+    await waitUntil("retranscription finishes") {
+      model.selectedSession?.transcriptText == "Recovered transcript" && !model.isTranscribing
     }
 
     XCTAssertEqual(model.selectedSessionID, sessionID)
     XCTAssertEqual(model.selectedSession?.status, .ready)
     XCTAssertEqual(model.processingQueue.count, 1)
     XCTAssertEqual(model.processingQueue.first?.id, sessionID)
-    XCTAssertEqual(model.processingQueue.first?.phase, .generatingRecap)
+    XCTAssertEqual(model.processingQueue.first?.phase, .transcribing)
     XCTAssertEqual(transcriptionService.receivedAudioURLs, [layout.mixedAudioURL(for: sessionID)])
-
-    recapGenerator.finish(with: .empty)
   }
 
   func testRetranscriptionLabelsSegmentsFromMicAndSystemEnergy() async throws {
@@ -1434,8 +1602,7 @@ final class LocalMeetingAppModelTests: XCTestCase {
     let model = LocalMeetingAppModel(
       store: store,
       fileLayout: layout,
-      transcriptionService: transcriptionService,
-      recapGenerator: ImmediateRecapGenerator()
+      transcriptionService: transcriptionService
     )
 
     model.retranscribeSession(id: sessionID)
@@ -1448,520 +1615,527 @@ final class LocalMeetingAppModelTests: XCTestCase {
       model.selectedSession?.transcriptSegments.map(\.speaker), ["You", "Remote speaker"])
   }
 
-  func testDocumentChatProposalDecodesStrictJSONAndFallsBackForInvalidJSON() throws {
-    let segmentID = UUID(uuidString: "45D5F120-1F82-4910-8BA5-64C0F45DE08B")!
-    let raw = """
-      Here is the edit:
-      {
-        "assistantMessage": "I can tighten this.",
-        "recapPatch": {
-          "overview": "Sharper overview.",
-          "sections": [
-            {"kind":"decisions","title":"Decisions","summary":"One clear decision.","bullets":["Ship the rail."]}
-          ]
-        },
-        "transcriptPatches": [
-          {"segmentID":"\(segmentID.uuidString)","text":"Corrected transcript."}
-        ],
-        "speakerRenames": [
-          {"oldName":"Transcript","newName":"Ben"}
-        ],
-        "warnings": ["Check the correction against audio."]
-      }
-      Human: retry this
-      {"assistantMessage":"Wrong trailing object","recapPatch":null,"transcriptPatches":[],"speakerRenames":[],"warnings":[]}
-      """
+  // Retained as historical coverage for the removed document-chat surface.
+  #if LEGACY_DOCUMENT_CHAT_TESTS
+    func testDocumentChatProposalDecodesStrictJSONAndFallsBackForInvalidJSON() throws {
+      let segmentID = UUID(uuidString: "45D5F120-1F82-4910-8BA5-64C0F45DE08B")!
+      let raw = """
+        Here is the edit:
+        {
+          "assistantMessage": "I can tighten this.",
+          "recapPatch": {
+            "overview": "Sharper overview.",
+            "sections": [
+              {"kind":"decisions","title":"Decisions","summary":"One clear decision.","bullets":["Ship the rail."]}
+            ]
+          },
+          "transcriptPatches": [
+            {"segmentID":"\(segmentID.uuidString)","text":"Corrected transcript."}
+          ],
+          "speakerRenames": [
+            {"oldName":"Transcript","newName":"Ben"}
+          ],
+          "warnings": ["Check the correction against audio."]
+        }
+        Human: retry this
+        {"assistantMessage":"Wrong trailing object","recapPatch":null,"transcriptPatches":[],"speakerRenames":[],"warnings":[]}
+        """
 
-    let proposal = LocalSessionDocumentChatClient.decodeProposal(from: raw)
+      let proposal = LocalSessionDocumentChatClient.decodeProposal(from: raw)
 
-    XCTAssertEqual(proposal.assistantMessage, "I can tighten this.")
-    XCTAssertEqual(proposal.recapPatch?.overview, "Sharper overview.")
-    XCTAssertEqual(proposal.recapPatch?.sections.first?.kind, .decisions)
-    XCTAssertEqual(proposal.transcriptPatches.first?.segmentID, segmentID)
-    XCTAssertEqual(proposal.speakerRenames.first?.newName, "Ben")
-    XCTAssertEqual(proposal.warnings, ["Check the correction against audio."])
+      XCTAssertEqual(proposal.assistantMessage, "I can tighten this.")
+      XCTAssertEqual(proposal.recapPatch?.overview, "Sharper overview.")
+      XCTAssertEqual(proposal.recapPatch?.sections.first?.kind, .decisions)
+      XCTAssertEqual(proposal.transcriptPatches.first?.segmentID, segmentID)
+      XCTAssertEqual(proposal.speakerRenames.first?.newName, "Ben")
+      XCTAssertEqual(proposal.warnings, ["Check the correction against audio."])
 
-    let fallback = LocalSessionDocumentChatClient.decodeProposal(from: "not json")
+      let fallback = LocalSessionDocumentChatClient.decodeProposal(from: "not json")
 
-    XCTAssertEqual(
-      fallback.assistantMessage, "I could not produce a clean document edit from the local model.")
-    XCTAssertFalse(fallback.hasEdits)
-    XCTAssertEqual(
-      fallback.warnings,
-      ["The local model returned an invalid edit shape, so nothing was applied."]
-    )
-  }
+      XCTAssertEqual(
+        fallback.assistantMessage, "I could not produce a clean document edit from the local model."
+      )
+      XCTAssertFalse(fallback.hasEdits)
+      XCTAssertEqual(
+        fallback.warnings,
+        ["The local model returned an invalid edit shape, so nothing was applied."]
+      )
+    }
 
-  func testDocumentChatProposalDoesNotExposeContractLeaksAsAssistantText() throws {
-    let raw = """
-      Only the final answer. Use empty arrays and null recapPatch only for pure question-answer requests.
-      {
-        "assistantMessage": "Return only valid JSON matching the contract.",
-        "recapPatch": {
-          "overview": "Useful overview.",
-          "sections": [
-            {"kind":"keyPoints|decisions|actionItem|openQuestions|nextSteps|notes|overview","title":"Summary","summary":"Bad schema echo.","bullets":["Bad schema echo."]}
-          ]
-        },
-        "transcriptPatches": [],
-        "speakerRenames": [],
-        "warnings": []
-      }
-      """
+    func testDocumentChatProposalDoesNotExposeContractLeaksAsAssistantText() throws {
+      let raw = """
+        Only the final answer. Use empty arrays and null recapPatch only for pure question-answer requests.
+        {
+          "assistantMessage": "Return only valid JSON matching the contract.",
+          "recapPatch": {
+            "overview": "Useful overview.",
+            "sections": [
+              {"kind":"keyPoints|decisions|actionItem|openQuestions|nextSteps|notes|overview","title":"Summary","summary":"Bad schema echo.","bullets":["Bad schema echo."]}
+            ]
+          },
+          "transcriptPatches": [],
+          "speakerRenames": [],
+          "warnings": []
+        }
+        """
 
-    let proposal = LocalSessionDocumentChatClient.decodeProposal(from: raw)
+      let proposal = LocalSessionDocumentChatClient.decodeProposal(from: raw)
 
-    XCTAssertEqual(proposal.assistantMessage, "")
-    XCTAssertEqual(proposal.recapPatch?.overview, "Useful overview.")
-    XCTAssertTrue(proposal.recapPatch?.sections.isEmpty == true)
-  }
+      XCTAssertEqual(proposal.assistantMessage, "")
+      XCTAssertEqual(proposal.recapPatch?.overview, "Useful overview.")
+      XCTAssertTrue(proposal.recapPatch?.sections.isEmpty == true)
+    }
 
-  func testDocumentChatProposalDropsPlaceholderRecapEdits() throws {
-    let raw = """
-      {
-        "assistantMessage": "...",
-        "recapPatch": {
-          "overview": "...",
-          "sections": [
-            {"kind":"actionItem","title":"...","summary":"...","bullets":["..."]}
-          ]
-        },
-        "transcriptPatches": [],
-        "speakerRenames": [],
-        "warnings": ["..."]
-      }
-      """
+    func testDocumentChatProposalDropsPlaceholderRecapEdits() throws {
+      let raw = """
+        {
+          "assistantMessage": "...",
+          "recapPatch": {
+            "overview": "...",
+            "sections": [
+              {"kind":"actionItem","title":"...","summary":"...","bullets":["..."]}
+            ]
+          },
+          "transcriptPatches": [],
+          "speakerRenames": [],
+          "warnings": ["..."]
+        }
+        """
 
-    let proposal = LocalSessionDocumentChatClient.decodeProposal(from: raw)
+      let proposal = LocalSessionDocumentChatClient.decodeProposal(from: raw)
 
-    XCTAssertEqual(proposal.assistantMessage, "")
-    XCTAssertNil(proposal.recapPatch)
-    XCTAssertFalse(proposal.hasEdits)
-    XCTAssertTrue(proposal.warnings.isEmpty)
-  }
+      XCTAssertEqual(proposal.assistantMessage, "")
+      XCTAssertNil(proposal.recapPatch)
+      XCTAssertFalse(proposal.hasEdits)
+      XCTAssertTrue(proposal.warnings.isEmpty)
+    }
 
-  func testDocumentChatStoresEditProposalForPreviewBeforeApply() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sessionID = UUID(uuidString: "163CE418-0884-4C33-A9C8-EBC078E84658")!
-    let segmentID = UUID(uuidString: "7EBA4C2A-F275-43E5-8B03-82A49D49A6AA")!
-    var session = makeSession(
-      id: sessionID,
-      startedAt: Date(timeIntervalSince1970: 5_000),
-      status: .ready,
-      title: "Editable doc",
-      segments: [
-        .init(
-          id: segmentID,
-          speaker: "Transcript",
-          text: "Lunch gate is ready.",
-          timestamp: Date(timeIntervalSince1970: 5_030)
-        )
-      ]
-    )
-    session.recap = LocalSessionRecap(
-      overview: "Old overview.",
-      generatedAt: nil,
-      sections: []
-    )
-    try store.save(session)
-
-    let proposal = LocalSessionDocumentEditProposal(
-      assistantMessage: "Prepared edits.",
-      recapPatch: LocalSessionDocumentRecapPatch(
-        overview: "New overview.",
-        sections: [
+    func testDocumentChatStoresEditProposalForPreviewBeforeApply() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sessionID = UUID(uuidString: "163CE418-0884-4C33-A9C8-EBC078E84658")!
+      let segmentID = UUID(uuidString: "7EBA4C2A-F275-43E5-8B03-82A49D49A6AA")!
+      var session = makeSession(
+        id: sessionID,
+        startedAt: Date(timeIntervalSince1970: 5_000),
+        status: .ready,
+        title: "Editable doc",
+        segments: [
           .init(
-            kind: .keyPoints,
-            title: "Key points",
-            summary: "Updated summary.",
-            bullets: ["Launch gate correction is reflected in the brief."]
+            id: segmentID,
+            speaker: "Transcript",
+            text: "Lunch gate is ready.",
+            timestamp: Date(timeIntervalSince1970: 5_030)
           )
         ]
-      ),
-      transcriptPatches: [
-        .init(segmentID: segmentID, text: "Launch gate is ready.")
-      ],
-      speakerRenames: [
-        .init(oldName: "Transcript", newName: "Ben")
-      ],
-      warnings: []
-    )
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
-    )
-    model.selectSession(id: sessionID)
+      )
+      session.recap = LocalSessionRecap(
+        overview: "Old overview.",
+        generatedAt: nil,
+        sections: []
+      )
+      try store.save(session)
 
-    model.sendDocumentChatMessage("Fix launch gate", for: sessionID)
+      let proposal = LocalSessionDocumentEditProposal(
+        assistantMessage: "Prepared edits.",
+        recapPatch: LocalSessionDocumentRecapPatch(
+          overview: "New overview.",
+          sections: [
+            .init(
+              kind: .keyPoints,
+              title: "Key points",
+              summary: "Updated summary.",
+              bullets: ["Launch gate correction is reflected in the brief."]
+            )
+          ]
+        ),
+        transcriptPatches: [
+          .init(segmentID: segmentID, text: "Launch gate is ready.")
+        ],
+        speakerRenames: [
+          .init(oldName: "Transcript", newName: "Ben")
+        ],
+        warnings: []
+      )
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
+      )
+      model.selectSession(id: sessionID)
 
-    await waitUntil("document chat edit preview is ready") {
-      model.selectedSession?.documentChat.pendingProposal != nil
+      model.sendDocumentChatMessage("Fix launch gate", for: sessionID)
+
+      await waitUntil("document chat edit preview is ready") {
+        model.selectedSession?.documentChat.pendingProposal != nil
+      }
+
+      XCTAssertEqual(model.selectedSession?.recap.overview, "Old overview.")
+      XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.text, "Lunch gate is ready.")
+      XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Transcript")
+      XCTAssertEqual(model.selectedSession?.documentChat.pendingProposal, proposal)
+      XCTAssertTrue(
+        model.selectedSession?.documentChat.messages.last?.text.contains("Preview ready") ?? false)
+
+      let reloaded = try XCTUnwrap(store.loadSessions().first)
+      XCTAssertEqual(reloaded.recap.overview, "Old overview.")
+      XCTAssertEqual(reloaded.documentChat.pendingProposal, proposal)
     }
 
-    XCTAssertEqual(model.selectedSession?.recap.overview, "Old overview.")
-    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.text, "Lunch gate is ready.")
-    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Transcript")
-    XCTAssertEqual(model.selectedSession?.documentChat.pendingProposal, proposal)
-    XCTAssertTrue(
-      model.selectedSession?.documentChat.messages.last?.text.contains("Preview ready") ?? false)
-
-    let reloaded = try XCTUnwrap(store.loadSessions().first)
-    XCTAssertEqual(reloaded.recap.overview, "Old overview.")
-    XCTAssertEqual(reloaded.documentChat.pendingProposal, proposal)
-  }
-
-  func testDocumentChatApplyPreviewPersistsEditsAndUndoSnapshot() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sessionID = UUID(uuidString: "163CE418-0884-4C33-A9C8-EBC078E84658")!
-    let segmentID = UUID(uuidString: "7EBA4C2A-F275-43E5-8B03-82A49D49A6AA")!
-    var session = makeSession(
-      id: sessionID,
-      startedAt: Date(timeIntervalSince1970: 5_000),
-      status: .ready,
-      title: "Editable doc",
-      segments: [
-        .init(
-          id: segmentID,
-          speaker: "Transcript",
-          text: "Lunch gate is ready.",
-          timestamp: Date(timeIntervalSince1970: 5_030)
-        )
-      ]
-    )
-    session.recap = LocalSessionRecap(
-      overview: "Old overview.",
-      generatedAt: nil,
-      sections: []
-    )
-    try store.save(session)
-
-    let proposal = LocalSessionDocumentEditProposal(
-      assistantMessage: "Prepared edits.",
-      recapPatch: LocalSessionDocumentRecapPatch(
-        overview: "New overview.",
-        sections: [
+    func testDocumentChatApplyPreviewPersistsEditsAndUndoSnapshot() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sessionID = UUID(uuidString: "163CE418-0884-4C33-A9C8-EBC078E84658")!
+      let segmentID = UUID(uuidString: "7EBA4C2A-F275-43E5-8B03-82A49D49A6AA")!
+      var session = makeSession(
+        id: sessionID,
+        startedAt: Date(timeIntervalSince1970: 5_000),
+        status: .ready,
+        title: "Editable doc",
+        segments: [
           .init(
-            kind: .keyPoints,
-            title: "Key points",
-            summary: "Updated summary.",
-            bullets: ["Launch gate correction is reflected in the brief."]
+            id: segmentID,
+            speaker: "Transcript",
+            text: "Lunch gate is ready.",
+            timestamp: Date(timeIntervalSince1970: 5_030)
           )
         ]
-      ),
-      transcriptPatches: [
-        .init(segmentID: segmentID, text: "Launch gate is ready.")
-      ],
-      speakerRenames: [
-        .init(oldName: "Transcript", newName: "Ben")
-      ],
-      warnings: []
-    )
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
-    )
-    model.selectSession(id: sessionID)
-
-    model.sendDocumentChatMessage("Fix launch gate", for: sessionID)
-    await waitUntil("document chat edit preview is ready") {
-      model.selectedSession?.documentChat.pendingProposal != nil
-    }
-    model.applyPendingDocumentChatProposal(for: sessionID)
-
-    XCTAssertEqual(model.selectedSession?.recap.overview, "New overview.")
-    XCTAssertEqual(
-      model.selectedSession?.recap.section(kind: .keyPoints)?.summary, "Updated summary.")
-    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.text, "Launch gate is ready.")
-    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Ben")
-    XCTAssertNil(model.selectedSession?.documentChat.pendingProposal)
-    XCTAssertNotNil(model.selectedSession?.documentChat.undoSnapshot)
-    XCTAssertTrue(
-      model.selectedSession?.documentChat.messages.last?.text.contains("Applied") ?? false)
-
-    let reloaded = try XCTUnwrap(store.loadSessions().first)
-    XCTAssertEqual(reloaded.recap.overview, "New overview.")
-    XCTAssertEqual(reloaded.transcriptSegments.first?.speaker, "Ben")
-    XCTAssertNotNil(reloaded.documentChat.undoSnapshot)
-    XCTAssertFalse(
-      LocalSessionRecapMarkdownDocument(session: reloaded).markdown.contains(
-        "Launch gate is ready.")
-    )
-    XCTAssertTrue(
-      LocalSessionRecapMarkdownDocument.markdown(for: reloaded, includeTranscript: true).contains(
-        "Launch gate is ready.")
-    )
-  }
-
-  func testDocumentChatUndoRestoresLastAppliedPreview() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sessionID = UUID(uuidString: "8A0F10A4-7BE5-4623-9D9A-1F89E05C1692")!
-    let segmentID = UUID(uuidString: "208E11C5-B589-43C9-B5CB-552F52C58189")!
-    var session = makeSession(
-      id: sessionID,
-      startedAt: Date(timeIntervalSince1970: 5_250),
-      status: .ready,
-      title: "Undoable doc",
-      segments: [
-        .init(
-          id: segmentID,
-          speaker: "Speaker",
-          text: "Original line.",
-          timestamp: Date(timeIntervalSince1970: 5_260)
-        )
-      ]
-    )
-    session.recap = LocalSessionRecap(overview: "Before.", generatedAt: nil, sections: [])
-    try store.save(session)
-
-    let proposal = LocalSessionDocumentEditProposal(
-      assistantMessage: "Prepared undoable edit.",
-      sessionTitle: "Updated title",
-      recapPatch: LocalSessionDocumentRecapPatch(overview: "After.", sections: []),
-      transcriptPatches: [.init(segmentID: segmentID, text: "Edited line.")],
-      speakerRenames: [.init(oldName: "Speaker", newName: "Ben")],
-      warnings: []
-    )
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
-    )
-    model.selectSession(id: sessionID)
-
-    model.sendDocumentChatMessage("Update the document", for: sessionID)
-    await waitUntil("document chat edit preview is ready") {
-      model.selectedSession?.documentChat.pendingProposal != nil
-    }
-    model.applyPendingDocumentChatProposal(for: sessionID)
-    model.undoLastDocumentChatEdit(for: sessionID)
-
-    XCTAssertEqual(model.selectedSession?.title, "Undoable doc")
-    XCTAssertEqual(model.selectedSession?.recap.overview, "Before.")
-    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Speaker")
-    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.text, "Original line.")
-    XCTAssertNil(model.selectedSession?.documentChat.undoSnapshot)
-    XCTAssertTrue(
-      model.selectedSession?.documentChat.messages.last?.text.contains("Undid") ?? false)
-  }
-
-  func testDocumentChatApplyMarkdownReplacementClearsDocumentAndUndoRestoresIt()
-    async throws
-  {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sessionID = UUID(uuidString: "673AE53A-2016-4D1D-AB90-6194255BE5D4")!
-    var session = makeSession(
-      id: sessionID,
-      startedAt: Date(timeIntervalSince1970: 5_400),
-      status: .ready,
-      title: "Clearable doc",
-      segments: [
-        .init(
-          id: UUID(uuidString: "C73A861D-C1C6-4D3B-B309-22184C8D611B")!,
-          speaker: "Speaker",
-          text: "The original session content remains available in the transcript.",
-          timestamp: Date(timeIntervalSince1970: 5_430)
-        )
-      ]
-    )
-    session.recap = LocalSessionRecap(overview: "Original overview.", generatedAt: nil, sections: [])
-    try store.save(session)
-
-    let proposal = LocalSessionDocumentEditProposal(
-      assistantMessage: "Prepared a blank Markdown document.",
-      documentMarkdown: "",
-      recapPatch: nil,
-      transcriptPatches: [],
-      speakerRenames: [],
-      warnings: []
-    )
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
-    )
-    model.selectSession(id: sessionID)
-
-    model.sendDocumentChatMessage("תמחק הכל", for: sessionID)
-    await waitUntil("document chat Markdown replacement preview is ready") {
-      model.selectedSession?.documentChat.pendingProposal != nil
-    }
-    model.applyPendingDocumentChatProposal(for: sessionID)
-
-    let cleared = try XCTUnwrap(model.selectedSession)
-    XCTAssertEqual(cleared.documentMarkdown, "")
-    XCTAssertEqual(
-      LocalSessionRecapMarkdownDocument.markdown(for: cleared, includeTranscript: true), "")
-    XCTAssertNil(cleared.documentChat.pendingProposal)
-    XCTAssertNotNil(cleared.documentChat.undoSnapshot)
-
-    let reloaded = try XCTUnwrap(store.loadSessions().first)
-    XCTAssertEqual(reloaded.documentMarkdown, "")
-    XCTAssertEqual(LocalSessionRecapMarkdownDocument(session: reloaded).markdown, "")
-
-    model.undoLastDocumentChatEdit(for: sessionID)
-
-    let restored = try XCTUnwrap(model.selectedSession)
-    XCTAssertNil(restored.documentMarkdown)
-    XCTAssertTrue(
-      LocalSessionRecapMarkdownDocument(session: restored).markdown.contains("Original overview."))
-  }
-
-  func testDocumentChatDoesNotClaimAppliedEditWhenProposalChangesNothing() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sessionID = UUID(uuidString: "88E1F6F2-8E0A-4F29-8A92-35C022BB7C22")!
-    var session = makeSession(
-      id: sessionID,
-      startedAt: Date(timeIntervalSince1970: 5_500),
-      status: .ready,
-      title: "No-op edit",
-      segments: [
-        .init(
-          id: UUID(uuidString: "34C294B0-37C0-4B6D-938F-C9A14C74F7F4")!,
-          speaker: "You",
-          text: "Original transcript.",
-          timestamp: Date(timeIntervalSince1970: 5_510)
-        )
-      ]
-    )
-    session.recap = LocalSessionRecap(
-      overview: "Original overview.",
-      generatedAt: nil,
-      sections: []
-    )
-    try store.save(session)
-
-    let proposal = LocalSessionDocumentEditProposal(
-      assistantMessage: "Done, I changed it.",
-      recapPatch: nil,
-      transcriptPatches: [
-        .init(
-          segmentID: UUID(uuidString: "39965F81-B919-4B0A-B712-6089681F7E7B")!,
-          text: "This patch cannot be applied."
-        )
-      ],
-      speakerRenames: [],
-      warnings: []
-    )
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
-    )
-    model.selectSession(id: sessionID)
-
-    model.sendDocumentChatMessage("Fix the document", for: sessionID)
-
-    await waitUntil("document chat no-op preview is ready") {
-      model.selectedSession?.documentChat.pendingProposal != nil
-    }
-    model.applyPendingDocumentChatProposal(for: sessionID)
-
-    XCTAssertEqual(model.selectedSession?.recap.overview, "Original overview.")
-    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.text, "Original transcript.")
-    XCTAssertNotEqual(
-      model.selectedSession?.documentChat.messages.last?.text,
-      "Done, I changed it."
-    )
-    XCTAssertTrue(
-      model.selectedSession?.documentChat.messages.last?.text.contains("could not apply")
-        ?? false)
-  }
-
-  func testDocumentChatAppliesSessionTitlePatch() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sessionID = UUID(uuidString: "4DE509B7-26DA-47B4-95CA-E6E7D27C517B")!
-    try store.save(
-      makeSession(
-        id: sessionID,
-        startedAt: Date(timeIntervalSince1970: 5_700),
-        status: .ready,
-        title: "Session 30 Apr 2026 at 12:26"
       )
-    )
-
-    let proposal = LocalSessionDocumentEditProposal(
-      assistantMessage: "Updated the title.",
-      sessionTitle: "קטע מלייב של מורה מבוכים ערוץ דונקי",
-      recapPatch: nil,
-      transcriptPatches: [],
-      speakerRenames: [],
-      warnings: []
-    )
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
-    )
-    model.selectSession(id: sessionID)
-
-    model.sendDocumentChatMessage("תעדכן את הכותרת", for: sessionID)
-
-    await waitUntil("document title patch preview is ready") {
-      model.selectedSession?.documentChat.pendingProposal != nil
-    }
-    XCTAssertEqual(model.selectedSession?.title, "Session 30 Apr 2026 at 12:26")
-    model.applyPendingDocumentChatProposal(for: sessionID)
-
-    XCTAssertEqual(model.selectedSession?.title, "קטע מלייב של מורה מבוכים ערוץ דונקי")
-    XCTAssertTrue(
-      model.selectedSession?.documentChat.messages.last?.text.contains("Applied") ?? false)
-    XCTAssertEqual(
-      try XCTUnwrap(store.loadSessions().first { $0.id == sessionID }).title,
-      "קטע מלייב של מורה מבוכים ערוץ דונקי"
-    )
-  }
-
-  func testDocumentChatHistoryIsSavedAndReloadedWithSession() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sessionID = UUID(uuidString: "7C14217C-A3F5-4901-ACB3-76E1A6D276AF")!
-    try store.save(
-      makeSession(
-        id: sessionID,
-        startedAt: Date(timeIntervalSince1970: 6_000),
-        status: .ready,
-        title: "Chat history"
+      session.recap = LocalSessionRecap(
+        overview: "Old overview.",
+        generatedAt: nil,
+        sections: []
       )
-    )
-    let service = StubLocalSessionDocumentChatClient(
-      result: .init(
-        assistantMessage: "No edit needed.",
+      try store.save(session)
+
+      let proposal = LocalSessionDocumentEditProposal(
+        assistantMessage: "Prepared edits.",
+        recapPatch: LocalSessionDocumentRecapPatch(
+          overview: "New overview.",
+          sections: [
+            .init(
+              kind: .keyPoints,
+              title: "Key points",
+              summary: "Updated summary.",
+              bullets: ["Launch gate correction is reflected in the brief."]
+            )
+          ]
+        ),
+        transcriptPatches: [
+          .init(segmentID: segmentID, text: "Launch gate is ready.")
+        ],
+        speakerRenames: [
+          .init(oldName: "Transcript", newName: "Ben")
+        ],
+        warnings: []
+      )
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
+      )
+      model.selectSession(id: sessionID)
+
+      model.sendDocumentChatMessage("Fix launch gate", for: sessionID)
+      await waitUntil("document chat edit preview is ready") {
+        model.selectedSession?.documentChat.pendingProposal != nil
+      }
+      model.applyPendingDocumentChatProposal(for: sessionID)
+
+      XCTAssertEqual(model.selectedSession?.recap.overview, "New overview.")
+      XCTAssertEqual(
+        model.selectedSession?.recap.section(kind: .keyPoints)?.summary, "Updated summary.")
+      XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.text, "Launch gate is ready.")
+      XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Ben")
+      XCTAssertNil(model.selectedSession?.documentChat.pendingProposal)
+      XCTAssertNotNil(model.selectedSession?.documentChat.undoSnapshot)
+      XCTAssertTrue(
+        model.selectedSession?.documentChat.messages.last?.text.contains("Applied") ?? false)
+
+      let reloaded = try XCTUnwrap(store.loadSessions().first)
+      XCTAssertEqual(reloaded.recap.overview, "New overview.")
+      XCTAssertEqual(reloaded.transcriptSegments.first?.speaker, "Ben")
+      XCTAssertNotNil(reloaded.documentChat.undoSnapshot)
+      XCTAssertFalse(
+        LocalSessionRecapMarkdownDocument(session: reloaded).markdown.contains(
+          "Launch gate is ready.")
+      )
+      XCTAssertTrue(
+        LocalSessionRecapMarkdownDocument.markdown(for: reloaded, includeTranscript: true).contains(
+          "Launch gate is ready.")
+      )
+    }
+
+    func testDocumentChatUndoRestoresLastAppliedPreview() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sessionID = UUID(uuidString: "8A0F10A4-7BE5-4623-9D9A-1F89E05C1692")!
+      let segmentID = UUID(uuidString: "208E11C5-B589-43C9-B5CB-552F52C58189")!
+      var session = makeSession(
+        id: sessionID,
+        startedAt: Date(timeIntervalSince1970: 5_250),
+        status: .ready,
+        title: "Undoable doc",
+        segments: [
+          .init(
+            id: segmentID,
+            speaker: "Speaker",
+            text: "Original line.",
+            timestamp: Date(timeIntervalSince1970: 5_260)
+          )
+        ]
+      )
+      session.recap = LocalSessionRecap(overview: "Before.", generatedAt: nil, sections: [])
+      try store.save(session)
+
+      let proposal = LocalSessionDocumentEditProposal(
+        assistantMessage: "Prepared undoable edit.",
+        sessionTitle: "Updated title",
+        recapPatch: LocalSessionDocumentRecapPatch(overview: "After.", sections: []),
+        transcriptPatches: [.init(segmentID: segmentID, text: "Edited line.")],
+        speakerRenames: [.init(oldName: "Speaker", newName: "Ben")],
+        warnings: []
+      )
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
+      )
+      model.selectSession(id: sessionID)
+
+      model.sendDocumentChatMessage("Update the document", for: sessionID)
+      await waitUntil("document chat edit preview is ready") {
+        model.selectedSession?.documentChat.pendingProposal != nil
+      }
+      model.applyPendingDocumentChatProposal(for: sessionID)
+      model.undoLastDocumentChatEdit(for: sessionID)
+
+      XCTAssertEqual(model.selectedSession?.title, "Undoable doc")
+      XCTAssertEqual(model.selectedSession?.recap.overview, "Before.")
+      XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Speaker")
+      XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.text, "Original line.")
+      XCTAssertNil(model.selectedSession?.documentChat.undoSnapshot)
+      XCTAssertTrue(
+        model.selectedSession?.documentChat.messages.last?.text.contains("Undid") ?? false)
+    }
+
+    func testDocumentChatApplyMarkdownReplacementClearsDocumentAndUndoRestoresIt()
+      async throws
+    {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sessionID = UUID(uuidString: "673AE53A-2016-4D1D-AB90-6194255BE5D4")!
+      var session = makeSession(
+        id: sessionID,
+        startedAt: Date(timeIntervalSince1970: 5_400),
+        status: .ready,
+        title: "Clearable doc",
+        segments: [
+          .init(
+            id: UUID(uuidString: "C73A861D-C1C6-4D3B-B309-22184C8D611B")!,
+            speaker: "Speaker",
+            text: "The original session content remains available in the transcript.",
+            timestamp: Date(timeIntervalSince1970: 5_430)
+          )
+        ]
+      )
+      session.recap = LocalSessionRecap(
+        overview: "Original overview.", generatedAt: nil, sections: [])
+      try store.save(session)
+
+      let proposal = LocalSessionDocumentEditProposal(
+        assistantMessage: "Prepared a blank Markdown document.",
+        documentMarkdown: "",
         recapPatch: nil,
         transcriptPatches: [],
         speakerRenames: [],
         warnings: []
       )
-    )
-    let model = LocalMeetingAppModel(store: store, fileLayout: layout, documentChatService: service)
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
+      )
+      model.selectSession(id: sessionID)
 
-    model.sendDocumentChatMessage("What changed?", for: sessionID)
+      model.sendDocumentChatMessage("תמחק הכל", for: sessionID)
+      await waitUntil("document chat Markdown replacement preview is ready") {
+        model.selectedSession?.documentChat.pendingProposal != nil
+      }
+      model.applyPendingDocumentChatProposal(for: sessionID)
 
-    await waitUntil("document chat message is saved") {
-      model.selectedSession?.documentChat.messages.count == 2
+      let cleared = try XCTUnwrap(model.selectedSession)
+      XCTAssertEqual(cleared.documentMarkdown, "")
+      XCTAssertEqual(
+        LocalSessionRecapMarkdownDocument.markdown(for: cleared, includeTranscript: true), "")
+      XCTAssertNil(cleared.documentChat.pendingProposal)
+      XCTAssertNotNil(cleared.documentChat.undoSnapshot)
+
+      let reloaded = try XCTUnwrap(store.loadSessions().first)
+      XCTAssertEqual(reloaded.documentMarkdown, "")
+      XCTAssertEqual(LocalSessionRecapMarkdownDocument(session: reloaded).markdown, "")
+
+      model.undoLastDocumentChatEdit(for: sessionID)
+
+      let restored = try XCTUnwrap(model.selectedSession)
+      XCTAssertNil(restored.documentMarkdown)
+      XCTAssertTrue(
+        LocalSessionRecapMarkdownDocument(session: restored).markdown.contains("Original overview.")
+      )
     }
 
-    let reloadedModel = LocalMeetingAppModel(store: store, fileLayout: layout)
+    func testDocumentChatDoesNotClaimAppliedEditWhenProposalChangesNothing() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sessionID = UUID(uuidString: "88E1F6F2-8E0A-4F29-8A92-35C022BB7C22")!
+      var session = makeSession(
+        id: sessionID,
+        startedAt: Date(timeIntervalSince1970: 5_500),
+        status: .ready,
+        title: "No-op edit",
+        segments: [
+          .init(
+            id: UUID(uuidString: "34C294B0-37C0-4B6D-938F-C9A14C74F7F4")!,
+            speaker: "You",
+            text: "Original transcript.",
+            timestamp: Date(timeIntervalSince1970: 5_510)
+          )
+        ]
+      )
+      session.recap = LocalSessionRecap(
+        overview: "Original overview.",
+        generatedAt: nil,
+        sections: []
+      )
+      try store.save(session)
 
-    XCTAssertEqual(
-      reloadedModel.selectedSession?.documentChat.messages.map(\.role), [.user, .assistant])
-    XCTAssertEqual(
-      reloadedModel.selectedSession?.documentChat.messages.last?.text, "No edit needed.")
-  }
+      let proposal = LocalSessionDocumentEditProposal(
+        assistantMessage: "Done, I changed it.",
+        recapPatch: nil,
+        transcriptPatches: [
+          .init(
+            segmentID: UUID(uuidString: "39965F81-B919-4B0A-B712-6089681F7E7B")!,
+            text: "This patch cannot be applied."
+          )
+        ],
+        speakerRenames: [],
+        warnings: []
+      )
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
+      )
+      model.selectSession(id: sessionID)
+
+      model.sendDocumentChatMessage("Fix the document", for: sessionID)
+
+      await waitUntil("document chat no-op preview is ready") {
+        model.selectedSession?.documentChat.pendingProposal != nil
+      }
+      model.applyPendingDocumentChatProposal(for: sessionID)
+
+      XCTAssertEqual(model.selectedSession?.recap.overview, "Original overview.")
+      XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.text, "Original transcript.")
+      XCTAssertNotEqual(
+        model.selectedSession?.documentChat.messages.last?.text,
+        "Done, I changed it."
+      )
+      XCTAssertTrue(
+        model.selectedSession?.documentChat.messages.last?.text.contains("could not apply")
+          ?? false)
+    }
+
+    func testDocumentChatAppliesSessionTitlePatch() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sessionID = UUID(uuidString: "4DE509B7-26DA-47B4-95CA-E6E7D27C517B")!
+      try store.save(
+        makeSession(
+          id: sessionID,
+          startedAt: Date(timeIntervalSince1970: 5_700),
+          status: .ready,
+          title: "Session 30 Apr 2026 at 12:26"
+        )
+      )
+
+      let proposal = LocalSessionDocumentEditProposal(
+        assistantMessage: "Updated the title.",
+        sessionTitle: "קטע מלייב של מורה מבוכים ערוץ דונקי",
+        recapPatch: nil,
+        transcriptPatches: [],
+        speakerRenames: [],
+        warnings: []
+      )
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
+      )
+      model.selectSession(id: sessionID)
+
+      model.sendDocumentChatMessage("תעדכן את הכותרת", for: sessionID)
+
+      await waitUntil("document title patch preview is ready") {
+        model.selectedSession?.documentChat.pendingProposal != nil
+      }
+      XCTAssertEqual(model.selectedSession?.title, "Session 30 Apr 2026 at 12:26")
+      model.applyPendingDocumentChatProposal(for: sessionID)
+
+      XCTAssertEqual(model.selectedSession?.title, "קטע מלייב של מורה מבוכים ערוץ דונקי")
+      XCTAssertTrue(
+        model.selectedSession?.documentChat.messages.last?.text.contains("Applied") ?? false)
+      XCTAssertEqual(
+        try XCTUnwrap(store.loadSessions().first { $0.id == sessionID }).title,
+        "קטע מלייב של מורה מבוכים ערוץ דונקי"
+      )
+    }
+
+    func testDocumentChatHistoryIsSavedAndReloadedWithSession() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sessionID = UUID(uuidString: "7C14217C-A3F5-4901-ACB3-76E1A6D276AF")!
+      try store.save(
+        makeSession(
+          id: sessionID,
+          startedAt: Date(timeIntervalSince1970: 6_000),
+          status: .ready,
+          title: "Chat history"
+        )
+      )
+      let service = StubLocalSessionDocumentChatClient(
+        result: .init(
+          assistantMessage: "No edit needed.",
+          recapPatch: nil,
+          transcriptPatches: [],
+          speakerRenames: [],
+          warnings: []
+        )
+      )
+      let model = LocalMeetingAppModel(
+        store: store, fileLayout: layout, documentChatService: service)
+
+      model.sendDocumentChatMessage("What changed?", for: sessionID)
+
+      await waitUntil("document chat message is saved") {
+        model.selectedSession?.documentChat.messages.count == 2
+      }
+
+      let reloadedModel = LocalMeetingAppModel(store: store, fileLayout: layout)
+
+      XCTAssertEqual(
+        reloadedModel.selectedSession?.documentChat.messages.map(\.role), [.user, .assistant])
+      XCTAssertEqual(
+        reloadedModel.selectedSession?.documentChat.messages.last?.text, "No edit needed.")
+    }
+  #endif
 
   func testStoredDocumentChatClearsStaleLocalModelUnavailableError() throws {
     let layout = LocalMeetingFileLayout(
@@ -2021,7 +2195,8 @@ final class LocalMeetingAppModelTests: XCTestCase {
         .init(
           id: UUID(uuidString: "21120AAC-EB6D-43CC-9455-F3E1C2955753")!,
           role: .assistant,
-          text: "המסמך עוסק בועכשיו אני למשל לוקח סרטון, בואו ניקח איזה סרטון ההיסטוריה שראיתי ביוטיוב, אני רוצה משהו בעברית",
+          text:
+            "המסמך עוסק בועכשיו אני למשל לוקח סרטון, בואו ניקח איזה סרטון ההיסטוריה שראיתי ביוטיוב, אני רוצה משהו בעברית",
           createdAt: Date(timeIntervalSince1970: 6_612)
         ),
       ],
@@ -2325,7 +2500,8 @@ final class LocalMeetingAppModelTests: XCTestCase {
           id: UUID(uuidString: "59C96C8C-A8EA-420E-8B9C-90CC3655EF92")!,
           kind: .notes,
           title: "תעדכן את הכותרת - קטע מלייב של מורה מבוכים ערוץ דונקי",
-          summary: "סעיף נוסף במסמך שמתייחס לתעדכן את הכותרת - קטע מלייב של מורה מבוכים ערוץ דונקי.",
+          summary:
+            "סעיף נוסף במסמך שמתייחס לתעדכן את הכותרת - קטע מלייב של מורה מבוכים ערוץ דונקי.",
           bullets: [
             "להוסיף למסמך התייחסות לתעדכן את הכותרת - קטע מלייב של מורה מבוכים ערוץ דונקי."
           ],
@@ -2343,123 +2519,580 @@ final class LocalMeetingAppModelTests: XCTestCase {
     XCTAssertNil(model.selectedSession?.recap.section(kind: .notes))
   }
 
-  func testDocumentChatPreviewApplyAndOfflineErrorStates() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sessionID = UUID(uuidString: "CFB22680-3D8E-49C1-9457-5DA3D102BD78")!
-    try store.save(
-      makeSession(
+  // Retained as historical coverage for the retired automatic recap repair pipeline.
+  #if LEGACY_AUTOMATIC_RECAP_TESTS
+    func testInitRepairsUnsupportedWebsiteThemeFallbackForHebrewVoiceNote() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let startedAt = Date(timeIntervalSince1970: 7_000)
+      let sessionID = UUID(uuidString: "D96BEFDF-1D42-4716-9ACF-361DF7C5481C")!
+      var session = makeSession(
         id: sessionID,
-        startedAt: Date(timeIntervalSince1970: 7_000),
+        startedAt: startedAt,
         status: .ready,
-        title: "Offline chat"
+        title: "Session 6 May 2026 at 23:38",
+        segments: [
+          .init(
+            id: UUID(uuidString: "46E71017-30EF-4807-95F6-060A3DEC73C8")!,
+            speaker: "Remote speaker",
+            text: "טוב, בקיצור, לא יודע, היא לא ענתה בהודעות יותר.",
+            timestamp: startedAt.addingTimeInterval(1)
+          ),
+          .init(
+            id: UUID(uuidString: "23AE0191-E611-456E-B3A9-7868D11211E9")!,
+            speaker: "Remote speaker",
+            text: "אני לא יודע, אולי שווה לא לשתף על ספסה.",
+            timestamp: startedAt.addingTimeInterval(78)
+          ),
+          .init(
+            id: UUID(uuidString: "63D3F133-86E8-401B-B6D9-60AC0C085617")!,
+            speaker: "You",
+            text: "תשמע, אני עושה ללקוחות אתרים, אבל פה דיברנו על קבינט ומה קורה אצלך במסך.",
+            timestamp: startedAt.addingTimeInterval(124)
+          ),
+          .init(
+            id: UUID(uuidString: "54B2B2B2-D8C7-4D8E-A0D8-BFA4A893A379")!,
+            speaker: "Remote speaker",
+            text: "הייתי צריך איזה משימת עדכון בעיצוב קיים, לא לבנות מחדש.",
+            timestamp: startedAt.addingTimeInterval(138)
+          ),
+          .init(
+            id: UUID(uuidString: "7D6F2F48-5D9B-4D2F-8D7D-7F991B85DFE8")!,
+            speaker: "Remote speaker",
+            text: "מה זה כזה כבד?",
+            timestamp: startedAt.addingTimeInterval(144)
+          ),
+        ]
       )
-    )
-    let proposal = LocalSessionDocumentEditProposal(
-      assistantMessage: "Prepared.",
-      recapPatch: LocalSessionDocumentRecapPatch(overview: "Draft.", sections: []),
-      transcriptPatches: [],
-      speakerRenames: [],
-      warnings: []
-    )
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
-    )
-
-    model.sendDocumentChatMessage("Draft", for: sessionID)
-    await waitUntil("proposal is held for preview") {
-      model.selectedSession?.documentChat.pendingProposal != nil
-    }
-    XCTAssertEqual(model.selectedSession?.recap.overview, "")
-    model.applyPendingDocumentChatProposal(for: sessionID)
-    XCTAssertNil(model.selectedSession?.documentChat.pendingProposal)
-    XCTAssertEqual(model.selectedSession?.recap.overview, "Draft.")
-
-    let failingModel = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      documentChatService: FailingLocalSessionDocumentChatClient()
-    )
-    failingModel.sendDocumentChatMessage("Retry", for: sessionID)
-
-    await waitUntil("offline error is exposed") {
-      failingModel.selectedSession?.documentChat.status == .failed
-    }
-
-    XCTAssertNotNil(failingModel.selectedSession?.documentChat.errorMessage)
-  }
-
-  func testRegenerateRecapRewritesBriefFromExistingTranscript() async throws {
-    let layout = LocalMeetingFileLayout(
-      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
-    let store = LocalMeetingSessionStore(fileLayout: layout)
-    let sessionID = UUID(uuidString: "3B9308EB-C297-4B37-809B-F6E9068F3EC9")!
-    var session = makeSession(
-      id: sessionID,
-      startedAt: Date(timeIntervalSince1970: 8_000),
-      status: .ready,
-      title: "Rewrite recap",
-      segments: [
-        .init(
-          id: UUID(uuidString: "7F32663B-AC38-4533-B756-7D26905B49C9")!,
-          speaker: "You",
-          text: "Regenerate the brief from this transcript.",
-          timestamp: Date(timeIntervalSince1970: 8_020)
-        )
-      ]
-    )
-    session.recap = LocalSessionRecap(
-      overview: "Old brief.",
-      generatedAt: Date(timeIntervalSince1970: 8_030),
-      sections: []
-    )
-    try store.save(session)
-
-    let recapGenerator = BlockingRecapGenerator()
-    let model = LocalMeetingAppModel(
-      store: store,
-      fileLayout: layout,
-      recapGenerator: recapGenerator,
-      contentClassifier: ImmediateContentClassifier(type: .generalTranscript)
-    )
-    model.selectSession(id: sessionID)
-
-    model.regenerateRecap(for: sessionID)
-
-    await waitUntil("recap regeneration starts") {
-      model.isGeneratingRecap(for: sessionID)
-    }
-
-    recapGenerator.finish(
-      with: LocalSessionRecap(
-        overview: "Fresh brief.",
-        generatedAt: Date(timeIntervalSince1970: 8_040),
+      session.recap = LocalSessionRecap(
+        overview:
+          "The voice note focused on site performance and scrolling behavior, clearer calls to action, the interview simulation area.",
+        generatedAt: startedAt.addingTimeInterval(200),
         sections: [
           LocalSessionRecapSection(
-            id: UUID(uuidString: "AB00E760-D42D-43DC-B429-81E2CC551156")!,
-            kind: .keyPoints,
-            title: "Key points",
-            summary: "New summary.",
-            bullets: ["New bullet."],
+            id: UUID(uuidString: "052F5B99-218D-4C7F-8E6F-3D505882DE21")!,
+            kind: .actionItem,
+            title: "Follow-up",
+            summary: "Follow-up work or message actions implied by the note.",
+            bullets: [
+              "Review the scrolling and section-jump behavior across different devices and browsers.",
+              "Update the interview simulation section with clear HR and tech paths and a coming-soon state.",
+            ],
             anchorTimestamp: nil,
             startOffset: nil,
             endOffset: nil
           )
         ]
       )
-    )
+      try store.save(session)
 
-    await waitUntil("recap regeneration finishes") {
-      model.selectedSession?.recap.overview == "Fresh brief."
+      let recapGenerator = BlockingRecapGenerator()
+      recapGenerator.finish(
+        with: LocalSessionRecap(
+          overview: "Clean rebuilt brief.",
+          generatedAt: startedAt.addingTimeInterval(240),
+          sections: [
+            LocalSessionRecapSection(
+              id: UUID(uuidString: "1A38BB52-FA1A-4D70-8D55-870A0C96F56D")!,
+              kind: .keyPoints,
+              title: "Key points",
+              summary: "The rebuilt recap came from the model path.",
+              bullets: ["The stale website brief was replaced through recap regeneration."],
+              anchorTimestamp: nil,
+              startOffset: nil,
+              endOffset: nil
+            )
+          ]
+        )
+      )
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        recapGenerator: recapGenerator,
+        contentClassifier: ImmediateContentClassifier(type: .voiceNote)
+      )
+
+      await waitUntil("website fallback recap is regenerated on init") {
+        model.selectedSession?.recap.overview == "Clean rebuilt brief."
+      }
+
+      let repaired = try XCTUnwrap(model.selectedSession)
+      let recapText =
+        ([repaired.recap.overview]
+        + repaired.recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+        .joined(separator: "\n")
+
+      XCTAssertFalse(recapText.contains("site performance"))
+      XCTAssertFalse(recapText.contains("scrolling behavior"))
+      XCTAssertFalse(recapText.contains("interview simulation"))
+      XCTAssertFalse(recapText.contains("היא לא ענתה בהודעות יותר"))
+      XCTAssertFalse(recapText.contains("אני לא יודע, אולי שווה לא לשתף על ספסה"))
+      XCTAssertTrue(recapText.contains("replaced through recap regeneration"))
     }
 
-    XCTAssertFalse(model.isGeneratingRecap(for: sessionID))
-    XCTAssertEqual(model.selectedSession?.recap.section(kind: .keyPoints)?.summary, "New summary.")
-    XCTAssertEqual(store.loadSessions().first?.recap.overview, "Fresh brief.")
+    func testInitRepairsStaleHebrewTranscriptCopyFallback() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let startedAt = Date(timeIntervalSince1970: 7_400)
+      let sessionID = UUID(uuidString: "D96BEFDF-1D42-4716-9ACF-361DF7C5481C")!
+      var session = makeSession(
+        id: sessionID,
+        startedAt: startedAt,
+        status: .ready,
+        title: "Session 6 May 2026 at 21:50",
+        segments: [
+          .init(
+            id: UUID(uuidString: "A2E1D23F-40BE-4C40-B14D-31F1D854A95B")!,
+            speaker: "Remote speaker",
+            text: "שמע, לכולם, הוא לא רוצה למות",
+            timestamp: startedAt.addingTimeInterval(2)
+          ),
+          .init(
+            id: UUID(uuidString: "F4CB6660-2CA1-477B-A403-B4B8EE67F0F8")!,
+            speaker: "Remote speaker",
+            text: "אני דווקא מהחבר'ה שיגיע לחיים ארוכים ויקבל קלון",
+            timestamp: startedAt.addingTimeInterval(6)
+          ),
+          .init(
+            id: UUID(uuidString: "560C9A1A-07B2-405D-8E27-EC1032C850A3")!,
+            speaker: "Remote speaker",
+            text: "שיחיה ויסבול",
+            timestamp: startedAt.addingTimeInterval(10)
+          ),
+        ]
+      )
+      session.recap = LocalSessionRecap(
+        overview:
+          "המסמך עוסק בשמע, לכולם, הוא לא רוצה למות אני דווקא מהחבר'ה שיגיע לחיים ארוכים ויקבל קלון שיחיה ויסבול",
+        generatedAt: startedAt.addingTimeInterval(20),
+        sections: [
+          LocalSessionRecapSection(
+            id: UUID(uuidString: "D019355E-4F25-4488-8EEA-189FC620BFD1")!,
+            kind: .keyPoints,
+            title: "נקודות חשובות",
+            summary: "הנקודות החשובות שעלו במסמך.",
+            bullets: [
+              "שמע, לכולם, הוא לא רוצה למות",
+              "אני דווקא מהחבר'ה שיגיע לחיים ארוכים ויקבל קלון",
+            ],
+            anchorTimestamp: nil,
+            startOffset: nil,
+            endOffset: nil
+          )
+        ]
+      )
+      try store.save(session)
+
+      let recapGenerator = BlockingRecapGenerator()
+      recapGenerator.finish(
+        with: LocalSessionRecap(
+          overview: "Structured rebuilt brief.",
+          generatedAt: startedAt.addingTimeInterval(40),
+          sections: [
+            LocalSessionRecapSection(
+              id: UUID(uuidString: "C1E7AD2F-B683-4C2C-B918-7BE7F17A5D74")!,
+              kind: .keyPoints,
+              title: "Key points",
+              summary: "The rebuilt recap avoids transcript-copy output.",
+              bullets: ["The model path rewrote the stale recap into a fresh brief."],
+              anchorTimestamp: nil,
+              startOffset: nil,
+              endOffset: nil
+            )
+          ]
+        )
+      )
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        recapGenerator: recapGenerator,
+        contentClassifier: ImmediateContentClassifier(type: .generalTranscript)
+      )
+
+      await waitUntil("transcript-copy fallback is regenerated on init") {
+        model.selectedSession?.recap.overview == "Structured rebuilt brief."
+      }
+
+      let repaired = try XCTUnwrap(model.selectedSession)
+      let recapText =
+        ([repaired.recap.overview]
+        + repaired.recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+        .joined(separator: "\n")
+
+      XCTAssertFalse(recapText.contains("שמע, לכולם, הוא לא רוצה למות"))
+      XCTAssertFalse(recapText.contains("אני דווקא מהחבר'ה שיגיע לחיים ארוכים ויקבל קלון"))
+      XCTAssertTrue(recapText.contains("fresh brief"))
+    }
+
+    func testInitRepairsGenericHebrewTranscriptPlaceholderFallback() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let startedAt = Date(timeIntervalSince1970: 7_700)
+      let sessionID = UUID(uuidString: "6E34426A-4A48-4A4B-9D7D-64E1F53288B2")!
+      var session = makeSession(
+        id: sessionID,
+        startedAt: startedAt,
+        status: .ready,
+        title: "Session 6 May 2026 at 21:50",
+        segments: [
+          .init(
+            id: UUID(uuidString: "F12D34F8-556D-4CDE-917E-8A523FE8AE47")!,
+            speaker: "Remote speaker",
+            text: "המודל צריך לקרוא את כל התמלול ולהבין את כל הקונטקסט.",
+            timestamp: startedAt.addingTimeInterval(2)
+          ),
+          .init(
+            id: UUID(uuidString: "1C40E6D7-16D0-4E21-B2DB-4F73C0F49206")!,
+            speaker: "Remote speaker",
+            text: "אחרי שהוא מבין שיפרק לחלקים קטנים לפי מה שהוא רואה לנכון ויכין מזה מסמך.",
+            timestamp: startedAt.addingTimeInterval(6)
+          ),
+        ]
+      )
+      session.recap = LocalSessionRecap(
+        overview:
+          "המסמך מבוסס על תמלול בעברית של שיחה. הוא לא אמור לשחזר את המשפטים עצמם, אלא לזקק מתוכו נושאים, כוונות ופעולות המשך שאפשר לעבוד איתן.",
+        generatedAt: startedAt.addingTimeInterval(20),
+        sections: [
+          LocalSessionRecapSection(
+            id: UUID(uuidString: "959F98D5-9F56-4607-BF1E-2DDB21D4CF3E")!,
+            kind: .overview,
+            title: "על מה המסמך",
+            summary:
+              "המסמך מבוסס על תמלול בעברית של שיחה. הוא לא אמור לשחזר את המשפטים עצמם, אלא לזקק מתוכו נושאים, כוונות ופעולות המשך שאפשר לעבוד איתן.",
+            bullets: [
+              "המסמך מבוסס על תמלול בעברית של שיחה. הוא לא אמור לשחזר את המשפטים עצמם, אלא לזקק מתוכו נושאים, כוונות ופעולות המשך שאפשר לעבוד איתן."
+            ],
+            anchorTimestamp: nil,
+            startOffset: nil,
+            endOffset: nil
+          ),
+          LocalSessionRecapSection(
+            id: UUID(uuidString: "4030E245-2B5A-4E41-B3F4-8B19EFA63408")!,
+            kind: .keyPoints,
+            title: "נקודות חשובות",
+            summary: "הנקודות החשובות שעלו במסמך.",
+            bullets: ["עולות מהמקור נקודות שמרמזות על פעולות המשך."],
+            anchorTimestamp: nil,
+            startOffset: nil,
+            endOffset: nil
+          ),
+          LocalSessionRecapSection(
+            id: UUID(uuidString: "E326CC43-CCFB-4735-87B8-541B0E365AD8")!,
+            kind: .decisions,
+            title: "מה הובן מהמקור",
+            summary: "דברים שאפשר להבין מהמקור בלי להוסיף מידע חיצוני.",
+            bullets: ["יש רמזים לכיוון או העדפה."],
+            anchorTimestamp: nil,
+            startOffset: nil,
+            endOffset: nil
+          ),
+          LocalSessionRecapSection(
+            id: UUID(uuidString: "42C83E84-C780-448D-9284-66D71FCD764A")!,
+            kind: .actionItem,
+            title: "המשך טיפול",
+            summary: "פעולות המשך שנובעות מהמסמך.",
+            bullets: ["להוציא מהתמלול רק פעולות המשך ברורות."],
+            anchorTimestamp: nil,
+            startOffset: nil,
+            endOffset: nil
+          ),
+        ]
+      )
+      try store.save(session)
+
+      let recapGenerator = BlockingRecapGenerator()
+      recapGenerator.finish(
+        with: LocalSessionRecap(
+          overview: "Model rebuilt from the full transcript.",
+          generatedAt: startedAt.addingTimeInterval(40),
+          sections: [
+            LocalSessionRecapSection(
+              id: UUID(uuidString: "6C3FC8FB-8D6E-440B-B43A-949A7439D675")!,
+              kind: .keyPoints,
+              title: "Key points",
+              summary: "The rebuilt recap reflects the intended document workflow.",
+              bullets: ["The model read the source and organized it into a proper brief."],
+              anchorTimestamp: nil,
+              startOffset: nil,
+              endOffset: nil
+            )
+          ]
+        )
+      )
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        recapGenerator: recapGenerator,
+        contentClassifier: ImmediateContentClassifier(type: .generalTranscript)
+      )
+
+      await waitUntil("generic placeholder recap is regenerated on init") {
+        model.selectedSession?.recap.overview == "Model rebuilt from the full transcript."
+      }
+
+      let repaired = try XCTUnwrap(model.selectedSession)
+      let recapText =
+        ([repaired.recap.overview]
+        + repaired.recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+        .joined(separator: "\n")
+
+      XCTAssertFalse(recapText.contains("המסמך מבוסס על תמלול בעברית של שיחה"))
+      XCTAssertFalse(recapText.contains("המשך טיפול"))
+      XCTAssertTrue(recapText.contains("proper brief"))
+    }
+
+    func testInitRepairsSchemaPlaceholderFallback() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let startedAt = Date(timeIntervalSince1970: 7_900)
+      let sessionID = UUID(uuidString: "A65A632E-507F-4C8A-9EE3-776E46A08FE4")!
+      var session = makeSession(
+        id: sessionID,
+        startedAt: startedAt,
+        status: .ready,
+        title: "Schema placeholder",
+        segments: [
+          .init(
+            id: UUID(uuidString: "C90D9541-5864-4608-A050-C85B25C5B517")!,
+            speaker: "You",
+            text: "Turn this transcript into a proper brief.",
+            timestamp: startedAt.addingTimeInterval(2)
+          )
+        ]
+      )
+      session.recap = LocalSessionRecap(
+        overview: "concise paragraph with purpose and current state",
+        generatedAt: startedAt.addingTimeInterval(20),
+        sections: [
+          LocalSessionRecapSection(
+            id: UUID(uuidString: "A3195187-6A7B-4724-947C-B213C2F97E81")!,
+            kind: .actionItem,
+            title: "Owner/person/team",
+            summary: "urgent fixes and next-iteration tasks",
+            bullets: ["urgent fixes and next-iteration tasks"],
+            anchorTimestamp: nil,
+            startOffset: nil,
+            endOffset: nil
+          ),
+          LocalSessionRecapSection(
+            id: UUID(uuidString: "81730F97-0B4F-445E-B617-430AAFF97B66")!,
+            kind: .nextSteps,
+            title: "Professional recommendation",
+            summary: "short professional recommendation",
+            bullets: ["short professional recommendation"],
+            anchorTimestamp: nil,
+            startOffset: nil,
+            endOffset: nil
+          ),
+        ]
+      )
+      try store.save(session)
+
+      let recapGenerator = BlockingRecapGenerator()
+      recapGenerator.finish(
+        with: LocalSessionRecap(
+          overview: "Rebuilt after schema placeholder rejection.",
+          generatedAt: startedAt.addingTimeInterval(40),
+          sections: [
+            LocalSessionRecapSection(
+              id: UUID(uuidString: "E5E6F214-7B99-4C52-8C46-0A6AB57C7CC1")!,
+              kind: .keyPoints,
+              title: "Key points",
+              summary: "The rebuilt recap replaced placeholder output.",
+              bullets: ["A real recap replaced the schema template text."],
+              anchorTimestamp: nil,
+              startOffset: nil,
+              endOffset: nil
+            )
+          ]
+        )
+      )
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        recapGenerator: recapGenerator,
+        contentClassifier: ImmediateContentClassifier(type: .generalTranscript)
+      )
+
+      await waitUntil("schema placeholder recap is regenerated on init") {
+        model.selectedSession?.recap.overview == "Rebuilt after schema placeholder rejection."
+      }
+
+      let repaired = try XCTUnwrap(model.selectedSession)
+      let recapText =
+        ([repaired.recap.overview]
+        + repaired.recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+        .joined(separator: "\n")
+
+      XCTAssertFalse(recapText.contains("concise paragraph with purpose and current state"))
+      XCTAssertFalse(recapText.contains("Owner/person/team"))
+      XCTAssertTrue(recapText.contains("real recap"))
+    }
+  #endif
+
+  func testInitRemovesRepeatedShortTranscriptGlitchesFromStoredSession() throws {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let startedAt = Date(timeIntervalSince1970: 7_200)
+    let repeatedSegments = (0..<24).map { index in
+      LocalMeetingTranscriptSegment(
+        id: UUID(),
+        speaker: index.isMultiple(of: 3) ? "Remote speaker" : "Speaker 1",
+        text: "סבבה?",
+        timestamp: startedAt.addingTimeInterval(Double(index) * 0.25)
+      )
+    }
+    let session = makeSession(
+      id: UUID(uuidString: "A9C34F50-90F0-44DF-8F6C-263535C8FA9F")!,
+      startedAt: startedAt,
+      status: .ready,
+      title: "Noisy transcript",
+      segments: repeatedSegments + [
+        .init(
+          id: UUID(uuidString: "4E9B9D51-0812-4E8E-BBC8-5B3078135C6C")!,
+          speaker: "You",
+          text: "אתה אמור לראות את זה רץ במסמך בחלון פה.",
+          timestamp: startedAt.addingTimeInterval(14)
+        )
+      ]
+    )
+    try store.save(session)
+
+    let model = LocalMeetingAppModel(store: store, fileLayout: layout)
+    let cleaned = try XCTUnwrap(model.selectedSession)
+    let repeatedCount = cleaned.transcriptSegments.filter { $0.text == "סבבה?" }.count
+
+    XCTAssertLessThanOrEqual(repeatedCount, 3)
+    XCTAssertTrue(cleaned.transcriptText.contains("אתה אמור לראות את זה"))
+    XCTAssertLessThan(cleaned.transcriptSegments.count, session.transcriptSegments.count)
   }
+
+  #if LEGACY_DOCUMENT_CHAT_TESTS
+    func testDocumentChatPreviewApplyAndOfflineErrorStates() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sessionID = UUID(uuidString: "CFB22680-3D8E-49C1-9457-5DA3D102BD78")!
+      try store.save(
+        makeSession(
+          id: sessionID,
+          startedAt: Date(timeIntervalSince1970: 7_000),
+          status: .ready,
+          title: "Offline chat"
+        )
+      )
+      let proposal = LocalSessionDocumentEditProposal(
+        assistantMessage: "Prepared.",
+        recapPatch: LocalSessionDocumentRecapPatch(overview: "Draft.", sections: []),
+        transcriptPatches: [],
+        speakerRenames: [],
+        warnings: []
+      )
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        documentChatService: StubLocalSessionDocumentChatClient(result: proposal)
+      )
+
+      model.sendDocumentChatMessage("Draft", for: sessionID)
+      await waitUntil("proposal is held for preview") {
+        model.selectedSession?.documentChat.pendingProposal != nil
+      }
+      XCTAssertEqual(model.selectedSession?.recap.overview, "")
+      model.applyPendingDocumentChatProposal(for: sessionID)
+      XCTAssertNil(model.selectedSession?.documentChat.pendingProposal)
+      XCTAssertEqual(model.selectedSession?.recap.overview, "Draft.")
+
+      let failingModel = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        documentChatService: FailingLocalSessionDocumentChatClient()
+      )
+      failingModel.sendDocumentChatMessage("Retry", for: sessionID)
+
+      await waitUntil("offline error is exposed") {
+        failingModel.selectedSession?.documentChat.status == .failed
+      }
+
+      XCTAssertNotNil(failingModel.selectedSession?.documentChat.errorMessage)
+    }
+
+    func testRegenerateRecapRewritesBriefFromExistingTranscript() async throws {
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+      let store = LocalMeetingSessionStore(fileLayout: layout)
+      let sessionID = UUID(uuidString: "3B9308EB-C297-4B37-809B-F6E9068F3EC9")!
+      var session = makeSession(
+        id: sessionID,
+        startedAt: Date(timeIntervalSince1970: 8_000),
+        status: .ready,
+        title: "Rewrite recap",
+        segments: [
+          .init(
+            id: UUID(uuidString: "7F32663B-AC38-4533-B756-7D26905B49C9")!,
+            speaker: "You",
+            text: "Regenerate the brief from this transcript.",
+            timestamp: Date(timeIntervalSince1970: 8_020)
+          )
+        ]
+      )
+      session.recap = LocalSessionRecap(
+        overview: "Old brief.",
+        generatedAt: Date(timeIntervalSince1970: 8_030),
+        sections: []
+      )
+      try store.save(session)
+
+      let recapGenerator = BlockingRecapGenerator()
+      let model = LocalMeetingAppModel(
+        store: store,
+        fileLayout: layout,
+        recapGenerator: recapGenerator,
+        contentClassifier: ImmediateContentClassifier(type: .generalTranscript)
+      )
+      model.selectSession(id: sessionID)
+
+      model.regenerateRecap(for: sessionID)
+
+      await waitUntil("recap regeneration starts") {
+        model.isGeneratingRecap(for: sessionID)
+      }
+
+      recapGenerator.finish(
+        with: LocalSessionRecap(
+          overview: "Fresh brief.",
+          generatedAt: Date(timeIntervalSince1970: 8_040),
+          sections: [
+            LocalSessionRecapSection(
+              id: UUID(uuidString: "AB00E760-D42D-43DC-B429-81E2CC551156")!,
+              kind: .keyPoints,
+              title: "Key points",
+              summary: "New summary.",
+              bullets: ["New bullet."],
+              anchorTimestamp: nil,
+              startOffset: nil,
+              endOffset: nil
+            )
+          ]
+        )
+      )
+
+      await waitUntil("recap regeneration finishes") {
+        model.selectedSession?.recap.overview == "Fresh brief."
+      }
+
+      XCTAssertFalse(model.isGeneratingRecap(for: sessionID))
+      XCTAssertEqual(
+        model.selectedSession?.recap.section(kind: .keyPoints)?.summary, "New summary.")
+      XCTAssertEqual(store.loadSessions().first?.recap.overview, "Fresh brief.")
+    }
+  #endif
 }
 
 @MainActor
@@ -2609,23 +3242,25 @@ private final class StubLocalSessionAudioImportService: @unchecked Sendable,
   }
 }
 
-private struct StubLocalSessionDocumentChatClient: LocalSessionDocumentChatProviding {
-  let result: LocalSessionDocumentEditProposal
+#if LEGACY_DOCUMENT_CHAT_TESTS
+  private struct StubLocalSessionDocumentChatClient: LocalSessionDocumentChatProviding {
+    let result: LocalSessionDocumentEditProposal
 
-  func sendMessage(_ request: LocalSessionDocumentChatRequest) async throws
-    -> LocalSessionDocumentEditProposal
-  {
-    result
+    func sendMessage(_ request: LocalSessionDocumentChatRequest) async throws
+      -> LocalSessionDocumentEditProposal
+    {
+      result
+    }
   }
-}
 
-private struct FailingLocalSessionDocumentChatClient: LocalSessionDocumentChatProviding {
-  func sendMessage(_ request: LocalSessionDocumentChatRequest) async throws
-    -> LocalSessionDocumentEditProposal
-  {
-    throw NSError(domain: "FailingLocalSessionDocumentChatClient", code: 1)
+  private struct FailingLocalSessionDocumentChatClient: LocalSessionDocumentChatProviding {
+    func sendMessage(_ request: LocalSessionDocumentChatRequest) async throws
+      -> LocalSessionDocumentEditProposal
+    {
+      throw NSError(domain: "FailingLocalSessionDocumentChatClient", code: 1)
+    }
   }
-}
+#endif
 
 @MainActor
 private func waitUntil(
@@ -2643,12 +3278,41 @@ private func waitUntil(
   }
 }
 
+@MainActor
+final class LocalSessionAppModelTests: XCTestCase {
+  func testUpdateSessionTitleTrimsAndPersistsSelectedSession() throws {
+    let sessionID = UUID(uuidString: "A68B8C34-7E52-4F32-9D9D-2C3A6A0E4B1A")!
+    let tempRootURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "LocalSessionAppModelTests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: tempRootURL) }
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    try store.save(
+      makeSession(
+        id: sessionID,
+        startedAt: Date(timeIntervalSince1970: 1_000),
+        status: .ready,
+        title: "Weekly sync"
+      )
+    )
+    let model = LocalMeetingAppModel(store: store, fileLayout: layout)
+
+    model.selectSession(id: sessionID)
+
+    XCTAssertTrue(model.updateSessionTitle("  Strategy review  ", for: sessionID))
+    XCTAssertEqual(model.selectedSession?.title, "Strategy review")
+  }
+}
+
 private func makeSession(
   id: UUID,
   startedAt: Date,
   status: LocalMeetingSessionStatus,
   title: String,
   segments: [LocalMeetingTranscriptSegment] = [],
+  attachments: [LocalMeetingAttachment] = [],
+  captureArtifacts: [LocalMeetingCaptureArtifact] = [],
   audioArtifacts: LocalMeetingAudioArtifacts = .empty
 ) -> LocalMeetingSession {
   LocalMeetingSession(
@@ -2657,6 +3321,8 @@ private func makeSession(
     startedAt: startedAt,
     status: status,
     transcriptSegments: segments,
+    attachments: attachments,
+    captureArtifacts: captureArtifacts,
     audioArtifacts: audioArtifacts
   )
 }

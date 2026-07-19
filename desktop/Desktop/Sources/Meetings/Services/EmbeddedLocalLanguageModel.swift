@@ -43,11 +43,7 @@ enum EmbeddedLocalLanguageModelConfiguration {
       return URL(fileURLWithPath: configuredPath).standardizedFileURL
     }
 
-    if let bundledURL = Bundle.module.url(
-      forResource: bundledModelFileName,
-      withExtension: bundledModelExtension,
-      subdirectory: "Models"
-    ) {
+    if let bundledURL = bundledModelURL(fileManager: fileManager) {
       return bundledURL
     }
 
@@ -97,6 +93,75 @@ enum EmbeddedLocalLanguageModelConfiguration {
     }
 
     return nil
+  }
+
+  static func bundledModelURL(
+    mainBundle: Bundle = .main,
+    fileManager: FileManager = .default
+  ) -> URL? {
+    bundledModelURL(
+      inResourceDirectories: bundledResourceDirectories(
+        mainBundle: mainBundle, fileManager: fileManager),
+      fileManager: fileManager
+    )
+  }
+
+  static func bundledModelURL(
+    inResourceDirectories directories: [URL],
+    fileManager: FileManager = .default
+  ) -> URL? {
+    let modelFileName = "\(bundledModelFileName).\(bundledModelExtension)"
+    for directory in directories {
+      let modelURL =
+        directory
+        .appendingPathComponent("Models", isDirectory: true)
+        .appendingPathComponent(modelFileName)
+      if fileManager.fileExists(atPath: modelURL.path) {
+        return modelURL
+      }
+    }
+    return nil
+  }
+
+  static func bundledResourceDirectories(
+    mainBundle: Bundle = .main,
+    fileManager: FileManager = .default
+  ) -> [URL] {
+    var directories: [URL] = []
+
+    func append(_ url: URL?) {
+      guard let url else { return }
+      let standardizedURL = url.standardizedFileURL
+      if !directories.contains(standardizedURL) {
+        directories.append(standardizedURL)
+      }
+    }
+
+    append(mainBundle.resourceURL)
+    append(
+      mainBundle.resourceURL?.appendingPathComponent(
+        "CepessaSessions_CepessaSessions.bundle", isDirectory: true))
+
+    if let resourceURL = mainBundle.resourceURL,
+      let resourceContents = try? fileManager.contentsOfDirectory(
+        at: resourceURL,
+        includingPropertiesForKeys: [.isDirectoryKey],
+        options: [.skipsHiddenFiles]
+      )
+    {
+      for candidate in resourceContents where candidate.pathExtension == "bundle" {
+        append(candidate)
+      }
+    }
+
+    let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0])
+      .deletingLastPathComponent()
+    append(executableDirectory)
+    append(
+      executableDirectory.appendingPathComponent(
+        "CepessaSessions_CepessaSessions.bundle", isDirectory: true))
+
+    return directories
   }
 }
 

@@ -285,21 +285,28 @@ class AudioCaptureService: @unchecked Sendable {
         onAudioChunk = nil
         onAudioLevel = nil
 
-        // Clean up converter
-        audioConverter = nil
-        inputFormat = nil
-        targetFormat = nil
-        detectedSampleRate = 0.0
         smoothedLevel = 0.0
         lastAudioLevelDispatchTime = 0
         lastDispatchedAudioLevel = 0
 
         // AudioDeviceStop can block waiting for the IO thread — run off main thread
         if let procID = procID, devID != kAudioObjectUnknown {
-            audioQueue.async {
+            audioQueue.async { [self] in
                 AudioDeviceStop(devID, procID)
                 AudioDeviceDestroyIOProcID(devID, procID)
+
+                // CoreAudio can still deliver an IO callback while AudioDeviceStop is
+                // in flight, so only clear the conversion state after the IOProc is done.
+                self.audioConverter = nil
+                self.inputFormat = nil
+                self.targetFormat = nil
+                self.detectedSampleRate = 0.0
             }
+        } else {
+            audioConverter = nil
+            inputFormat = nil
+            targetFormat = nil
+            detectedSampleRate = 0.0
         }
 
         localMeetingLog("AudioCapture: Stopped capturing")
@@ -379,6 +386,25 @@ class AudioCaptureService: @unchecked Sendable {
         return status == noErr ? format : nil
     }
 
+    static func outputFrameCapacity(
+        inputFrameCount: UInt32,
+        sourceSampleRate: Double,
+        targetSampleRate: Double
+    ) -> AVAudioFrameCount? {
+        guard inputFrameCount > 0,
+              sourceSampleRate.isFinite,
+              sourceSampleRate > 0,
+              targetSampleRate.isFinite,
+              targetSampleRate > 0 else { return nil }
+
+        let convertedFrameCount = ceil(Double(inputFrameCount) * targetSampleRate / sourceSampleRate)
+        guard convertedFrameCount.isFinite,
+              convertedFrameCount > 0,
+              convertedFrameCount <= Double(UInt32.max) else { return nil }
+
+        return AVAudioFrameCount(convertedFrameCount)
+    }
+
     /// Handle incoming audio data from the IOProc callback
     private func handleAudioInput(_ inputData: UnsafePointer<AudioBufferList>?, timestamp: UnsafePointer<AudioTimeStamp>?) {
         guard isCapturing,
@@ -416,7 +442,13 @@ class AudioCaptureService: @unchecked Sendable {
         }
 
         // Convert to target format (16kHz mono)
-        let outputFrameCapacity = AVAudioFrameCount(ceil(Double(frameCount) * targetSampleRate / detectedSampleRate))
+        guard
+            let outputFrameCapacity = Self.outputFrameCapacity(
+                inputFrameCount: frameCount,
+                sourceSampleRate: detectedSampleRate,
+                targetSampleRate: targetSampleRate
+            )
+        else { return }
         guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFmt, frameCapacity: outputFrameCapacity) else { return }
 
         var error: NSError?

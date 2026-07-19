@@ -69,6 +69,25 @@ final class LocalSessionRecapExporterTests: XCTestCase {
     XCTAssertFalse(text.contains("## Overview"))
   }
 
+  func testTranscriptMarkdownExportWritesFullTranscriptOnly() throws {
+    let exporter = LocalSessionRecapExporter()
+    let url = try exporter.exportTranscriptMarkdown(
+      session: makeSession(),
+      to: tempDirectory
+    )
+
+    XCTAssertEqual(url.pathExtension, "md")
+
+    let markdown = try String(contentsOf: url, encoding: .utf8)
+    XCTAssertTrue(markdown.contains("# Export Review Transcript"))
+    XCTAssertTrue(markdown.contains("## Transcript"))
+    XCTAssertTrue(markdown.contains("Dana"))
+    XCTAssertTrue(markdown.contains("We agreed to export the recap."))
+    XCTAssertFalse(markdown.contains("## Overview"))
+    XCTAssertFalse(markdown.contains("The team reviewed export options."))
+    XCTAssertFalse(markdown.contains("Add PDF and Markdown export options."))
+  }
+
   private func makeSession() -> LocalMeetingSession {
     let startedAt = Date(timeIntervalSince1970: 2_000_000)
     var session = LocalMeetingSession(

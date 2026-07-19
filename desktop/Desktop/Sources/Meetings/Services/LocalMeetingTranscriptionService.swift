@@ -60,6 +60,97 @@ struct LocalSessionTranscriptionResult: Sendable, Codable, Equatable {
   }
 }
 
+enum LocalSessionTranscriptionPostprocessor {
+  static func cleanSegments(
+    _ segments: [LocalSessionTranscriptionSegment]
+  ) -> [LocalSessionTranscriptionSegment] {
+    guard !segments.isEmpty else { return [] }
+
+    var cleaned: [LocalSessionTranscriptionSegment] = []
+    var index = segments.startIndex
+    while index < segments.endIndex {
+      guard let courtesyKey = courtesyFillerKey(for: segments[index].text) else {
+        cleaned.append(segments[index])
+        index = segments.index(after: index)
+        continue
+      }
+
+      let clusterStart = index
+      var clusterEnd = segments.index(after: index)
+      while clusterEnd < segments.endIndex,
+        courtesyFillerKey(for: segments[clusterEnd].text) == courtesyKey
+      {
+        clusterEnd = segments.index(after: clusterEnd)
+      }
+
+      let clusterCount = segments.distance(from: clusterStart, to: clusterEnd)
+      let isTrailingCluster = clusterEnd == segments.endIndex
+      if clusterCount == 1 {
+        cleaned.append(segments[clusterStart])
+      } else if !isTrailingCluster {
+        cleaned.append(segments[clusterStart])
+      }
+
+      index = clusterEnd
+    }
+
+    return cleaned
+  }
+
+  static func transcriptText(
+    from segments: [LocalSessionTranscriptionSegment],
+    fallback: String
+  ) -> String {
+    let segmentText = segments.map(\.text).joined(separator: " ")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if !segmentText.isEmpty {
+      return segmentText
+    }
+
+    return cleanRepeatedCourtesyFillers(in: fallback)
+  }
+
+  private static func cleanRepeatedCourtesyFillers(in text: String) -> String {
+    let pieces = text
+      .components(separatedBy: .newlines)
+      .flatMap { $0.components(separatedBy: ".") }
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+    guard pieces.count > 1 else { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    let segmentProxies = pieces.map {
+      LocalSessionTranscriptionSegment(startTime: 0, endTime: 0, text: $0)
+    }
+    return cleanSegments(segmentProxies).map(\.text).joined(separator: ". ")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private static func courtesyFillerKey(for text: String) -> String? {
+    let key = text
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: "\u{200f}", with: "")
+      .replacingOccurrences(of: "\u{200e}", with: "")
+      .lowercased()
+      .unicodeScalars
+      .filter { CharacterSet.letters.union(.decimalDigits).contains($0) }
+    let normalized = String(String.UnicodeScalarView(key))
+    guard !normalized.isEmpty else { return nil }
+
+    let courtesyKeys: Set<String> = [
+      "תודה",
+      "תודהרבה",
+      "תודהלכם",
+      "תודהרבהלכם",
+      "thanks",
+      "thankyou",
+      "thankyouverymuch",
+      "thanksverymuch",
+      "thanksalot",
+    ]
+    return courtesyKeys.contains(normalized) ? normalized : nil
+  }
+}
+
 enum LocalSessionTranscriptionServiceError: LocalizedError {
   case invalidAudio(String)
   case modelLoadFailed(String)
@@ -99,7 +190,7 @@ actor LocalSessionTranscriptionService: LocalSessionTranscribing {
   func transcribe(
     wavURL: URL,
     modelURL: URL,
-    language: String = "he",
+    language: String = "auto",
     prompt: String? = nil,
     translateToEnglish: Bool = false,
     onProgress: (@Sendable (LocalSessionTranscriptionProgress) async -> Void)? = nil
@@ -136,7 +227,7 @@ actor LocalSessionWhisperKitTranscriptionService: LocalSessionTranscribing {
   func transcribe(
     wavURL: URL,
     modelURL: URL,
-    language: String = "he",
+    language: String = "auto",
     prompt: String? = nil,
     translateToEnglish: Bool = false,
     onProgress: (@Sendable (LocalSessionTranscriptionProgress) async -> Void)? = nil
@@ -182,7 +273,7 @@ actor LocalSessionWhisperKitTranscriptionService: LocalSessionTranscribing {
       await onProgress(.init(stage: .extractingSegments))
     }
 
-    let segments = results.flatMap { result in
+    let rawSegments = results.flatMap { result in
       result.segments.map { segment in
         LocalSessionTranscriptionSegment(
           startTime: TimeInterval(segment.start),
@@ -192,14 +283,19 @@ actor LocalSessionWhisperKitTranscriptionService: LocalSessionTranscribing {
       }
       .filter { !$0.text.isEmpty }
     }
-    let transcript = results.map(\.text).joined(separator: " ").trimmingCharacters(
+    let cleanedSegments = LocalSessionTranscriptionPostprocessor.cleanSegments(rawSegments)
+    let rawTranscript = results.map(\.text).joined(separator: " ").trimmingCharacters(
       in: .whitespacesAndNewlines)
+    let transcript = LocalSessionTranscriptionPostprocessor.transcriptText(
+      from: cleanedSegments,
+      fallback: rawTranscript
+    )
     let detectedLanguage = results.first { !$0.language.isEmpty }?.language
 
     return LocalSessionTranscriptionResult(
       text: transcript,
       detectedLanguage: detectedLanguage,
-      segments: segments,
+      segments: cleanedSegments,
       modelPath: modelURL.path,
       engine: .whisperKit
     )
@@ -277,7 +373,7 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
   func transcribe(
     wavURL: URL,
     modelURL: URL,
-    language: String = "he",
+    language: String = "auto",
     prompt: String? = nil,
     translateToEnglish: Bool = false,
     onProgress: (@Sendable (LocalSessionTranscriptionProgress) async -> Void)? = nil
@@ -315,7 +411,7 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
   func transcriptText(
     wavURL: URL,
     modelURL: URL,
-    language: String = "he",
+    language: String = "auto",
     prompt: String? = nil,
     translateToEnglish: Bool = false,
     onProgress: (@Sendable (LocalSessionTranscriptionProgress) async -> Void)? = nil
@@ -361,6 +457,9 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
           )
         )
       )
+    }
+    guard !chunks.isEmpty else {
+      return ([], nil)
     }
     let totalChunkSamples = max(1, chunks.reduce(0) { $0 + $1.samples.count })
     var consumedChunkSamples = 0
@@ -422,7 +521,7 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
       return lhs.startTime < rhs.startTime
     }
 
-    return (allItems, detectedLanguage)
+    return (LocalSessionTranscriptionPostprocessor.cleanSegments(allItems), detectedLanguage)
   }
 
   private func transcribeChunk(
@@ -797,14 +896,7 @@ struct LocalMeetingSpeechChunker {
   {
     guard !samples.isEmpty else { return [] }
     guard var currentRegion = regions.first else {
-      return [
-        LocalMeetingSpeechChunk(
-          startSample: 0,
-          endSample: samples.count,
-          speechSampleCount: samples.count,
-          samples: samples
-        )
-      ]
+      return []
     }
 
     var chunks: [LocalMeetingSpeechChunk] = []
@@ -1150,15 +1242,16 @@ struct LocalMeetingMetalResourceLocator {
   ) -> [URL] {
     var directories: [URL] = []
 
-    #if SWIFT_PACKAGE
-      directories.append(Bundle.module.bundleURL)
-      if let resourceURL = Bundle.module.resourceURL {
-        directories.append(resourceURL)
-      }
-    #endif
+    func append(_ url: URL?) {
+      guard let url else { return }
+      directories.append(url)
+    }
 
     if let resourceURL = mainBundle.resourceURL {
-      directories.append(resourceURL)
+      append(resourceURL)
+      append(
+        resourceURL.appendingPathComponent(
+          "CepessaSessions_CepessaSessions.bundle", isDirectory: true))
       if let bundleURLs = try? fileManager.contentsOfDirectory(
         at: resourceURL,
         includingPropertiesForKeys: [.isDirectoryKey],
@@ -1168,7 +1261,12 @@ struct LocalMeetingMetalResourceLocator {
       }
     }
 
-    directories.append(URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent())
+    let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0])
+      .deletingLastPathComponent()
+    append(executableDirectory)
+    append(
+      executableDirectory.appendingPathComponent(
+        "CepessaSessions_CepessaSessions.bundle", isDirectory: true))
     directories.append(contentsOf: developmentResourceDirectories(fileManager: fileManager))
     return uniqueCandidateDirectories(directories)
   }

@@ -43,6 +43,39 @@ final class LocalMeetingTranscriptionPreprocessingTests: XCTestCase {
     XCTAssertTrue(detector.regions(in: samples).isEmpty)
   }
 
+  func testSpeechChunkerReturnsNoChunksWhenNoSpeechRegionsWereDetected() {
+    let samples = Array(
+      repeating: Float.zero, count: LocalMeetingSpeechRegionDetector.sampleRate * 3)
+
+    let chunks = LocalMeetingSpeechChunker().chunks(from: [], samples: samples)
+
+    XCTAssertTrue(chunks.isEmpty)
+  }
+
+  func testTranscriptionPostprocessorRemovesTrailingRepeatedThankYouHallucinations() {
+    let segments = [
+      LocalSessionTranscriptionSegment(startTime: 0, endTime: 2, text: "Actual transcript"),
+      LocalSessionTranscriptionSegment(startTime: 2, endTime: 3, text: "תודה רבה"),
+      LocalSessionTranscriptionSegment(startTime: 3, endTime: 4, text: "תודה רבה"),
+      LocalSessionTranscriptionSegment(startTime: 4, endTime: 5, text: "תודה רבה"),
+    ]
+
+    let cleaned = LocalSessionTranscriptionPostprocessor.cleanSegments(segments)
+
+    XCTAssertEqual(cleaned.map(\.text), ["Actual transcript"])
+  }
+
+  func testTranscriptionPostprocessorKeepsSingleRealCourtesySegment() {
+    let segments = [
+      LocalSessionTranscriptionSegment(startTime: 0, endTime: 2, text: "Actual transcript"),
+      LocalSessionTranscriptionSegment(startTime: 2, endTime: 3, text: "תודה רבה"),
+    ]
+
+    let cleaned = LocalSessionTranscriptionPostprocessor.cleanSegments(segments)
+
+    XCTAssertEqual(cleaned.map(\.text), ["Actual transcript", "תודה רבה"])
+  }
+
   func testNormalizedSamplesForRecognitionAmplifiesQuietAudio() {
     let samples: [Float] = [0.06, -0.03, 0.0, 0.015]
 
@@ -56,12 +89,35 @@ final class LocalMeetingTranscriptionPreprocessingTests: XCTestCase {
     XCTAssertLessThan(abs(normalized[3] - 0.055), 0.001)
   }
 
+  func testTranscriptMixerRaisesQuietSystemSpeechAboveDetectorThreshold() {
+    let frameCount = LocalMeetingSpeechRegionDetector.sampleRate
+    let quietSystemSamples = Array(repeating: Int16(150), count: frameCount)
+    let quietSystemData = quietSystemSamples.withUnsafeBufferPointer { Data(buffer: $0) }
+    let silentMicData = Data(repeating: 0, count: frameCount * MemoryLayout<Int16>.size)
+
+    let mixedData = LocalMeetingAudioMixer.mixMono(
+      micPCM16: silentMicData,
+      systemPCM16: quietSystemData
+    )
+    let mixedSamples = mixedData.withUnsafeBytes { rawBuffer in
+      rawBuffer.bindMemory(to: Int16.self).map { Float(Int16(littleEndian: $0)) / 32_767 }
+    }
+
+    XCTAssertFalse(LocalMeetingSpeechRegionDetector().regions(in: mixedSamples).isEmpty)
+  }
+
+  func testTranscriptMixerDoesNotAmplifyDigitalSilence() {
+    XCTAssertEqual(LocalMeetingAudioMixer.systemGain(for: Array(repeating: 0, count: 320)), 1)
+  }
+
   func testMetalResourceLocatorPrefersDirectoryContainingRequiredShaderFiles() throws {
     let rootDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent(UUID().uuidString, isDirectory: true)
-    let nestedBundleDirectory = rootDirectory
+    let nestedBundleDirectory =
+      rootDirectory
       .appendingPathComponent("CepessaSessions_CepessaSessions.bundle", isDirectory: true)
-    try FileManager.default.createDirectory(at: nestedBundleDirectory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(
+      at: nestedBundleDirectory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: rootDirectory) }
 
     try Data().write(to: nestedBundleDirectory.appendingPathComponent("ggml-metal.metal"))
@@ -70,6 +126,51 @@ final class LocalMeetingTranscriptionPreprocessingTests: XCTestCase {
     let resolved = LocalMeetingMetalResourceLocator.resolveResourcePath(
       existingValue: nil,
       candidateDirectories: [rootDirectory, nestedBundleDirectory]
+    )
+
+    XCTAssertEqual(resolved, nestedBundleDirectory.path)
+  }
+
+  func testMetalResourceLocatorSearchesPackagedResourceBundle() throws {
+    let rootDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let appDirectory = rootDirectory.appendingPathComponent("Sessions.app", isDirectory: true)
+    let contentsDirectory = appDirectory.appendingPathComponent("Contents", isDirectory: true)
+    let resourcesDirectory = contentsDirectory.appendingPathComponent(
+      "Resources", isDirectory: true)
+    let nestedBundleDirectory =
+      resourcesDirectory
+      .appendingPathComponent("CepessaSessions_CepessaSessions.bundle", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: nestedBundleDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: rootDirectory) }
+
+    try """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+      <key>CFBundleExecutable</key>
+      <string>Sessions</string>
+      <key>CFBundleIdentifier</key>
+      <string>me.cepessa.sessions.test</string>
+      <key>CFBundlePackageType</key>
+      <string>APPL</string>
+    </dict>
+    </plist>
+    """.write(
+      to: contentsDirectory.appendingPathComponent("Info.plist"),
+      atomically: true,
+      encoding: .utf8)
+    try Data().write(to: nestedBundleDirectory.appendingPathComponent("ggml-metal.metal"))
+    try Data().write(to: nestedBundleDirectory.appendingPathComponent("ggml-common.h"))
+
+    let bundle = try XCTUnwrap(Bundle(url: appDirectory))
+    let resolved = LocalMeetingMetalResourceLocator.resolveResourcePath(
+      existingValue: nil,
+      candidateDirectories: LocalMeetingMetalResourceLocator.candidateDirectories(
+        mainBundle: bundle)
     )
 
     XCTAssertEqual(resolved, nestedBundleDirectory.path)
@@ -101,10 +202,10 @@ final class LocalMeetingTranscriptionPreprocessingTests: XCTestCase {
     defer { try? FileManager.default.removeItem(at: rootDirectory) }
 
     try """
-      #define GGML_COMMON_DECL_METAL
-      #include "ggml-common.h"
-      kernel void noop() {}
-      """.write(
+    #define GGML_COMMON_DECL_METAL
+    #include "ggml-common.h"
+    kernel void noop() {}
+    """.write(
       to: sourceDirectory.appendingPathComponent("ggml-metal.metal"),
       atomically: true,
       encoding: .utf8)
@@ -190,8 +291,8 @@ final class LocalMeetingTranscriptionPreprocessingTests: XCTestCase {
   }
 }
 
-private extension String {
-  var asFileURL: URL {
+extension String {
+  fileprivate var asFileURL: URL {
     URL(fileURLWithPath: self, isDirectory: true)
   }
 }

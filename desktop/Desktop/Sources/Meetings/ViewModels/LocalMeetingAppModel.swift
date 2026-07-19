@@ -15,6 +15,7 @@ final class LocalSessionAppModel: ObservableObject {
   @Published private(set) var isTranscribing = false
   @Published private(set) var isGeneratingRecap = false
   @Published private(set) var isMicrophoneCaptureActive = false
+  @Published private(set) var isMicrophoneMuted = false
   @Published private(set) var isSystemAudioCaptureActive = false
   @Published private(set) var micLevel: Double = 0
   @Published private(set) var systemLevel: Double = 0
@@ -31,15 +32,10 @@ final class LocalSessionAppModel: ObservableObject {
   private let store: LocalSessionStore?
   private let recorder: LocalMeetingRecorder
   private let transcriptionService: any LocalSessionTranscribing
-  private let recapGenerator: any LocalSessionRecapGenerating
-  private let contentClassifier: any LocalSessionContentClassifying
-  private let documentChatService: (any LocalSessionDocumentChatProviding)?
   private let audioImportService: any LocalSessionAudioImporting
   private let fileManager: FileManager
   private var activeImportSessionIDs: Set<LocalSession.ID> = []
   private var activeTranscriptionSessionIDs: Set<LocalSession.ID> = []
-  private var activeContentClassificationSessionIDs: Set<LocalSession.ID> = []
-  private var activeRecapSessionIDs: Set<LocalSession.ID> = []
   private var warmedTranscriptionModelPath: String?
   private var cancellables: Set<AnyCancellable> = []
 
@@ -48,10 +44,6 @@ final class LocalSessionAppModel: ObservableObject {
     store: LocalSessionStore? = nil,
     fileLayout: LocalSessionFileLayout? = nil,
     transcriptionService: any LocalSessionTranscribing = LocalMeetingTranscriptionService(),
-    recapGenerator: any LocalSessionRecapGenerating = LocalSessionRecapGenerator(),
-    contentClassifier: any LocalSessionContentClassifying = LocalSessionContentClassifier(),
-    documentChatService: (any LocalSessionDocumentChatProviding)? =
-      LocalSessionDocumentChatClient(),
     audioImportService: any LocalSessionAudioImporting = LocalSessionAudioImportService(),
     fileManager: FileManager = .default
   ) {
@@ -63,9 +55,6 @@ final class LocalSessionAppModel: ObservableObject {
     self.store = resolvedStore
     self.recorder = LocalMeetingRecorder(fileLayout: resolvedFileLayout)
     self.transcriptionService = transcriptionService
-    self.recapGenerator = recapGenerator
-    self.contentClassifier = contentClassifier
-    self.documentChatService = documentChatService
     self.audioImportService = audioImportService
     self.fileManager = fileManager
     self.selectedSessionID = nil
@@ -79,7 +68,7 @@ final class LocalSessionAppModel: ObservableObject {
   }
 
   var isProcessingSession: Bool {
-    isTranscribing || isGeneratingRecap || !activeContentClassificationSessionIDs.isEmpty
+    isTranscribing
   }
 
   var processingQueue: [LocalSessionProcessingSnapshot] {
@@ -91,7 +80,7 @@ final class LocalSessionAppModel: ObservableObject {
   }
 
   func isGeneratingRecap(for sessionID: LocalSession.ID) -> Bool {
-    activeRecapSessionIDs.contains(sessionID)
+    false
   }
 
   func canRetranscribe(_ session: LocalSession) -> Bool {
@@ -132,6 +121,7 @@ final class LocalSessionAppModel: ObservableObject {
     if selectedSessionID == nil {
       selectedSessionID = sessions.first?.id
     }
+
   }
 
   @discardableResult
@@ -165,6 +155,21 @@ final class LocalSessionAppModel: ObservableObject {
     syncProcessingSummary(preferredSessionID: id)
   }
 
+  @discardableResult
+  func updateSessionTitle(_ title: String, for sessionID: LocalSession.ID? = nil) -> Bool {
+    let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let currentSession = sessions.first(where: { $0.id == (sessionID ?? selectedSessionID) }) else {
+      return false
+    }
+    guard currentSession.title != trimmedTitle else { return true }
+    let updatedSession = mutateSession(id: sessionID) { session in
+      session.title = trimmedTitle
+    }
+    guard updatedSession != nil else { return false }
+
+    return true
+  }
+
   func clearSelection() {
     selectedSessionID = nil
     syncProcessingSummary()
@@ -183,6 +188,11 @@ final class LocalSessionAppModel: ObservableObject {
     } else {
       Task { await startRecording() }
     }
+  }
+
+  func toggleMicrophoneMute() {
+    guard isRecording else { return }
+    recorder.toggleMicrophoneMute()
   }
 
   func importExistingRecording(from sourceURL: URL, title: String? = nil) async {
@@ -407,204 +417,15 @@ final class LocalSessionAppModel: ObservableObject {
     return fileLayout.promptPackageJSONURL(for: resolvedSessionID)
   }
 
-  func sendDocumentChatMessage(_ text: String, for sessionID: LocalSession.ID? = nil) {
-    let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !prompt.isEmpty else { return }
+  func sendDocumentChatMessage(_ text: String, for sessionID: LocalSession.ID? = nil) {}
 
-    let resolvedSessionID = sessionID ?? selectedSessionID
-    guard let resolvedSessionID else { return }
+  func regenerateRecap(for sessionID: LocalSession.ID? = nil) {}
 
-    guard let documentChatService else {
-      _ = mutateSession(id: resolvedSessionID) { session in
-        session.documentChat.status = .failed
-        session.documentChat.errorMessage = "Session chat is not configured in this build."
-        session.documentChat.updatedAt = Date()
-      }
-      return
-    }
+  func applyPendingDocumentChatProposal(for sessionID: LocalSession.ID? = nil) {}
 
-    let userMessage = LocalSessionDocumentChatMessage(
-      id: UUID(),
-      role: .user,
-      text: prompt,
-      createdAt: Date()
-    )
+  func undoLastDocumentChatEdit(for sessionID: LocalSession.ID? = nil) {}
 
-    guard
-      let preparedSession = mutateSession(
-        id: resolvedSessionID,
-        { session in
-          if session.documentChat.createdAt == nil {
-            session.documentChat.createdAt = Date()
-          }
-          session.documentChat.messages.append(userMessage)
-          session.documentChat.status = .sending
-          session.documentChat.errorMessage = nil
-          session.documentChat.updatedAt = Date()
-        })
-    else {
-      return
-    }
-
-    Task { [weak self] in
-      guard let self else { return }
-      do {
-        let proposal = try await documentChatService.sendMessage(
-          LocalSessionDocumentChatRequest(session: preparedSession, userMessage: prompt)
-        )
-        _ = self.mutateSession(id: resolvedSessionID) { session in
-          if proposal.hasEdits {
-            session.documentChat.pendingProposal = proposal
-            session.documentChat.messages.append(
-              LocalSessionDocumentChatMessage(
-                id: UUID(),
-                role: .assistant,
-                text: self.previewReadyMessage(for: proposal),
-                createdAt: Date(),
-                sourceCitations: proposal.sourceCitations
-              )
-            )
-          } else {
-            session.documentChat.pendingProposal = nil
-            session.documentChat.messages.append(
-              LocalSessionDocumentChatMessage(
-                id: UUID(),
-                role: .assistant,
-                text: self.assistantMessage(for: proposal),
-                createdAt: Date(),
-                sourceCitations: proposal.sourceCitations
-              )
-            )
-          }
-          session.documentChat.status = .idle
-          session.documentChat.errorMessage = nil
-          session.documentChat.updatedAt = Date()
-        }
-      } catch {
-        _ = self.mutateSession(id: resolvedSessionID) { session in
-          session.documentChat.status = .failed
-          session.documentChat.errorMessage = "Session chat could not finish."
-          session.documentChat.updatedAt = Date()
-        }
-      }
-    }
-  }
-
-  func regenerateRecap(for sessionID: LocalSession.ID? = nil) {
-    let resolvedSessionID = sessionID ?? selectedSessionID
-    guard let resolvedSessionID,
-      !activeContentClassificationSessionIDs.contains(resolvedSessionID),
-      !activeRecapSessionIDs.contains(resolvedSessionID),
-      let session = sessions.first(where: { $0.id == resolvedSessionID }),
-      !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    else {
-      return
-    }
-
-    beginContentClassification(for: session)
-  }
-
-  private func assistantMessage(
-    for proposal: LocalSessionDocumentEditProposal,
-    requestedEdit: Bool = false,
-    didApplyEdits: Bool = false,
-    userMessage: String = ""
-  ) -> String {
-    if requestedEdit, !didApplyEdits {
-      return userMessage.containsHebrewScript || proposal.assistantMessage.containsHebrewScript
-        ? "לא הצלחתי להחיל שינוי במסמך מהתגובה הזאת."
-        : "I could not apply a document change from that response."
-    }
-
-    let trimmed = proposal.assistantMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !trimmed.isEmpty {
-      return trimmed
-    }
-
-    return proposal.hasEdits
-      ? "Applied the requested document edits." : "No document edit was needed."
-  }
-
-  private func previewReadyMessage(for proposal: LocalSessionDocumentEditProposal) -> String {
-    let trimmed = proposal.assistantMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-    let summary = trimmed.isEmpty ? "Review the proposed document changes before applying them." : trimmed
-    return "Preview ready: \(summary)"
-  }
-
-  func applyPendingDocumentChatProposal(for sessionID: LocalSession.ID? = nil) {
-    let resolvedSessionID = sessionID ?? selectedSessionID
-    guard let resolvedSessionID else { return }
-
-    _ = mutateSession(id: resolvedSessionID) { session in
-      guard let proposal = session.documentChat.pendingProposal else { return }
-      let undoSnapshot = LocalSessionDocumentUndoSnapshot(
-        title: session.title,
-        documentMarkdown: session.documentMarkdown,
-        recap: session.recap,
-        transcriptSegments: session.transcriptSegments,
-        createdAt: Date()
-      )
-      let didApplyEdits = apply(proposal, to: &session)
-      session.documentChat.pendingProposal = nil
-      session.documentChat.status = didApplyEdits ? .idle : .failed
-      session.documentChat.errorMessage = didApplyEdits
-        ? nil
-        : "The proposed document edit could not be applied."
-      if didApplyEdits {
-        session.documentChat.undoSnapshot = undoSnapshot
-      }
-      session.documentChat.messages.append(
-        LocalSessionDocumentChatMessage(
-          id: UUID(),
-          role: .assistant,
-          text: didApplyEdits
-            ? "Applied the previewed document changes."
-            : "I could not apply a document change from that preview.",
-          createdAt: Date(),
-          sourceCitations: proposal.sourceCitations
-        )
-      )
-      session.documentChat.updatedAt = Date()
-    }
-  }
-
-  func undoLastDocumentChatEdit(for sessionID: LocalSession.ID? = nil) {
-    let resolvedSessionID = sessionID ?? selectedSessionID
-    guard let resolvedSessionID else { return }
-
-    _ = mutateSession(id: resolvedSessionID) { session in
-      guard let snapshot = session.documentChat.undoSnapshot else { return }
-      session.title = snapshot.title
-      session.documentMarkdown = snapshot.documentMarkdown
-      session.recap = snapshot.recap
-      session.transcriptSegments = snapshot.transcriptSegments
-      session.documentChat.undoSnapshot = nil
-      session.documentChat.pendingProposal = nil
-      session.documentChat.status = .idle
-      session.documentChat.errorMessage = nil
-      session.documentChat.messages.append(
-        LocalSessionDocumentChatMessage(
-          id: UUID(),
-          role: .assistant,
-          text: "Undid the last document edit.",
-          createdAt: Date()
-        )
-      )
-      session.documentChat.updatedAt = Date()
-    }
-  }
-
-  func discardPendingDocumentChatProposal(for sessionID: LocalSession.ID? = nil) {
-    let resolvedSessionID = sessionID ?? selectedSessionID
-    guard let resolvedSessionID else { return }
-
-    _ = mutateSession(id: resolvedSessionID) { session in
-      session.documentChat.pendingProposal = nil
-      session.documentChat.status = .idle
-      session.documentChat.errorMessage = nil
-      session.documentChat.updatedAt = Date()
-    }
-  }
+  func discardPendingDocumentChatProposal(for sessionID: LocalSession.ID? = nil) {}
 
   private func startRecording() async {
     do {
@@ -641,6 +462,11 @@ final class LocalSessionAppModel: ObservableObject {
     recorder.$isMicrophoneCaptureActive
       .receive(on: DispatchQueue.main)
       .sink { [weak self] in self?.isMicrophoneCaptureActive = $0 }
+      .store(in: &cancellables)
+
+    recorder.$isMicrophoneMuted
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self] in self?.isMicrophoneMuted = $0 }
       .store(in: &cancellables)
 
     recorder.$isSystemAudioCaptureActive
@@ -707,9 +533,9 @@ final class LocalSessionAppModel: ObservableObject {
 
       updatedSession.status = .ready
       updatedSession.transcriptSegments = transcriptSegments(from: result, session: session)
-      let transcriptReadySession = upsertSession(updatedSession)
+      updatedSession.title = inferredSessionTitle(for: updatedSession)
+      upsertSession(updatedSession)
       endTranscription(for: sessionID)
-      beginContentClassification(for: transcriptReadySession)
       return
     } catch {
       updatedSession.status = .failed
@@ -833,69 +659,6 @@ final class LocalSessionAppModel: ObservableObject {
     }
   }
 
-  private func beginContentClassification(for session: LocalSession) {
-    activeContentClassificationSessionIDs.insert(session.id)
-    syncActivityFlags()
-    setProcessingSnapshot(
-      for: session.id,
-      phase: .classifyingContent,
-      title: "Understanding content",
-      detail: "Detecting whether this transcript is a meeting, message, video commentary, or general transcript.",
-      progress: nil,
-      logMessages: [
-        "Classification input: transcript + captured context"
-      ]
-    )
-
-    Task { [weak self] in
-      guard let self else { return }
-      let classification = await self.contentClassifier.classifyContent(for: session)
-      let classifiedSession = self.mutateSession(id: session.id) { currentSession in
-        currentSession.contentClassification = classification
-      }
-      self.finishContentClassification(for: session.id)
-      self.beginRecapGeneration(for: classifiedSession ?? session)
-    }
-  }
-
-  private func finishContentClassification(for sessionID: LocalSession.ID) {
-    activeContentClassificationSessionIDs.remove(sessionID)
-    syncActivityFlags()
-  }
-
-  private func beginRecapGeneration(for session: LocalSession) {
-    activeRecapSessionIDs.insert(session.id)
-    syncActivityFlags()
-    let contentTypeTitle = session.contentClassification?.type.displayTitle ?? "General transcript"
-    setProcessingSnapshot(
-      for: session.id,
-      phase: .generatingRecap,
-      title: "Generating \(contentTypeTitle.lowercased()) brief",
-      detail: "Running the local recap model with \(contentTypeTitle.lowercased()) instructions.",
-      progress: nil,
-      logMessages: [
-        "Detected content type: \(contentTypeTitle)",
-        "Recap input: transcript + captured context",
-      ]
-    )
-
-    Task { [weak self] in
-      guard let self else { return }
-      let recap = await self.recapGenerator.generateRecap(for: session)
-      _ = self.mutateSession(id: session.id) { currentSession in
-        currentSession.status = .ready
-        currentSession.recap = recap
-      }
-      self.finishRecapGeneration(for: session.id)
-    }
-  }
-
-  private func finishRecapGeneration(for sessionID: LocalSession.ID) {
-    activeRecapSessionIDs.remove(sessionID)
-    syncActivityFlags()
-    removeProcessingSnapshot(for: sessionID)
-  }
-
   private func transcriptSegments(
     from result: LocalSessionTranscriptionResult,
     session: LocalSession
@@ -914,7 +677,7 @@ final class LocalSessionAppModel: ObservableObject {
           timestamp: session.startedAt.addingTimeInterval(segment.startTime),
           endTimestamp: session.startedAt.addingTimeInterval(max(segment.endTime, segment.startTime))
         )
-      }
+      }.removingRepeatedShortGlitches()
     }
 
     let transcriptText = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -930,7 +693,7 @@ final class LocalSessionAppModel: ObservableObject {
         timestamp: session.startedAt,
         endTimestamp: nil
       )
-    ]
+    ].removingRepeatedShortGlitches()
   }
 
   private func transcriptSegments(
@@ -946,7 +709,7 @@ final class LocalSessionAppModel: ObservableObject {
         timestamp: session.startedAt.addingTimeInterval(segment.startTime),
         endTimestamp: session.startedAt.addingTimeInterval(max(segment.endTime, segment.startTime))
       )
-    }
+    }.removingRepeatedShortGlitches()
   }
 
   private func sourceAttributor(for session: LocalSession) -> LocalSessionSourceAttributor? {
@@ -1026,6 +789,25 @@ final class LocalSessionAppModel: ObservableObject {
     return values?.contentModificationDate ?? values?.creationDate ?? Date()
   }
 
+  private func inferredSessionTitle(for session: LocalSession) -> String {
+    let transcript = session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !transcript.isEmpty else { return session.title }
+
+    let candidates = transcript
+      .components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { $0.count >= 12 }
+
+    let source = candidates.first ?? transcript
+    let compact = source
+      .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .truncated(maxLength: 64)
+
+    guard !compact.isEmpty else { return session.title }
+    return compact
+  }
+
   @discardableResult
   private func mutateSession(
     id sessionID: LocalSession.ID? = nil,
@@ -1082,100 +864,6 @@ final class LocalSessionAppModel: ObservableObject {
     mergedSession.anchorTimelineContextToTranscriptSegments()
 
     return mergedSession
-  }
-
-  @discardableResult
-  private func apply(
-    _ proposal: LocalSessionDocumentEditProposal,
-    to session: inout LocalSession
-  ) -> Bool {
-    var changed = false
-    var recapChanged = false
-
-    if proposal.operation == .delete {
-      let replacement = proposal.documentMarkdown?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-      if session.documentMarkdown != replacement {
-        session.documentMarkdown = replacement
-        changed = true
-      }
-    } else if let documentMarkdown = proposal.documentMarkdown {
-      let replacement = documentMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-      if session.documentMarkdown != replacement {
-        session.documentMarkdown = replacement
-        changed = true
-      }
-    }
-
-    if let title = proposal.sessionTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
-      !title.isEmpty,
-      session.title != title
-    {
-      session.title = title
-      changed = true
-    }
-
-    if let recapPatch = proposal.recapPatch {
-      if let overview = recapPatch.overview?.trimmingCharacters(in: .whitespacesAndNewlines) {
-        if session.recap.overview != overview {
-          session.recap.overview = overview
-          changed = true
-          recapChanged = true
-        }
-      }
-
-      for replacement in recapPatch.sections {
-        let existingSection = session.recap.section(kind: replacement.kind)
-        let section = LocalSessionRecapSection(
-          id: existingSection?.id ?? UUID(),
-          kind: replacement.kind,
-          title: replacement.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? replacement.kind.displayTitle
-            : replacement.title,
-          summary: replacement.summary,
-          bullets: replacement.bullets,
-          anchorTimestamp: existingSection?.anchorTimestamp,
-          startOffset: existingSection?.startOffset,
-          endOffset: existingSection?.endOffset
-        )
-        if existingSection?.title != section.title
-          || existingSection?.summary != section.summary
-          || existingSection?.bullets != section.bullets
-        {
-          session.recap.upsertSection(section)
-          changed = true
-          recapChanged = true
-        }
-      }
-
-      if recapChanged {
-        session.recap.generatedAt = Date()
-      }
-    }
-
-    for patch in proposal.transcriptPatches {
-      guard
-        let segmentIndex = session.transcriptSegments.firstIndex(where: { $0.id == patch.segmentID }
-        )
-      else {
-        continue
-      }
-      if session.transcriptSegments[segmentIndex].text != patch.text {
-        session.transcriptSegments[segmentIndex].text = patch.text
-        changed = true
-      }
-    }
-
-    for rename in proposal.speakerRenames {
-      for segmentIndex in session.transcriptSegments.indices
-      where session.transcriptSegments[segmentIndex].speaker == rename.oldName {
-        if session.transcriptSegments[segmentIndex].speaker != rename.newName {
-          session.transcriptSegments[segmentIndex].speaker = rename.newName
-          changed = true
-        }
-      }
-    }
-
-    return changed
   }
 
   private func mergeAttachments(
@@ -1263,10 +951,38 @@ final class LocalSessionAppModel: ObservableObject {
     if normalizedSession.recap.normalizeStaleHebrewVideoTemplateTitles() {
       normalizedSession.recap.generatedAt = normalizedSession.recap.generatedAt ?? Date()
     }
+    normalizedSession.transcriptSegments =
+      normalizedSession.transcriptSegments.removingRepeatedShortGlitches()
+    if normalizedSession.recap.isStaleHebrewTranscriptCopyFallback(
+      forTranscript: normalizedSession.transcriptText
+    ) || normalizedSession.recap.isGenericHebrewTranscriptPlaceholderFallback(
+      forTranscript: normalizedSession.transcriptText
+    ) || normalizedSession.recap.isSchemaPlaceholderFallback() {
+      normalizedSession.recap = .empty
+    }
     if normalizedSession.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       normalizedSession.recap.removeStaleGenericFallback()
     {
       normalizedSession.recap = .empty
+    }
+    if normalizedSession.recap.isUnsupportedWebsiteThemeFallback(
+      forTranscript: normalizedSession.transcriptText)
+    {
+      normalizedSession.recap = .empty
+    }
+    if normalizedSession.recap.isStaleHebrewMeetingBoilerplate(
+      forTranscript: normalizedSession.transcriptText)
+    {
+      normalizedSession.recap = .empty
+      normalizedSession.documentChat.pendingProposal = nil
+      normalizedSession.documentChat.status = .idle
+      normalizedSession.documentChat.errorMessage = nil
+      normalizedSession.documentChat.updatedAt = Date()
+    }
+    if LocalSessionRecapMarkdownDocument.preferredLanguage(for: normalizedSession) == .hebrew,
+      normalizedSession.documentChat.localizeSavedEnglishStatusMessagesForHebrew()
+    {
+      normalizedSession.documentChat.updatedAt = Date()
     }
 
     return normalizedSession
@@ -1345,8 +1061,6 @@ final class LocalSessionAppModel: ObservableObject {
   private func syncActivityFlags() {
     isTranscribing =
       !activeImportSessionIDs.isEmpty || !activeTranscriptionSessionIDs.isEmpty
-      || !activeContentClassificationSessionIDs.isEmpty
-    isGeneratingRecap = !activeRecapSessionIDs.isEmpty
   }
 
   private func syncProcessingSummary(preferredSessionID: LocalSession.ID? = nil) {
@@ -1539,6 +1253,59 @@ private enum LocalSessionPCM16WaveError: Error {
   case unsupportedFormat
 }
 
+private extension Array where Element == LocalSessionTranscriptSegment {
+  func removingRepeatedShortGlitches() -> [LocalSessionTranscriptSegment] {
+    var cleaned: [LocalSessionTranscriptSegment] = []
+    var activeKey: String?
+    var activeStart: Date?
+    var activeCount = 0
+
+    for segment in self {
+      let key = segment.text.shortTranscriptGlitchKey
+      let isSameCluster =
+        key != nil
+        && key == activeKey
+        && activeStart.map { segment.timestamp.timeIntervalSince($0) <= 12 } == true
+
+      if isSameCluster {
+        activeCount += 1
+      } else {
+        activeKey = key
+        activeStart = key == nil ? nil : segment.timestamp
+        activeCount = key == nil ? 0 : 1
+      }
+
+      if key != nil, activeCount > 3 {
+        continue
+      }
+
+      cleaned.append(segment)
+    }
+
+    return cleaned
+  }
+}
+
+private extension String {
+  var shortTranscriptGlitchKey: String? {
+    let normalized = trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: "\u{200f}", with: "")
+      .replacingOccurrences(of: "\u{200e}", with: "")
+      .replacingOccurrences(of: "\n", with: " ")
+      .lowercased()
+    let collapsed = normalized
+      .split(whereSeparator: { $0.isWhitespace })
+      .joined(separator: " ")
+    guard !collapsed.isEmpty else { return nil }
+    guard collapsed.count <= 18 else { return nil }
+    let lettersAndDigits = collapsed.unicodeScalars.filter {
+      CharacterSet.letters.union(.decimalDigits).contains($0)
+    }
+    guard lettersAndDigits.count <= 12 else { return nil }
+    return String(String.UnicodeScalarView(lettersAndDigits))
+  }
+}
+
 private extension LocalSessionDocumentEditProposal {
   var isStaleAppendInstructionEcho: Bool {
     let generatedText = [
@@ -1727,6 +1494,162 @@ private extension LocalSessionRecap {
     self = .empty
     return true
   }
+
+  func isUnsupportedWebsiteThemeFallback(forTranscript transcript: String) -> Bool {
+    let recapText =
+      ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: " ")
+      .lowercased()
+    guard !recapText.isEmpty else { return false }
+    let staleWebsiteThemePhrases = [
+      "site performance and scrolling behavior",
+      "clearer calls to action",
+      "interview simulation area",
+      "hr and tech paths",
+      "lighter visual",
+      "section-jump behavior",
+    ]
+    guard staleWebsiteThemePhrases.contains(where: { recapText.contains($0) }) else {
+      return false
+    }
+
+    let transcriptText = transcript.lowercased()
+    guard transcriptText.containsHebrewScript else { return false }
+    let hasStrongWebsiteContext = [
+      "גלילה", "לגלול", "scroll", "section", "עמוד", "page", "landing", "ux", "webflow",
+      "באתר", "האתר", "קריאה לפעולה", "cta",
+    ].contains { transcriptText.contains($0) }
+    if !hasStrongWebsiteContext,
+      staleWebsiteThemePhrases.contains(where: { recapText.contains($0) })
+    {
+      return true
+    }
+    let claimGroups: [(recapPatterns: [String], sourcePatterns: [String])] = [
+      (
+        ["scrolling", "hard to scroll", "section-jump", "section navigation"],
+        ["גלילה", "scroll", "ניווט באתר", "section"]
+      ),
+      (
+        ["calls to action", "call to action", "cta", "user promise", "explicit next step"],
+        ["קריאה לפעולה", "cta", "להירשם", "הרשמה", "next step"]
+      ),
+      (
+        ["interview simulation", "hr and tech", "hr path", "tech path", "coming-soon"],
+        ["סימולציה", "סימולציות", "ראיון", "ראיונות", "hr", "tech"]
+      ),
+      (
+        ["visual tone", "visual direction", "lighter visual", "lighter background", "brand direction"],
+        ["עיצוב", "ויזואל", "צבע", "צבעוניות", "רקע", "design", "visual", "brand"]
+      ),
+    ]
+    let unsupportedClaimGroupCount = claimGroups.filter { group in
+      group.recapPatterns.contains { recapText.contains($0) }
+        && !group.sourcePatterns.contains { transcriptText.contains($0) }
+    }.count
+    return unsupportedClaimGroupCount >= 2
+  }
+
+  func isStaleHebrewTranscriptCopyFallback(forTranscript transcript: String) -> Bool {
+    guard transcript.containsHebrewScript else { return false }
+
+    let recapText =
+      ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+    let normalizedRecap = recapText
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    guard normalizedRecap.contains("המסמך עוסק ב") else { return false }
+    let staleSectionSignals = [
+      "נקודות חשובות", "מה הובן מהמקור", "המשך טיפול", "שאלות פתוחות", "המשך מומלץ",
+    ]
+    guard staleSectionSignals.contains(where: { normalizedRecap.contains($0.lowercased()) }) else {
+      return false
+    }
+
+    let transcriptSentences = transcript
+      .components(separatedBy: .newlines)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { $0.count >= 12 }
+    guard !transcriptSentences.isEmpty else { return false }
+
+    let rawSentenceMatches = transcriptSentences.prefix(6).filter { sentence in
+      normalizedRecap.contains(sentence.lowercased())
+    }.count
+    return rawSentenceMatches >= 2
+  }
+
+  func isGenericHebrewTranscriptPlaceholderFallback(forTranscript transcript: String) -> Bool {
+    guard transcript.containsHebrewScript else { return false }
+
+    let recapText =
+      ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    guard !recapText.isEmpty else { return false }
+
+    let overviewSignals = [
+      "המסמך מבוסס על תמלול בעברית",
+      "המסמך לא אמור לשחזר את המשפטים עצמם",
+      "לזקק מתוכו נושאים, כוונות ופעולות המשך",
+    ]
+    guard overviewSignals.filter({ recapText.contains($0.lowercased()) }).count >= 2 else {
+      return false
+    }
+
+    let placeholderSectionSignals = [
+      "על מה המסמך",
+      "נקודות חשובות",
+      "מה הובן מהמקור",
+      "המשך טיפול",
+      "שאלות פתוחות",
+      "המשך מומלץ",
+      "לבנות מהמקור מסמך קצר, נקי ומעשי שמדבר על התוכן ולא מעתיק את התמלול עצמו",
+    ]
+    let matchedSignals = placeholderSectionSignals.filter { recapText.contains($0.lowercased()) }
+    return matchedSignals.count >= 4
+  }
+
+  func isSchemaPlaceholderFallback() -> Bool {
+    let recapText =
+      ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    guard !recapText.isEmpty else { return false }
+
+    let placeholderSignals = [
+      "concise paragraph with purpose and current state",
+      "owner/person/team",
+      "urgent fixes and next-iteration tasks",
+      "short professional recommendation",
+      "professional recommendation",
+    ]
+    return placeholderSignals.filter { recapText.contains($0) }.count >= 3
+  }
+
+  func isStaleHebrewMeetingBoilerplate(forTranscript transcript: String) -> Bool {
+    guard transcript.containsHebrewScript else { return false }
+
+    let recapText =
+      ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    guard !recapText.isEmpty else { return false }
+
+    let staleSignals = [
+      "עלה צורך לחדד",
+      "פעולות המשך שנובעות מהמסמך",
+      "פעולות המשך אפשריות לפי מטרת המסמך",
+      "שאלות שנותרו לבדיקה",
+      "נקודות שעדיין צריך להבהיר לגבי השימוש במסמך",
+      "המשך פעולה מומלץ",
+      "המשך מומלץ",
+      "להפוך את נושאי הפגישה לרשימת החלטות ומשימות",
+    ]
+    return staleSignals.contains { recapText.contains($0.lowercased()) }
+  }
 }
 
 private extension LocalSessionRecapSection {
@@ -1754,7 +1677,39 @@ private extension LocalSessionRecapSection {
   }
 }
 
+private extension LocalSessionDocumentChat {
+  mutating func localizeSavedEnglishStatusMessagesForHebrew() -> Bool {
+    var changed = false
+    for index in messages.indices {
+      let text = messages[index].text.trimmingCharacters(in: .whitespacesAndNewlines)
+      if text.hasPrefix("Preview ready:") {
+        let suffix = text.dropFirst("Preview ready:".count).trimmingCharacters(
+          in: .whitespacesAndNewlines)
+        messages[index].text = suffix.isEmpty ? "טיוטה מוכנה." : "טיוטה מוכנה: \(suffix)"
+        changed = true
+      } else if text == "No document edit was needed." {
+        messages[index].text = "לא נדרש שינוי במסמך."
+        changed = true
+      } else if text == "Applied the previewed document changes." {
+        messages[index].text = "החלתי את שינויי המסמך מהטיוטה."
+        changed = true
+      } else if text == "Undid the last document edit." {
+        messages[index].text = "ביטלתי את שינוי המסמך האחרון."
+        changed = true
+      }
+    }
+
+    return changed
+  }
+}
+
 private extension String {
+  func truncated(maxLength: Int) -> String {
+    guard count > maxLength else { return self }
+    let endIndex = index(startIndex, offsetBy: max(0, maxLength - 1))
+    return String(self[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+  }
+
   var containsHebrewScript: Bool {
     unicodeScalars.contains { scalar in
       (0x0590...0x05FF).contains(Int(scalar.value))

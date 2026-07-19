@@ -6,20 +6,20 @@ import SwiftUI
 enum CepessaColors {
   // MARK: - Apple Native Neutral Palette
   static let paper = Color(hex: 0xFFFFFF)
-  static let paperDeep = Color(hex: 0xF5F5F7)
+  static let paperDeep = Color(hex: 0xFAFAFC)
   static let paperRaised = Color(hex: 0xFFFFFF)
   static let ink = Color(hex: 0x1D1D1F)
-  static let graphite = Color(hex: 0xF2F2F7)
-  static let graphiteRaised = Color(hex: 0xFAFAFC)
-  static let graphiteLine = Color(hex: 0xDADAE0)
+  static let graphite = Color(hex: 0xF7F8FA)
+  static let graphiteRaised = Color(hex: 0xFFFFFF)
+  static let graphiteLine = Color(hex: 0xE8EBF0)
   static let copper = Color(hex: 0x6E6E73)
   static let copperDeep = Color(hex: 0x3A3A3C)
   static let moss = Color(hex: 0x34C759)
   static let mossDeep = Color(hex: 0x248A3D)
-  static let signalRed = Color(hex: 0xFF5F57)
-  static let agedLine = Color(hex: 0xE5E5EA)
-  static let warmShadow = Color(hex: 0x1D1D1F)
-  static let ambientGlass = Color(hex: 0xF8F8FA)
+  static let signalRed = Color(hex: 0xE5484D)
+  static let agedLine = Color(hex: 0xE8EBF0)
+  static let warmShadow = Color(hex: 0x667085)
+  static let ambientGlass = Color(hex: 0xFFFFFF)
   static let parchmentTint = Color(hex: 0xFFFFFF)
 
   static let capture = copper

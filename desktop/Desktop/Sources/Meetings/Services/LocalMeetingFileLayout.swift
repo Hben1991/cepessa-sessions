@@ -42,12 +42,8 @@ enum LocalSessionTranscriptionLanguagePreference: String, Equatable, Sendable {
 
   var languageCode: String {
     switch self {
-    case .mixed:
+    case .mixed, .hebrewFirst, .englishFirst:
       return LocalSessionFileLayout.automaticLanguageCode
-    case .hebrewFirst:
-      return "he"
-    case .englishFirst:
-      return "en"
     }
   }
 }
@@ -77,8 +73,6 @@ struct LocalSessionFileLayout {
   private static let legacySessionsRootName = "Meetings"
   private static let currentRootName = "Cepessa"
   fileprivate static let automaticLanguageCode = "auto"
-  private static let fallbackMixedLanguagePrompt =
-    "Keep Hebrew and English words in the language they were spoken."
   private static let whisperKitModelIDsBySpeedMode: [LocalSessionTranscriptionSpeedMode: [String]]
     = [
       .fastDraft: [
@@ -265,8 +259,8 @@ struct LocalSessionFileLayout {
       return LocalSessionTranscriptionPlan(
         engine: .whisperKit,
         modelURL: hebrewWhisperKitModelURL,
-        language: language,
-        prompt: prompt ?? Self.fallbackMixedLanguagePrompt,
+        language: hebrewFallbackLanguage(for: settings.languagePreference),
+        prompt: hebrewFallbackPrompt(for: settings.languagePreference),
         modelFlavor: .whisperKitHebrewTurbo,
         speedMode: settings.speedMode
       )
@@ -289,8 +283,8 @@ struct LocalSessionFileLayout {
     return LocalSessionTranscriptionPlan(
       engine: .whisperCpp,
       modelURL: resolvedHebrewModelURL(fileManager: fileManager),
-      language: language,
-      prompt: prompt ?? Self.fallbackMixedLanguagePrompt,
+      language: hebrewFallbackLanguage(for: settings.languagePreference),
+      prompt: hebrewFallbackPrompt(for: settings.languagePreference),
       modelFlavor: .hebrewTurbo,
       speedMode: settings.speedMode
     )
@@ -478,6 +472,23 @@ struct LocalSessionFileLayout {
       return "The meeting is primarily Hebrew. Keep English terms as spoken."
     case .englishFirst:
       return "The meeting is primarily English. Keep Hebrew terms as spoken."
+    }
+  }
+
+  private func hebrewFallbackLanguage(
+    for languagePreference: LocalSessionTranscriptionLanguagePreference
+  ) -> String {
+    LocalSessionFileLayout.automaticLanguageCode
+  }
+
+  private func hebrewFallbackPrompt(
+    for languagePreference: LocalSessionTranscriptionLanguagePreference
+  ) -> String? {
+    switch languagePreference {
+    case .mixed:
+      return nil
+    case .hebrewFirst, .englishFirst:
+      return transcriptionPrompt(for: languagePreference)
     }
   }
 

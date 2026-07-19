@@ -74,6 +74,21 @@ struct LocalSessionRecapExporter {
     }
   }
 
+  func exportTranscriptMarkdown(
+    session: LocalSession,
+    to directory: URL,
+    fileManager: FileManager = .default
+  ) throws -> URL {
+    try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+    let title = LocalSessionRecapMarkdownDocument.title(for: session, language: .english)
+    let baseName = sanitizedFileName("\(title) Transcript")
+    let url = directory.appendingPathComponent(
+      "\(baseName.isEmpty ? "session-transcript" : baseName).md")
+    try transcriptMarkdown(for: session).write(to: url, atomically: true, encoding: .utf8)
+    return url
+  }
+
   private func fileName(
     for session: LocalSession,
     language: LocalSessionDocumentLanguage,
@@ -94,6 +109,81 @@ struct LocalSessionRecapExporter {
       .joined(separator: "-")
       .replacingOccurrences(of: "  ", with: " ")
       .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private func transcriptMarkdown(for session: LocalSession) -> String {
+    var lines: [String] = []
+    let title = LocalSessionRecapMarkdownDocument.title(for: session, language: .english)
+    lines.append("# \(title) Transcript")
+    lines.append("")
+    lines.append(
+      session.startedAt.formatted(
+        .dateTime
+          .weekday(.wide)
+          .day()
+          .month(.wide)
+          .year()
+          .hour()
+          .minute()
+      )
+    )
+    lines.append("")
+    lines.append("## Transcript")
+    lines.append("")
+
+    let segments = session.transcriptSegments.filter {
+      !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    if segments.isEmpty {
+      lines.append("_No transcript text captured._")
+    } else {
+      for item in session.transcriptTimelineItems {
+        let segment = item.segment
+        let text = segment.text
+          .replacingOccurrences(of: "\n", with: " ")
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { continue }
+
+        let offset = max(0, segment.timestamp.timeIntervalSince(session.startedAt))
+        let stamp = timeString(for: offset)
+        let speaker = segment.speaker.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = speaker.isEmpty ? "Speaker" : speaker
+        lines.append("- [\(stamp)] **\(label):** \(text)")
+
+        for attachment in item.attachments {
+          guard let imageLine = imageMarkdownLine(for: attachment) else { continue }
+          lines.append("  - \(imageLine)")
+        }
+      }
+    }
+
+    return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private func imageMarkdownLine(for attachment: LocalSessionAttachment) -> String? {
+    guard attachment.kind == .image || attachment.kind == .capture else { return nil }
+    guard let urlString = attachment.urlString, !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else {
+      return nil
+    }
+
+    let fileURL = URL(fileURLWithPath: urlString)
+    let title = attachment.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      ? "Image"
+      : attachment.title
+    let stamp = attachment.sessionOffset.map(timeString(for:)) ?? "00:00"
+    return "[\(stamp)] ![\(title)](\(fileURL.absoluteString))"
+  }
+
+  private func timeString(for offset: TimeInterval) -> String {
+    let totalSeconds = max(0, Int(offset.rounded()))
+    let hours = totalSeconds / 3_600
+    let minutes = (totalSeconds % 3_600) / 60
+    let seconds = totalSeconds % 60
+    if hours > 0 {
+      return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+    }
+    return String(format: "%02d:%02d", minutes, seconds)
   }
 
   private func pdfData(markdown: String, language: LocalSessionDocumentLanguage) -> Data {

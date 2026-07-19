@@ -46,7 +46,7 @@ final class LocalMeetingTranscriptionArchitectureTests: XCTestCase {
   }
 
   @MainActor
-  func testDraftTranscriptProgressRemainsDistinctFromFinalTranscriptAndRecap() async throws {
+  func testDraftTranscriptProgressRemainsDistinctFromFinalTranscript() async throws {
     let layout = LocalMeetingFileLayout(
       baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
@@ -54,13 +54,10 @@ final class LocalMeetingTranscriptionArchitectureTests: XCTestCase {
     try Data("audio".utf8).write(to: sourceURL)
 
     let transcriptionService = BlockingLocalTranscriptionService()
-    let recapGenerator = RecordingBlockingRecapGenerator()
     let model = LocalMeetingAppModel(
       store: store,
       fileLayout: layout,
       transcriptionService: transcriptionService,
-      recapGenerator: recapGenerator,
-      contentClassifier: ImmediateArchitectureContentClassifier(),
       audioImportService: PassthroughLocalAudioImportService()
     )
 
@@ -75,7 +72,6 @@ final class LocalMeetingTranscriptionArchitectureTests: XCTestCase {
     XCTAssertEqual(model.selectedSession?.status, .transcribing)
     XCTAssertEqual(model.processingQueue.first?.phase, .transcribing)
     XCTAssertEqual(model.processingQueue.first?.title, "Draft transcript available")
-    XCTAssertEqual(recapGenerator.receivedSessions.count, 0)
 
     transcriptionService.finish(
       with: LocalSessionTranscriptionResult(
@@ -90,26 +86,19 @@ final class LocalMeetingTranscriptionArchitectureTests: XCTestCase {
 
     await importTask.value
 
-    await waitForArchitectureCondition("final transcript handed to recap") {
+    await waitForArchitectureCondition("final transcript is ready") {
       model.selectedSession?.transcriptText == "Final ASR text"
-        && model.isGeneratingRecap
-        && recapGenerator.receivedSessions.map(\.transcriptText) == ["Final ASR text"]
+        && !model.isTranscribing
     }
 
     XCTAssertFalse(model.isTranscribing)
     XCTAssertEqual(model.selectedSession?.status, .ready)
-    XCTAssertEqual(model.processingQueue.first?.phase, .generatingRecap)
-    XCTAssertEqual(recapGenerator.receivedSessions.map(\.transcriptText), ["Final ASR text"])
-
-    recapGenerator.finish(with: .empty)
-    await waitForArchitectureCondition("recap generation finishes") {
-      !model.isGeneratingRecap
-    }
   }
 }
 
 @MainActor
-private final class BlockingLocalTranscriptionService: @unchecked Sendable, LocalSessionTranscribing {
+private final class BlockingLocalTranscriptionService: @unchecked Sendable, LocalSessionTranscribing
+{
   private var continuation: CheckedContinuation<LocalSessionTranscriptionResult, Never>?
   private var pendingResult: LocalSessionTranscriptionResult?
 
@@ -146,35 +135,6 @@ private final class BlockingLocalTranscriptionService: @unchecked Sendable, Loca
   }
 }
 
-@MainActor
-private final class RecordingBlockingRecapGenerator: @unchecked Sendable, LocalSessionRecapGenerating {
-  private var continuation: CheckedContinuation<LocalSessionRecap, Never>?
-  private var pendingRecap: LocalSessionRecap?
-  private(set) var receivedSessions: [LocalSession] = []
-
-  func generateRecap(for session: LocalSession) async -> LocalSessionRecap {
-    receivedSessions.append(session)
-
-    if let pendingRecap {
-      self.pendingRecap = nil
-      return pendingRecap
-    }
-
-    return await withCheckedContinuation { continuation in
-      self.continuation = continuation
-    }
-  }
-
-  func finish(with recap: LocalSessionRecap) {
-    if let continuation {
-      self.continuation = nil
-      continuation.resume(returning: recap)
-    } else {
-      pendingRecap = recap
-    }
-  }
-}
-
 private struct PassthroughLocalAudioImportService: LocalSessionAudioImporting {
   func importAudio(from sourceURL: URL, to destinationWavURL: URL) async throws {
     try FileManager.default.createDirectory(
@@ -182,16 +142,6 @@ private struct PassthroughLocalAudioImportService: LocalSessionAudioImporting {
       withIntermediateDirectories: true
     )
     try Data("normalized audio".utf8).write(to: destinationWavURL)
-  }
-}
-
-private struct ImmediateArchitectureContentClassifier: LocalSessionContentClassifying {
-  func classifyContent(for session: LocalSession) async -> LocalSessionContentClassification {
-    LocalSessionContentClassification(
-      type: .generalTranscript,
-      confidence: 0.8,
-      rationale: "Test classification."
-    )
   }
 }
 

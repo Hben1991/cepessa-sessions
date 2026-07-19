@@ -132,8 +132,10 @@ class SystemAudioCaptureService: @unchecked Sendable {
 
   /// Performs all blocking CoreAudio HAL setup. Must be called on audioQueue, not the main thread.
   private func startCaptureOnQueue() throws {
-    // 1. Create tap description for all system audio
-    let tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+    // 1. Create a mono tap for all system audio. The transcript master is mono, so asking
+    // CoreAudio to perform the channel mixdown avoids losing a planar stereo buffer before
+    // the samples reach our converter.
+    let tapDescription = CATapDescription(monoGlobalTapButExcludeProcesses: [])
     tapDescription.uuid = tapUUID
     tapDescription.name = "Cepessa System Audio Tap"
     tapDescription.muteBehavior = .unmuted  // Don't mute playback
@@ -178,8 +180,10 @@ class SystemAudioCaptureService: @unchecked Sendable {
     }
     localMeetingLog("SystemAudioCapture: Created aggregate device with ID \(aggregateDeviceID)")
 
-    // 4. Get audio format from the tap
-    guard let format = getStreamFormat(for: aggregateDeviceID) else {
+    // 4. Read the authoritative tap format. The aggregate device can expose a different
+    // generic input-stream layout; kAudioTapPropertyFormat is the format of the buffers
+    // delivered for this tap through the aggregate device.
+    guard let format = getTapFormat(for: tapID) else {
       cleanup()
       throw SystemAudioCaptureError.formatError
     }
@@ -189,12 +193,21 @@ class SystemAudioCaptureService: @unchecked Sendable {
       "SystemAudioCapture: Source format - \(format.mSampleRate)Hz, \(format.mChannelsPerFrame) channels, \(format.mBitsPerChannel) bits"
     )
 
-    // 5. Create AVAudioFormat for conversion
+    // 5. Create AVAudioFormat for conversion. Process taps deliver Float32 PCM. Because the
+    // tap itself performs mono mixdown, the converter always receives a populated mono plane.
+    guard format.mFormatID == kAudioFormatLinearPCM,
+      format.mBitsPerChannel == 32,
+      format.mFormatFlags & kAudioFormatFlagIsFloat != 0
+    else {
+      cleanup()
+      throw SystemAudioCaptureError.formatError
+    }
+
     guard
       let inputFmt = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: format.mSampleRate,
-        channels: AVAudioChannelCount(format.mChannelsPerFrame),
+        channels: 1,
         interleaved: false
       )
     else {
@@ -251,7 +264,9 @@ class SystemAudioCaptureService: @unchecked Sendable {
     onAudioChunk = nil
     onAudioLevel = nil
 
-    // Capture values for background cleanup to avoid blocking main thread
+    // Capture values for background cleanup to avoid blocking main thread.
+    // Keep the converter/format/sample-rate state alive until AudioDeviceStop returns:
+    // CoreAudio can deliver one final IO callback while the stop is in flight.
     let procID = self.ioProcID
     let aggDevID = self.aggregateDeviceID
     let tID = self.tapID
@@ -259,15 +274,11 @@ class SystemAudioCaptureService: @unchecked Sendable {
     self.ioProcID = nil
     self.aggregateDeviceID = kAudioObjectUnknown
     self.tapID = kAudioObjectUnknown
-    self.audioConverter = nil
-    self.inputFormat = nil
-    self.targetFormat = nil
-    self.sourceSampleRate = 0.0
     self.lastAudioLevelDispatchTime = 0
     self.lastDispatchedAudioLevel = 0
 
     // AudioDeviceStop can block — run off main thread
-    audioQueue.async {
+    audioQueue.async { [self] in
       if let procID = procID, aggDevID != kAudioObjectUnknown {
         AudioDeviceStop(aggDevID, procID)
         AudioDeviceDestroyIOProcID(aggDevID, procID)
@@ -278,6 +289,11 @@ class SystemAudioCaptureService: @unchecked Sendable {
       if tID != kAudioObjectUnknown {
         AudioHardwareDestroyProcessTap(tID)
       }
+
+      self.audioConverter = nil
+      self.inputFormat = nil
+      self.targetFormat = nil
+      self.sourceSampleRate = 0.0
     }
 
     localMeetingLog("SystemAudioCapture: Stopped capturing")
@@ -290,11 +306,33 @@ class SystemAudioCaptureService: @unchecked Sendable {
 
   // MARK: - Private Methods
 
-  /// Get stream format for a device
-  private func getStreamFormat(for deviceID: AudioObjectID) -> AudioStreamBasicDescription? {
+  static func outputFrameCapacity(
+    inputFrameCount: UInt32,
+    sourceSampleRate: Double,
+    targetSampleRate: Double
+  ) -> AVAudioFrameCount? {
+    guard inputFrameCount > 0,
+      sourceSampleRate.isFinite,
+      sourceSampleRate > 0,
+      targetSampleRate.isFinite,
+      targetSampleRate > 0
+    else { return nil }
+
+    let convertedFrameCount = ceil(Double(inputFrameCount) * targetSampleRate / sourceSampleRate)
+    guard convertedFrameCount.isFinite,
+      convertedFrameCount > 0,
+      convertedFrameCount <= Double(UInt32.max)
+    else { return nil }
+
+    return AVAudioFrameCount(convertedFrameCount)
+  }
+
+  /// Read the format of the process tap itself. Apple documents this as the exact format
+  /// exposed by any aggregate device containing the tap.
+  private func getTapFormat(for tapID: AudioObjectID) -> AudioStreamBasicDescription? {
     var address = AudioObjectPropertyAddress(
-      mSelector: kAudioDevicePropertyStreamFormat,
-      mScope: kAudioDevicePropertyScopeInput,
+      mSelector: kAudioTapPropertyFormat,
+      mScope: kAudioObjectPropertyScopeGlobal,
       mElement: kAudioObjectPropertyElementMain
     )
 
@@ -302,7 +340,7 @@ class SystemAudioCaptureService: @unchecked Sendable {
     var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
 
     let status = AudioObjectGetPropertyData(
-      deviceID,
+      tapID,
       &address,
       0,
       nil,
@@ -313,58 +351,101 @@ class SystemAudioCaptureService: @unchecked Sendable {
     return status == noErr ? format : nil
   }
 
+  static func downmixFloat32Buffers(
+    _ buffers: [[Float]],
+    channelsPerBuffer: [Int]
+  ) -> [Float]? {
+    guard !buffers.isEmpty, buffers.count == channelsPerBuffer.count else { return nil }
+
+    var frameCount: Int?
+    var totalChannelCount = 0
+    for (samples, channelCount) in zip(buffers, channelsPerBuffer) {
+      guard channelCount > 0, samples.count >= channelCount else { return nil }
+      let bufferFrameCount = samples.count / channelCount
+      frameCount = min(frameCount ?? bufferFrameCount, bufferFrameCount)
+      totalChannelCount += channelCount
+    }
+
+    guard let frameCount, frameCount > 0, totalChannelCount > 0 else { return nil }
+
+    var monoSamples = [Float](repeating: 0, count: frameCount)
+    for frameIndex in 0..<frameCount {
+      var sum: Float = 0
+      for (samples, channelCount) in zip(buffers, channelsPerBuffer) {
+        let frameOffset = frameIndex * channelCount
+        for channelIndex in 0..<channelCount {
+          sum += samples[frameOffset + channelIndex]
+        }
+      }
+      monoSamples[frameIndex] = sum / Float(totalChannelCount)
+    }
+
+    return monoSamples
+  }
+
+  private static func monoSamples(
+    from inputData: UnsafePointer<AudioBufferList>
+  ) -> [Float]? {
+    let mutableInputData = UnsafeMutablePointer(mutating: inputData)
+    let audioBuffers = UnsafeMutableAudioBufferListPointer(mutableInputData)
+    var buffers: [[Float]] = []
+    var channelsPerBuffer: [Int] = []
+    buffers.reserveCapacity(audioBuffers.count)
+    channelsPerBuffer.reserveCapacity(audioBuffers.count)
+
+    for buffer in audioBuffers {
+      let channelCount = Int(buffer.mNumberChannels)
+      guard channelCount > 0,
+        let data = buffer.mData,
+        buffer.mDataByteSize >= MemoryLayout<Float32>.size
+      else { continue }
+
+      let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float32>.size
+      let samples = UnsafeBufferPointer(
+        start: data.assumingMemoryBound(to: Float32.self),
+        count: sampleCount
+      )
+      buffers.append(Array(samples))
+      channelsPerBuffer.append(channelCount)
+    }
+
+    return downmixFloat32Buffers(buffers, channelsPerBuffer: channelsPerBuffer)
+  }
+
   /// Handle incoming audio data from the tap
   private func handleAudioInput(
     _ inputData: UnsafePointer<AudioBufferList>?, timestamp: UnsafePointer<AudioTimeStamp>?
   ) {
     guard isCapturing,
-      let bufferList = inputData?.pointee,
+      let inputData,
       let converter = audioConverter,
-      let targetFmt = targetFormat
+      let targetFmt = targetFormat,
+      let inputFmt = inputFormat
     else { return }
 
-    // Get the first buffer (interleaved or first channel)
-    let buffer = bufferList.mBuffers
-
-    guard let data = buffer.mData, buffer.mDataByteSize > 0 else { return }
-
-    // Calculate frame count
-    let bytesPerFrame = UInt32(MemoryLayout<Float32>.size) * buffer.mNumberChannels
-    let frameCount = buffer.mDataByteSize / bytesPerFrame
-
-    guard frameCount > 0 else { return }
+    guard let monoSamples = Self.monoSamples(from: inputData), !monoSamples.isEmpty else { return }
+    let frameCount = AVAudioFrameCount(monoSamples.count)
 
     // Create input AVAudioPCMBuffer
-    guard let inputFmt = inputFormat,
+    guard
       let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFmt, frameCapacity: frameCount)
     else { return }
 
     inputBuffer.frameLength = frameCount
 
-    // Copy data to input buffer
-    // System audio is typically interleaved stereo Float32
-    let srcPtr = data.assumingMemoryBound(to: Float32.self)
-    let channelCount = Int(buffer.mNumberChannels)
-
-    if channelCount >= 2 {
-      // Mix stereo to mono by averaging channels
-      guard let floatData = inputBuffer.floatChannelData else { return }
-      let monoPtr = floatData[0]
-
-      for i in 0..<Int(frameCount) {
-        let left = srcPtr[i * channelCount]
-        let right = srcPtr[i * channelCount + 1]
-        monoPtr[i] = (left + right) / 2.0
-      }
-    } else {
-      // Already mono, just copy
-      guard let floatData = inputBuffer.floatChannelData else { return }
-      memcpy(floatData[0], srcPtr, Int(buffer.mDataByteSize))
+    guard let destination = inputBuffer.floatChannelData?[0] else { return }
+    monoSamples.withUnsafeBufferPointer { source in
+      destination.update(from: source.baseAddress!, count: monoSamples.count)
     }
 
     // Calculate output frame count based on sample rate conversion
-    let outputFrameCapacity = AVAudioFrameCount(
-      ceil(Double(frameCount) * targetSampleRate / sourceSampleRate))
+    guard
+      let outputFrameCapacity = Self.outputFrameCapacity(
+        inputFrameCount: frameCount,
+        sourceSampleRate: sourceSampleRate,
+        targetSampleRate: targetSampleRate
+      )
+    else { return }
     guard
       let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFmt, frameCapacity: outputFrameCapacity)
     else { return }
