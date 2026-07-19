@@ -149,6 +149,56 @@ final class LocalMeetingTranscriptionPreprocessingTests: XCTestCase {
     XCTAssertEqual(buffer.bufferedByteCount, 0)
   }
 
+  func testSynchronizedPCMBufferWaitsForDelayedMicInsideSkewWindow() {
+    var buffer = LocalMeetingSynchronizedPCMBuffer(maximumSkewByteCount: 8)
+    var output: [Data] = []
+
+    buffer.appendSystem(pcm16Data([10_000, 11_000, 12_000, 13_000])) {
+      output.append($0)
+    }
+    XCTAssertTrue(output.isEmpty)
+
+    buffer.appendMic(pcm16Data([1_000, 2_000, 3_000, 4_000])) { output.append($0) }
+
+    XCTAssertEqual(output.count, 1)
+    XCTAssertEqual(pcm16Samples(output[0]), [11_000, 13_000, 15_000, 17_000])
+    XCTAssertEqual(buffer.bufferedByteCount, 0)
+  }
+
+  func testSynchronizedPCMBufferRealignsWhenSystemResumesBeyondSkewWindow() {
+    var buffer = LocalMeetingSynchronizedPCMBuffer(maximumSkewByteCount: 8)
+    var output: [Data] = []
+
+    buffer.appendMic(pcm16Data([1_000, 2_000, 3_000, 4_000, 5_000, 6_000])) {
+      output.append($0)
+    }
+    buffer.appendSystem(pcm16Data([10_000, 12_000])) { output.append($0) }
+    buffer.appendMic(pcm16Data([1_000, 2_000])) { output.append($0) }
+
+    XCTAssertEqual(output.count, 3)
+    XCTAssertEqual(pcm16Samples(output[0]), [1_000, 2_000])
+    XCTAssertEqual(pcm16Samples(output[1]), [3_000, 4_000, 5_000, 6_000])
+    XCTAssertEqual(pcm16Samples(output[2]), [11_000, 14_000])
+    XCTAssertEqual(buffer.bufferedByteCount, 0)
+  }
+
+  func testSynchronizedPCMBufferRealignsWhenMicResumesBeyondSkewWindow() {
+    var buffer = LocalMeetingSynchronizedPCMBuffer(maximumSkewByteCount: 8)
+    var output: [Data] = []
+
+    buffer.appendSystem(pcm16Data([10_000, 11_000, 12_000, 13_000, 14_000, 15_000])) {
+      output.append($0)
+    }
+    buffer.appendMic(pcm16Data([1_000, 2_000])) { output.append($0) }
+    buffer.appendSystem(pcm16Data([20_000, 21_000])) { output.append($0) }
+
+    XCTAssertEqual(output.count, 3)
+    XCTAssertEqual(pcm16Samples(output[0]), [10_000, 11_000])
+    XCTAssertEqual(pcm16Samples(output[1]), [12_000, 13_000, 14_000, 15_000])
+    XCTAssertEqual(pcm16Samples(output[2]), [21_000, 23_000])
+    XCTAssertEqual(buffer.bufferedByteCount, 0)
+  }
+
   func testSynchronizedPCMBufferBoundsOneHourOfMicOnlyAudio() {
     var buffer = LocalMeetingSynchronizedPCMBuffer()
     let oneSecond = Data(

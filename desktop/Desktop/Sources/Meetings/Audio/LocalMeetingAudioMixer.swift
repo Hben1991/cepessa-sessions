@@ -77,6 +77,8 @@ struct LocalMeetingSynchronizedPCMBuffer {
 
   private(set) var pendingMicPCM = Data()
   private(set) var pendingSystemPCM = Data()
+  private var didMicExceedMaximumSkew = false
+  private var didSystemExceedMaximumSkew = false
   let maximumSkewByteCount: Int
 
   init(maximumSkewByteCount: Int = Self.defaultMaximumSkewByteCount) {
@@ -88,11 +90,17 @@ struct LocalMeetingSynchronizedPCMBuffer {
   }
 
   mutating func appendMic(_ data: Data, emit: (Data) -> Void) {
+    if !data.isEmpty, didSystemExceedMaximumSkew {
+      emitUnmatchedSystemTail(emit: emit)
+    }
     pendingMicPCM.append(data)
     drain(emit: emit)
   }
 
   mutating func appendSystem(_ data: Data, emit: (Data) -> Void) {
+    if !data.isEmpty, didMicExceedMaximumSkew {
+      emitUnmatchedMicTail(emit: emit)
+    }
     pendingSystemPCM.append(data)
     drain(emit: emit)
   }
@@ -112,6 +120,8 @@ struct LocalMeetingSynchronizedPCMBuffer {
   mutating func reset() {
     pendingMicPCM.removeAll(keepingCapacity: false)
     pendingSystemPCM.removeAll(keepingCapacity: false)
+    didMicExceedMaximumSkew = false
+    didSystemExceedMaximumSkew = false
   }
 
   private mutating func drain(emit: (Data) -> Void) {
@@ -124,18 +134,49 @@ struct LocalMeetingSynchronizedPCMBuffer {
         ))
     }
 
-    Self.emitExcessIfNeeded(
-      from: &pendingMicPCM,
-      maximumSkewByteCount: maximumSkewByteCount,
-      emit: { micPCM in
-        emit(LocalMeetingAudioMixer.mixMono(micPCM16: micPCM, systemPCM16: Data()))
-      })
-    Self.emitExcessIfNeeded(
-      from: &pendingSystemPCM,
-      maximumSkewByteCount: maximumSkewByteCount,
-      emit: { systemPCM in
-        emit(LocalMeetingAudioMixer.mixMono(micPCM16: Data(), systemPCM16: systemPCM))
-      })
+    didMicExceedMaximumSkew =
+      Self.emitExcessIfNeeded(
+        from: &pendingMicPCM,
+        maximumSkewByteCount: maximumSkewByteCount,
+        emit: { micPCM in
+          emit(LocalMeetingAudioMixer.mixMono(micPCM16: micPCM, systemPCM16: Data()))
+        }) || didMicExceedMaximumSkew
+    didSystemExceedMaximumSkew =
+      Self.emitExcessIfNeeded(
+        from: &pendingSystemPCM,
+        maximumSkewByteCount: maximumSkewByteCount,
+        emit: { systemPCM in
+          emit(LocalMeetingAudioMixer.mixMono(micPCM16: Data(), systemPCM16: systemPCM))
+        }) || didSystemExceedMaximumSkew
+  }
+
+  /// Once a source has exceeded the skew window, its retained tail predates the returning
+  /// source. Emit that tail against silence before accepting resumed audio; otherwise the
+  /// newly returned source would remain paired approximately one full skew window behind.
+  private mutating func emitUnmatchedMicTail(emit: (Data) -> Void) {
+    let byteCount = Self.evenByteCount(pendingMicPCM.count)
+    if byteCount > 0 {
+      emit(
+        LocalMeetingAudioMixer.mixMono(
+          micPCM16: Self.consumePrefix(from: &pendingMicPCM, byteCount: byteCount),
+          systemPCM16: Data()
+        ))
+    }
+    pendingMicPCM.removeAll(keepingCapacity: true)
+    didMicExceedMaximumSkew = false
+  }
+
+  private mutating func emitUnmatchedSystemTail(emit: (Data) -> Void) {
+    let byteCount = Self.evenByteCount(pendingSystemPCM.count)
+    if byteCount > 0 {
+      emit(
+        LocalMeetingAudioMixer.mixMono(
+          micPCM16: Data(),
+          systemPCM16: Self.consumePrefix(from: &pendingSystemPCM, byteCount: byteCount)
+        ))
+    }
+    pendingSystemPCM.removeAll(keepingCapacity: true)
+    didSystemExceedMaximumSkew = false
   }
 
   private static func evenByteCount(_ count: Int) -> Int {
@@ -159,9 +200,10 @@ struct LocalMeetingSynchronizedPCMBuffer {
     from data: inout Data,
     maximumSkewByteCount: Int,
     emit: (Data) -> Void
-  ) {
+  ) -> Bool {
     let excessByteCount = evenByteCount(data.count - maximumSkewByteCount)
-    guard excessByteCount > 0 else { return }
+    guard excessByteCount > 0 else { return false }
     emit(consumePrefix(from: &data, byteCount: excessByteCount))
+    return true
   }
 }
