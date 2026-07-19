@@ -1860,55 +1860,49 @@ private struct SessionFloatingWaveformDragRegion: View {
 
 /// Voice-Memos-style scrolling waveform. While recording, each new audio
 /// sample pushes in from the right and the history scrolls left, so the wave
-/// genuinely moves with the sound. Idle shows a quiet breathing ripple.
+/// genuinely moves with the sound. Idle shows a quiet static ripple.
 private struct SessionFloatingLiveWaveform: View {
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
   let levels: [Double]
   let isRecording: Bool
   let accent: Color
 
   var body: some View {
-    TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { timeline in
-      Canvas { context, size in
-        let barWidth: CGFloat = 3
-        let gap: CGFloat = 3.2
-        let step = barWidth + gap
-        let count = max(8, Int(size.width / step))
-        let inset = (size.width - (CGFloat(count) * step) + gap) / 2
-        let midY = size.height / 2
-        let maxHalf = max(4, midY - 3)
-        let time = timeline.date.timeIntervalSinceReferenceDate
+    // Audio levels already arrive at a throttled 15 Hz. Drawing from state changes keeps the
+    // live waveform responsive while avoiding a permanent 30 FPS display timer when the app
+    // is idle (the floating bar is normally visible all day).
+    Canvas { context, size in
+      let barWidth: CGFloat = 3
+      let gap: CGFloat = 3.2
+      let step = barWidth + gap
+      let count = max(8, Int(size.width / step))
+      let inset = (size.width - (CGFloat(count) * step) + gap) / 2
+      let midY = size.height / 2
+      let maxHalf = max(4, midY - 3)
 
-        for index in 0..<count {
-          let norm = Double(index) / Double(max(count - 1, 1))
-          let x = inset + CGFloat(index) * step
-          var half: CGFloat
-          let opacity: Double
+      for index in 0..<count {
+        let norm = Double(index) / Double(max(count - 1, 1))
+        let x = inset + CGFloat(index) * step
+        let half: CGFloat
+        let opacity: Double
 
-          if isRecording {
-            let sampleIndex = levels.count - count + index
-            let level =
-              sampleIndex >= 0 && sampleIndex < levels.count ? levels[sampleIndex] : 0
-            let shaped = pow(min(max(level, 0), 1), 0.7)
-            let shimmer =
-              reduceMotion ? 1.0 : 1.0 + 0.07 * sin(time * 9 + Double(index) * 1.7)
-            half = 1.6 + maxHalf * CGFloat(shaped * shimmer)
-            opacity = 0.28 + 0.72 * norm
-          } else {
-            let envelope = sin(.pi * norm)
-            let ripple = reduceMotion ? 0.5 : (sin(time * 1.7 + norm * 6.2) + 1) / 2
-            half = 1.4 + CGFloat(ripple * envelope) * 6
-            opacity = 0.40 + 0.30 * envelope
-          }
-
-          half = min(half, maxHalf + 1.6)
-          let rect = CGRect(x: x, y: midY - half, width: barWidth, height: half * 2)
-          context.fill(
-            Path(roundedRect: rect, cornerRadius: barWidth / 2),
-            with: .color(accent.opacity(opacity))
-          )
+        if isRecording {
+          let sampleIndex = levels.count - count + index
+          let level = sampleIndex >= 0 && sampleIndex < levels.count ? levels[sampleIndex] : 0
+          let shaped = pow(min(max(level, 0), 1), 0.7)
+          half = min(1.6 + maxHalf * CGFloat(shaped), maxHalf + 1.6)
+          opacity = 0.28 + 0.72 * norm
+        } else {
+          let envelope = sin(.pi * norm)
+          let ripple = 0.5 + 0.22 * sin(norm * 6.2)
+          half = 1.4 + CGFloat(ripple * envelope) * 6
+          opacity = 0.40 + 0.30 * envelope
         }
+
+        let rect = CGRect(x: x, y: midY - half, width: barWidth, height: half * 2)
+        context.fill(
+          Path(roundedRect: rect, cornerRadius: barWidth / 2),
+          with: .color(accent.opacity(opacity))
+        )
       }
     }
   }

@@ -61,6 +61,7 @@ class SystemAudioCaptureService: @unchecked Sendable {
   private var inputFormat: AVAudioFormat?
   private var targetFormat: AVAudioFormat?
   private var sourceSampleRate: Double = 0.0
+  private let conversionBuffers = AudioConversionBufferPool()
   private let audioLevelDispatchInterval: CFTimeInterval = 1.0 / 15.0
   private var lastAudioLevelDispatchTime: CFAbsoluteTime = 0
   private var lastDispatchedAudioLevel: Float = 0
@@ -109,6 +110,7 @@ class SystemAudioCaptureService: @unchecked Sendable {
     self.onAudioLevel = onAudioLevel
     self.lastAudioLevelDispatchTime = 0
     self.lastDispatchedAudioLevel = 0
+    self.conversionBuffers.reset()
 
     // All CoreAudio HAL calls (CreateTap, CreateAggregateDevice, AudioDeviceStart) are
     // synchronous IPC to coreaudiod via mach_msg. After wake from sleep the daemon can
@@ -294,6 +296,7 @@ class SystemAudioCaptureService: @unchecked Sendable {
       self.inputFormat = nil
       self.targetFormat = nil
       self.sourceSampleRate = 0.0
+      self.conversionBuffers.reset()
     }
 
     localMeetingLog("SystemAudioCapture: Stopped capturing")
@@ -383,33 +386,64 @@ class SystemAudioCaptureService: @unchecked Sendable {
     return monoSamples
   }
 
-  private static func monoSamples(
+  private static func monoFrameCount(
     from inputData: UnsafePointer<AudioBufferList>
-  ) -> [Float]? {
+  ) -> Int? {
     let mutableInputData = UnsafeMutablePointer(mutating: inputData)
     let audioBuffers = UnsafeMutableAudioBufferListPointer(mutableInputData)
-    var buffers: [[Float]] = []
-    var channelsPerBuffer: [Int] = []
-    buffers.reserveCapacity(audioBuffers.count)
-    channelsPerBuffer.reserveCapacity(audioBuffers.count)
+    var frameCount: Int?
+    var totalChannelCount = 0
 
     for buffer in audioBuffers {
       let channelCount = Int(buffer.mNumberChannels)
       guard channelCount > 0,
-        let data = buffer.mData,
+        buffer.mData != nil,
         buffer.mDataByteSize >= MemoryLayout<Float32>.size
       else { continue }
 
       let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float32>.size
-      let samples = UnsafeBufferPointer(
-        start: data.assumingMemoryBound(to: Float32.self),
-        count: sampleCount
-      )
-      buffers.append(Array(samples))
-      channelsPerBuffer.append(channelCount)
+      let bufferFrameCount = sampleCount / channelCount
+      frameCount = min(frameCount ?? bufferFrameCount, bufferFrameCount)
+      totalChannelCount += channelCount
     }
 
-    return downmixFloat32Buffers(buffers, channelsPerBuffer: channelsPerBuffer)
+    guard let frameCount, frameCount > 0, totalChannelCount > 0 else { return nil }
+    return frameCount
+  }
+
+  private static func copyMonoSamples(
+    from inputData: UnsafePointer<AudioBufferList>,
+    frameCount: Int,
+    to destination: UnsafeMutablePointer<Float>
+  ) -> Bool {
+    let mutableInputData = UnsafeMutablePointer(mutating: inputData)
+    let audioBuffers = UnsafeMutableAudioBufferListPointer(mutableInputData)
+    let totalChannelCount = audioBuffers.reduce(0) { $0 + Int($1.mNumberChannels) }
+    guard totalChannelCount > 0 else { return false }
+
+    if audioBuffers.count == 1,
+      let buffer = audioBuffers.first,
+      buffer.mNumberChannels == 1,
+      let data = buffer.mData
+    {
+      destination.update(from: data.assumingMemoryBound(to: Float.self), count: frameCount)
+      return true
+    }
+
+    for frameIndex in 0..<frameCount {
+      var sum: Float = 0
+      for buffer in audioBuffers {
+        let channelCount = Int(buffer.mNumberChannels)
+        guard channelCount > 0, let data = buffer.mData else { return false }
+        let samples = data.assumingMemoryBound(to: Float.self)
+        let frameOffset = frameIndex * channelCount
+        for channelIndex in 0..<channelCount {
+          sum += samples[frameOffset + channelIndex]
+        }
+      }
+      destination[frameIndex] = sum / Float(totalChannelCount)
+    }
+    return true
   }
 
   /// Handle incoming audio data from the tap
@@ -423,31 +457,31 @@ class SystemAudioCaptureService: @unchecked Sendable {
       let inputFmt = inputFormat
     else { return }
 
-    guard let monoSamples = Self.monoSamples(from: inputData), !monoSamples.isEmpty else { return }
-    let frameCount = AVAudioFrameCount(monoSamples.count)
+    guard let monoFrameCount = Self.monoFrameCount(from: inputData) else { return }
+    let frameCount = AVAudioFrameCount(monoFrameCount)
 
-    // Create input AVAudioPCMBuffer
-    guard
-      let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFmt, frameCapacity: frameCount)
-    else { return }
-
-    inputBuffer.frameLength = frameCount
-
-    guard let destination = inputBuffer.floatChannelData?[0] else { return }
-    monoSamples.withUnsafeBufferPointer { source in
-      destination.update(from: source.baseAddress!, count: monoSamples.count)
-    }
-
-    // Calculate output frame count based on sample rate conversion
     guard
       let outputFrameCapacity = Self.outputFrameCapacity(
         inputFrameCount: frameCount,
         sourceSampleRate: sourceSampleRate,
         targetSampleRate: targetSampleRate
+      ),
+      let buffers = conversionBuffers.prepare(
+        inputFormat: inputFmt,
+        inputFrameCount: frameCount,
+        outputFormat: targetFmt,
+        outputFrameCapacity: outputFrameCapacity
       )
     else { return }
-    guard
-      let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFmt, frameCapacity: outputFrameCapacity)
+    let inputBuffer = buffers.input
+    let outputBuffer = buffers.output
+
+    guard let destination = inputBuffer.floatChannelData?[0],
+      Self.copyMonoSamples(
+        from: inputData,
+        frameCount: monoFrameCount,
+        to: destination
+      )
     else { return }
 
     // Convert using input block pattern
@@ -475,28 +509,12 @@ class SystemAudioCaptureService: @unchecked Sendable {
     guard let channelData = outputBuffer.floatChannelData?[0] else { return }
 
     let processedFrameLength = Int(outputBuffer.frameLength)
-    var pcmData = [Int16]()
-    pcmData.reserveCapacity(processedFrameLength)
-
-    for i in 0..<processedFrameLength {
-      let sample = channelData[i]
-      // Clamp and convert to Int16 range (-32768 to 32767)
-      let pcmSample = Int16(max(-32768, min(32767, sample * 32767)))
-      pcmData.append(pcmSample)
-    }
-
-    // Convert to Data
-    let byteData = pcmData.withUnsafeBufferPointer { buffer in
-      return Data(buffer: buffer)
-    }
+    let encoding = AudioPCM16Encoder.encode(
+      UnsafeBufferPointer(start: channelData, count: processedFrameLength))
 
     // Calculate and report audio level (RMS normalized to 0.0 - 1.0)
-    if let levelHandler = onAudioLevel, !pcmData.isEmpty {
-      let sumOfSquares: Float = pcmData.reduce(0.0) { acc, sample in
-        let normalized = Float(sample) / 32767.0
-        return acc + normalized * normalized
-      }
-      let rms = sqrt(sumOfSquares / Float(pcmData.count))
+    if let levelHandler = onAudioLevel, encoding.sampleCount > 0 {
+      let rms = encoding.rms
       // Clamp to 0.0 - 1.0 range
       let level = min(Float(1.0), max(Float(0.0), rms))
       if shouldDispatchAudioLevel(level) {
@@ -507,7 +525,7 @@ class SystemAudioCaptureService: @unchecked Sendable {
     }
 
     // Send to callback
-    onAudioChunk?(byteData)
+    onAudioChunk?(encoding.data)
   }
 
   private func shouldDispatchAudioLevel(_ level: Float) -> Bool {
@@ -553,6 +571,7 @@ class SystemAudioCaptureService: @unchecked Sendable {
     inputFormat = nil
     targetFormat = nil
     sourceSampleRate = 0.0
+    conversionBuffers.reset()
   }
 
   deinit {

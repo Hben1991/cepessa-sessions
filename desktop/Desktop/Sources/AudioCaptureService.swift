@@ -80,6 +80,7 @@ class AudioCaptureService: @unchecked Sendable {
     private var inputFormat: AVAudioFormat?
     private var targetFormat: AVAudioFormat?
     private var detectedSampleRate: Double = 0.0
+    private let conversionBuffers = AudioConversionBufferPool()
 
     // Audio level smoothing (for natural decay like system audio)
     private var smoothedLevel: Float = 0.0
@@ -149,6 +150,7 @@ class AudioCaptureService: @unchecked Sendable {
         self.onAudioLevel = onAudioLevel
         self.lastAudioLevelDispatchTime = 0
         self.lastDispatchedAudioLevel = 0
+        self.conversionBuffers.reset()
 
         // All CoreAudio HAL calls (AudioObjectGetPropertyData, AudioDeviceStart, etc.) are
         // synchronous IPC to coreaudiod via mach_msg. After wake from sleep the daemon can
@@ -301,12 +303,14 @@ class AudioCaptureService: @unchecked Sendable {
                 self.inputFormat = nil
                 self.targetFormat = nil
                 self.detectedSampleRate = 0.0
+                self.conversionBuffers.reset()
             }
         } else {
             audioConverter = nil
             inputFormat = nil
             targetFormat = nil
             detectedSampleRate = 0.0
+            conversionBuffers.reset()
         }
 
         localMeetingLog("AudioCapture: Stopped capturing")
@@ -420,9 +424,21 @@ class AudioCaptureService: @unchecked Sendable {
         let frameCount = buffer.mDataByteSize / bytesPerFrame
         guard frameCount > 0 else { return }
 
-        // Create mono input buffer for converter
-        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFmt, frameCapacity: frameCount) else { return }
-        inputBuffer.frameLength = frameCount
+        guard
+            let outputFrameCapacity = Self.outputFrameCapacity(
+                inputFrameCount: frameCount,
+                sourceSampleRate: detectedSampleRate,
+                targetSampleRate: targetSampleRate
+            ),
+            let buffers = conversionBuffers.prepare(
+                inputFormat: inputFmt,
+                inputFrameCount: frameCount,
+                outputFormat: targetFmt,
+                outputFrameCapacity: outputFrameCapacity
+            )
+        else { return }
+        let inputBuffer = buffers.input
+        let outputBuffer = buffers.output
 
         let srcPtr = data.assumingMemoryBound(to: Float32.self)
         let channelCount = Int(buffer.mNumberChannels)
@@ -440,16 +456,6 @@ class AudioCaptureService: @unchecked Sendable {
             // Already mono, just copy
             memcpy(monoPtr, srcPtr, Int(buffer.mDataByteSize))
         }
-
-        // Convert to target format (16kHz mono)
-        guard
-            let outputFrameCapacity = Self.outputFrameCapacity(
-                inputFrameCount: frameCount,
-                sourceSampleRate: detectedSampleRate,
-                targetSampleRate: targetSampleRate
-            )
-        else { return }
-        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFmt, frameCapacity: outputFrameCapacity) else { return }
 
         var error: NSError?
         var hasConsumedInput = false
@@ -471,24 +477,13 @@ class AudioCaptureService: @unchecked Sendable {
             return
         }
 
-        // Convert Float32 samples to Int16 (linear16 PCM for DeepGram)
+        // Convert Float32 samples to Int16 (linear16 PCM for DeepGram), collecting the
+        // watchdog and level statistics in the same pass.
         guard let channelData = outputBuffer.floatChannelData?[0] else { return }
 
         let processedFrameLength = Int(outputBuffer.frameLength)
-        var pcmData = [Int16]()
-        pcmData.reserveCapacity(processedFrameLength)
-
-        for i in 0..<processedFrameLength {
-            let sample = channelData[i]
-            // Clamp and convert to Int16 range (-32768 to 32767)
-            let pcmSample = Int16(max(-32768, min(32767, sample * 32767)))
-            pcmData.append(pcmSample)
-        }
-
-        // Convert to Data (little-endian, which is native on Apple platforms)
-        let byteData = pcmData.withUnsafeBufferPointer { buffer in
-            return Data(buffer: buffer)
-        }
+        let encoding = AudioPCM16Encoder.encode(
+            UnsafeBufferPointer(start: channelData, count: processedFrameLength))
 
         // Silent-mic watchdog: on Bluetooth-to-Bluetooth A2DP/HFP profile conflicts macOS
         // accepts the IOProc but delivers only zero samples. Track the peak amplitude within
@@ -496,11 +491,7 @@ class AudioCaptureService: @unchecked Sendable {
         // Bluetooth, fire onSilentMicDetected so the caller can swap to the built-in mic.
         // Fires at most once per capture session.
         if !silentMicDetectedFired {
-            for s in pcmData {
-                // Int16.min has magnitude 32768 which is out of Int16 range — clamp.
-                let a = s == Int16.min ? Int16.max : Int16(s.magnitude)
-                if a > watchdogWindowPeak { watchdogWindowPeak = a }
-            }
+            watchdogWindowPeak = max(watchdogWindowPeak, encoding.peakMagnitude)
             let nowAbs = CFAbsoluteTimeGetCurrent()
             if watchdogWindowStart == 0 { watchdogWindowStart = nowAbs }
             if nowAbs - watchdogWindowStart >= 1.0 {
@@ -525,12 +516,8 @@ class AudioCaptureService: @unchecked Sendable {
 
         // Calculate and report audio level (RMS normalized to 0.0 - 1.0)
         // Uses smoothing and decay to match system audio behavior
-        if let levelHandler = onAudioLevel, !pcmData.isEmpty {
-            let sumOfSquares: Float = pcmData.reduce(0.0) { acc, sample in
-                let normalized = Float(sample) / 32767.0
-                return acc + normalized * normalized
-            }
-            let rms = sqrt(sumOfSquares / Float(pcmData.count))
+        if let levelHandler = onAudioLevel, encoding.sampleCount > 0 {
+            let rms = encoding.rms
 
             // Apply soft noise floor - subtract noise but don't hard cutoff
             let cleanedRms = max(0.0, rms - noiseFloor)
@@ -558,7 +545,7 @@ class AudioCaptureService: @unchecked Sendable {
         }
 
         // Send to callback
-        onAudioChunk?(byteData)
+        onAudioChunk?(encoding.data)
     }
 
     private func shouldDispatchAudioLevel(_ level: Float) -> Bool {
@@ -763,6 +750,7 @@ class AudioCaptureService: @unchecked Sendable {
             return
         }
         audioConverter = newConverter
+        conversionBuffers.reset()
 
         // Create new IOProc
         var procID: AudioDeviceIOProcID?
