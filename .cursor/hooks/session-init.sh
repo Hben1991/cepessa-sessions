@@ -4,7 +4,7 @@
 
 set -e
 
-echo "🔍 Checking Omi development environment..."
+echo "🔍 Checking Cepessa Sessions development environment..."
 
 # Check Python version (3.9-3.12)
 if command -v python3 &> /dev/null; then

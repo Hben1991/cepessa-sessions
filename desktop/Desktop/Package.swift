@@ -2,58 +2,38 @@
 import PackageDescription
 
 let package = Package(
-  name: "Omi Computer",
+  name: "CepessaSessions",
   platforms: [
     .macOS("14.0")
   ],
   dependencies: [
     .package(path: "../../../typewhisper-mac/Vendor/whisper.spm"),
-    .package(url: "https://github.com/firebase/firebase-ios-sdk.git", from: "11.0.0"),
-    .package(url: "https://github.com/mixpanel/mixpanel-swift.git", from: "4.0.0"),
-    .package(url: "https://github.com/PostHog/posthog-ios.git", from: "3.0.0"),
-    .package(url: "https://github.com/getsentry/sentry-cocoa.git", exact: "8.58.0"),
-    .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.24.0"),
-    .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
-    .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
-    .package(
-      url: "https://github.com/microsoft/onnxruntime-swift-package-manager.git", from: "1.20.0"),
-    .package(url: "https://github.com/heap/heap-swift-core-sdk.git", from: "0.8.0"),
+    .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", .upToNextMajor(from: "0.18.0")),
+    .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.8943.0")),
   ],
   targets: [
-    .target(
-      name: "ObjCExceptionCatcher",
-      path: "ObjCExceptionCatcher",
-      publicHeadersPath: "include"
-    ),
     .executableTarget(
-      name: "Omi Computer",
+      name: "CepessaSessions",
       dependencies: [
-        "ObjCExceptionCatcher",
-        .product(name: "FirebaseCore", package: "firebase-ios-sdk"),
-        .product(name: "FirebaseAuth", package: "firebase-ios-sdk"),
         .product(name: "whisper", package: "whisper.spm"),
-        .product(name: "Mixpanel", package: "mixpanel-swift"),
-        .product(name: "PostHog", package: "posthog-ios"),
-        .product(name: "Sentry", package: "sentry-cocoa"),
-        .product(name: "GRDB", package: "GRDB.swift"),
-        .product(name: "Sparkle", package: "Sparkle"),
-        .product(name: "MarkdownUI", package: "swift-markdown-ui"),
-        .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
-        .product(name: "HeapSwiftCore", package: "heap-swift-core-sdk"),
+        .product(name: "WhisperKit", package: "argmax-oss-swift"),
       ],
       path: "Sources",
-      exclude: [
-        "GoogleService-Info-Dev.plist",
-      ],
       resources: [
-        .process("GoogleService-Info.plist"),
         .process("Resources"),
       ]
     ),
-    .testTarget(
-      name: "Omi ComputerTests",
+    .executableTarget(
+      name: "CepessaLocalModelRunner",
       dependencies: [
-        .target(name: "Omi Computer")
+        .product(name: "LlamaSwift", package: "llama.swift"),
+      ],
+      path: "LocalModelRunner"
+    ),
+    .testTarget(
+      name: "CepessaSessionsTests",
+      dependencies: [
+        .target(name: "CepessaSessions")
       ],
       path: "Tests"
     ),

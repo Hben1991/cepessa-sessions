@@ -1,826 +1,2143 @@
 import AVFoundation
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct CepessaSessionsHomePage: View {
-    var body: some View {
-        CepessaSessionsWorkspaceView()
-    }
+  var body: some View {
+    CepessaSessionsWorkspaceView()
+  }
 }
 
 struct CepessaSessionsLibraryPage: View {
-    @ObservedObject private var model = CepessaSessionsStore.shared.model
-    @State private var searchText = ""
+  @ObservedObject private var model = CepessaSessionsStore.shared.model
+  @State private var searchText = ""
+  @State private var hoveredSessionID: LocalMeetingSession.ID?
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var filteredSessions: [LocalMeetingSession] {
-        let normalized = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return model.sessions }
+  private var filteredSessions: [LocalMeetingSession] {
+    let normalized = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalized.isEmpty else { return model.sessions }
 
-        return model.sessions.filter { session in
-            session.displayTitle.localizedCaseInsensitiveContains(normalized)
-                || session.transcriptText.localizedCaseInsensitiveContains(normalized)
-                || session.attachments.contains(where: { $0.title.localizedCaseInsensitiveContains(normalized) })
-        }
+    return model.sessions.filter { session in
+      session.displayTitle.localizedCaseInsensitiveContains(normalized)
+        || LocalSessionRecapMarkdownDocument.title(for: session, language: .hebrew)
+          .localizedCaseInsensitiveContains(normalized)
+        || LocalSessionRecapMarkdownDocument.title(for: session, language: .english)
+          .localizedCaseInsensitiveContains(normalized)
+        || session.transcriptText.localizedCaseInsensitiveContains(normalized)
+        || session.attachments.contains(where: {
+          $0.title.localizedCaseInsensitiveContains(normalized)
+        })
     }
+  }
 
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [OmiColors.backgroundPrimary, OmiColors.backgroundSecondary.opacity(0.96)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+  var body: some View {
+    ZStack {
+      LinearGradient(
+        colors: [
+          CepessaColors.paperRaised,
+          CepessaColors.paper,
+          CepessaColors.paperDeep.opacity(0.68),
+        ],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+      )
+      .ignoresSafeArea()
+
+      HStack(spacing: 18) {
+        VStack(alignment: .leading, spacing: 18) {
+          VStack(alignment: .leading, spacing: 10) {
+            Text("Sessions")
+              .scaledFont(size: 11, weight: .semibold)
+              .tracking(0.18)
+              .foregroundStyle(CepessaColors.textSecondary)
+
+            Text("Library")
+              .scaledFont(size: 30, weight: .semibold)
+              .foregroundStyle(CepessaColors.textPrimary)
+
+            Text(
+              "Search every local session, revisit transcripts, and reopen recap context on this Mac."
             )
-            .ignoresSafeArea()
+            .scaledFont(size: 13)
+            .foregroundStyle(CepessaColors.textSecondary)
+          }
 
-            HStack(spacing: 18) {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Cepessa Sessions")
-                            .scaledFont(size: 11, weight: .semibold)
-                            .tracking(0.18)
-                            .foregroundStyle(OmiColors.textTertiary)
+          HStack(spacing: 8) {
+            infoPill("Local only")
+            infoPill("Mixed-language transcripts")
+            infoPill("Attachments preserved")
+          }
 
-                        Text("Library")
-                            .scaledFont(size: 30, weight: .semibold)
-                            .foregroundStyle(OmiColors.textPrimary)
-
-                        Text("Search every local session, revisit transcripts, and reopen recap context on this Mac.")
-                            .scaledFont(size: 13)
-                            .foregroundStyle(OmiColors.textTertiary)
-                    }
-
-                    HStack(spacing: 8) {
-                        infoPill("Local only")
-                        infoPill("Mixed-language transcripts")
-                        infoPill("Attachments preserved")
-                    }
-
-                    HStack(spacing: 12) {
-                        HStack(spacing: 10) {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundStyle(OmiColors.textTertiary)
-                            TextField("Search sessions, transcripts, or artifact titles", text: $searchText)
-                                .textFieldStyle(.plain)
-                                .foregroundStyle(OmiColors.textPrimary)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 12)
-                        .background(OmiColors.backgroundTertiary.opacity(0.66))
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-                        Text("\(filteredSessions.count) \(filteredSessions.count == 1 ? "session" : "sessions")")
-                            .scaledFont(size: 12, weight: .semibold)
-                            .foregroundStyle(OmiColors.textSecondary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(OmiColors.backgroundRaised.opacity(0.72))
-                            .clipShape(Capsule())
-                    }
-
-                    if filteredSessions.isEmpty {
-                        emptyState
-                    } else {
-                        ScrollView {
-                            LazyVStack(spacing: 12) {
-                                ForEach(filteredSessions) { session in
-                                    Button {
-                                        model.selectSession(id: session.id)
-                                    } label: {
-                                        libraryRow(session: session, isSelected: model.selectedSessionID == session.id)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .padding(.trailing, 6)
-                        }
-                        .scrollIndicators(.hidden)
-                    }
-                }
-                .padding(22)
-                .frame(minWidth: 360, idealWidth: 420, maxWidth: 440, maxHeight: .infinity, alignment: .top)
-                .omiPanel(
-                    fill: OmiColors.backgroundTertiary.opacity(0.4),
-                    radius: 28,
-                    stroke: OmiColors.border.opacity(0.26),
-                    shadowOpacity: 0.12,
-                    shadowRadius: 18,
-                    shadowY: 10
-                )
-
-                CepessaLibraryDetailPane(session: model.selectedSession)
+          HStack(spacing: 12) {
+            HStack(spacing: 10) {
+              Image(systemName: "magnifyingglass")
+                .foregroundStyle(CepessaColors.textSecondary)
+              TextField("Search sessions, transcripts, or artifact titles", text: $searchText)
+                .textFieldStyle(.plain)
+                .foregroundStyle(CepessaColors.textPrimary)
+                .accessibilityLabel("Search library")
             }
-            .padding(20)
-        }
-        .onAppear {
-            CepessaSessionFloatingBarController.shared.connect(model: model)
-        }
-    }
-
-    private func libraryRow(session: LocalMeetingSession, isSelected: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(session.displayTitle)
-                        .scaledFont(size: 15, weight: .semibold)
-                        .foregroundStyle(OmiColors.textPrimary)
-                        .lineLimit(2)
-
-                    Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
-                        .scaledFont(size: 11)
-                        .foregroundStyle(OmiColors.textTertiary)
-                }
-
-                Spacer(minLength: 0)
-
-                sessionStatusBadge(session.status)
-            }
-
-            Text(previewText(for: session))
-                .scaledFont(size: 12)
-                .foregroundStyle(OmiColors.textSecondary)
-                .lineLimit(3)
-
-            HStack(spacing: 8) {
-                        infoPill("\(session.segments.count) \(session.segments.count == 1 ? "segment" : "segments")")
-                infoPill("\(timelineArtifactCount(for: session)) artifacts")
-                infoPill(session.recap.sections.isEmpty ? "Recap pending" : "Structured recap")
-            }
-        }
-        .padding(17)
-        .background(
-            LinearGradient(
-                colors: [
-                    isSelected ? OmiColors.backgroundSecondary : OmiColors.backgroundTertiary.opacity(0.76),
-                    isSelected ? OmiColors.backgroundRaised.opacity(0.92) : OmiColors.backgroundTertiary.opacity(0.58)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(CepessaColors.backgroundSecondary.opacity(0.86))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+              RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(CepessaColors.border.opacity(0.24), lineWidth: 1)
             )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(isSelected ? OmiColors.purplePrimary.opacity(0.44) : OmiColors.border.opacity(0.22), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(isSelected ? 0.08 : 0.04), radius: isSelected ? 14 : 8, y: isSelected ? 8 : 4)
+
+            Text(
+              "\(filteredSessions.count) \(filteredSessions.count == 1 ? "session" : "sessions")"
+            )
+            .scaledFont(size: 12, weight: .semibold)
+            .foregroundStyle(CepessaColors.textSecondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(CepessaColors.backgroundSecondary.opacity(0.72))
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            Button {
+              importRecording()
+            } label: {
+              Label("Audio file", systemImage: "waveform.badge.plus")
+            }
+            .buttonStyle(.bordered)
+            .help("Choose an existing audio file and transcribe it locally.")
+          }
+
+          if filteredSessions.isEmpty {
+            emptyState
+          } else {
+            ScrollView {
+              LazyVStack(spacing: 12) {
+                ForEach(filteredSessions) { session in
+                  libraryRow(
+                    session: session,
+                    isSelected: model.selectedSessionID == session.id,
+                    isHovered: hoveredSessionID == session.id
+                  )
+                }
+              }
+              .padding(.trailing, 6)
+            }
+            .scrollIndicators(.hidden)
+          }
+        }
+        .padding(22)
+        .frame(minWidth: 360, idealWidth: 420, maxWidth: 440, maxHeight: .infinity, alignment: .top)
+        .cepessaCanvas(radius: 22)
+
+        CepessaLibraryDetailPane(model: model, session: model.selectedSession)
+      }
+      .padding(20)
     }
-
-    private func sessionStatusBadge(_ status: LocalMeetingSessionStatus) -> some View {
-        Text(status.label)
-            .scaledFont(size: 10, weight: .semibold)
-            .foregroundStyle(status == .ready ? OmiColors.backgroundPrimary : Color.white)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(status.badgeColor)
-            .clipShape(Capsule())
+    .onAppear {
+      CepessaSessionFloatingBarController.shared.connect(model: model)
     }
+  }
 
-    private func infoPill(_ text: String) -> some View {
-        Text(text)
-            .scaledFont(size: 10, weight: .medium)
-            .foregroundStyle(OmiColors.textTertiary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(OmiColors.backgroundRaised.opacity(0.72))
-            .clipShape(Capsule())
-    }
+  private func libraryRow(session: LocalMeetingSession, isSelected: Bool, isHovered: Bool)
+    -> some View
+  {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack(alignment: .top, spacing: 10) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(documentTitle(for: session))
+            .scaledFont(size: 15, weight: .semibold)
+            .foregroundStyle(CepessaColors.textPrimary)
+            .lineLimit(2)
 
-    private func previewText(for session: LocalMeetingSession) -> String {
-        let recap = session.recap.overview.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !recap.isEmpty { return recap }
-
-        let transcript = session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !transcript.isEmpty { return transcript }
-
-        if session.attachments.isEmpty, session.captureArtifacts.isEmpty {
-            return "No transcript or artifacts yet."
+          Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
+            .scaledFont(size: 11)
+            .foregroundStyle(CepessaColors.textSecondary)
         }
 
-        return "Artifacts captured in this session will appear here once processing finishes."
-    }
+        Spacer(minLength: 0)
 
-    private func timelineArtifactCount(for session: LocalMeetingSession) -> Int {
-        session.attachments.count + session.captureArtifacts.count
-    }
+        sessionStatusBadge(displayStatus(for: session))
+      }
 
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "magnifyingglass.circle")
-                .scaledFont(size: 28)
-                .foregroundStyle(OmiColors.textTertiary)
+      Text(previewText(for: session))
+        .scaledFont(size: 12)
+        .foregroundStyle(CepessaColors.textSecondary)
+        .lineLimit(3)
 
-            Text("No sessions match this search")
-                .scaledFont(size: 16, weight: .semibold)
-                .foregroundStyle(OmiColors.textPrimary)
+      HStack(alignment: .center, spacing: 8) {
+        infoPill(
+          "\(session.segments.count) \(session.segments.count == 1 ? "segment" : "segments")")
+        infoPill("\(timelineArtifactCount(for: session)) artifacts")
+        infoPill(session.recap.sections.isEmpty ? "Recap pending" : "Structured recap")
 
-            Text("Try a transcript phrase, attachment title, or recap keyword.")
-                .scaledFont(size: 12)
-                .foregroundStyle(OmiColors.textSecondary)
-                .multilineTextAlignment(.center)
+        Spacer(minLength: 0)
+
+        if model.canRetranscribe(session), isHovered || isSelected {
+          retranscribeSessionButton(for: session)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(24)
-        .background(OmiColors.backgroundTertiary.opacity(0.42))
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(OmiColors.border.opacity(0.2), lineWidth: 1)
-        )
+      }
     }
+    .padding(17)
+    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .background(
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .fill(
+          isSelected
+            ? CepessaColors.capture.opacity(0.14) : CepessaColors.backgroundSecondary.opacity(0.76))
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .stroke(
+          isSelected ? CepessaColors.capture.opacity(0.28) : CepessaColors.border.opacity(0.22),
+          lineWidth: 1)
+    )
+    .shadow(
+      color: Color.black.opacity(isSelected ? 0.03 : 0.0), radius: isSelected ? 3 : 0,
+      y: isSelected ? 1 : 0
+    )
+    .scaleEffect(isHovered && !isSelected && !reduceMotion ? 1.006 : 1)
+    .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isHovered)
+    .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: isSelected)
+    .onTapGesture {
+      model.selectSession(id: session.id)
+    }
+    .onHover { isInside in
+      hoveredSessionID = isInside ? session.id : nil
+    }
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel("\(documentTitle(for: session)), \(displayStatus(for: session).label)")
+    .accessibilityHint("Opens this session details.")
+    .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
+    .accessibilityAction {
+      model.selectSession(id: session.id)
+    }
+  }
+
+  private func sessionStatusBadge(_ status: LocalMeetingSessionStatus) -> some View {
+    Text(status.label)
+      .scaledFont(size: 10, weight: .semibold)
+      .foregroundStyle(status == .ready ? CepessaColors.backgroundPrimary : Color.white)
+      .padding(.horizontal, 9)
+      .padding(.vertical, 5)
+      .background(status.badgeColor)
+      .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+  }
+
+  private func infoPill(_ text: String) -> some View {
+    Text(text)
+      .scaledFont(size: 10, weight: .medium)
+      .foregroundStyle(CepessaColors.textSecondary)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 6)
+      .background(CepessaColors.backgroundSecondary.opacity(0.72))
+      .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+  }
+
+  private func previewText(for session: LocalMeetingSession) -> String {
+    let recap = session.recap.overview.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !recap.isEmpty { return recap }
+
+    let transcript = session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !transcript.isEmpty { return transcript }
+
+    if session.attachments.isEmpty, session.captureArtifacts.isEmpty {
+      return "No transcript or artifacts yet."
+    }
+
+    return "Artifacts captured in this session will appear here once processing finishes."
+  }
+
+  private func timelineArtifactCount(for session: LocalMeetingSession) -> Int {
+    session.attachments.count + session.captureArtifacts.count
+  }
+
+  private func displayStatus(for session: LocalMeetingSession) -> LocalMeetingSessionStatus {
+    if model.processingSnapshot(for: session.id) != nil {
+      return .transcribing
+    }
+
+    return session.status
+  }
+
+  private func importRecording() {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = true
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = false
+    panel.allowedContentTypes = [.audio]
+    panel.prompt = "Transcribe"
+    panel.message = "Choose an audio file to normalize locally and transcribe on this Mac."
+
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    Task {
+      await model.importExistingRecording(from: url)
+    }
+  }
+
+  @ViewBuilder
+  private func retranscribeSessionButton(for session: LocalMeetingSession) -> some View {
+    Button {
+      model.retranscribeSession(id: session.id)
+    } label: {
+      Label(
+        session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          ? "Transcribe"
+          : "Retranscribe",
+        systemImage: session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          ? "waveform.badge.magnifyingglass"
+          : "arrow.trianglehead.clockwise"
+      )
+    }
+    .buttonStyle(.bordered)
+    .controlSize(.small)
+    .help("Run transcription again from the saved audio for this session.")
+  }
+
+  private var emptyState: some View {
+    VStack(spacing: 12) {
+      Image(systemName: "magnifyingglass.circle")
+        .scaledFont(size: 28)
+        .foregroundStyle(CepessaColors.textTertiary)
+
+      Text("No sessions match this search")
+        .scaledFont(size: 16, weight: .semibold)
+        .foregroundStyle(CepessaColors.textPrimary)
+
+      Text("Try a transcript phrase, attachment title, or recap keyword.")
+        .scaledFont(size: 12)
+        .foregroundStyle(CepessaColors.textSecondary)
+        .multilineTextAlignment(.center)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .padding(24)
+    .background(CepessaColors.backgroundSecondary.opacity(0.80))
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .overlay(
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .stroke(CepessaColors.border.opacity(0.2), lineWidth: 1)
+    )
+  }
+
+  private func documentTitle(for session: LocalMeetingSession) -> String {
+    LocalSessionRecapMarkdownDocument.title(
+      for: session,
+      language: LocalSessionRecapMarkdownDocument.preferredLanguage(for: session)
+    )
+  }
 }
 
 private struct CepessaLibraryDetailPane: View {
-    let session: LocalMeetingSession?
+  @ObservedObject var model: LocalMeetingAppModel
+  let session: LocalMeetingSession?
+  @AppStorage("cepessa.sessions.documentLanguage") private var documentLanguage =
+    LocalSessionDocumentLanguage.hebrew.rawValue
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    var body: some View {
-        Group {
-            if let session {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Selected session")
-                                .scaledFont(size: 11, weight: .semibold)
-                                .tracking(0.18)
-                                .foregroundStyle(OmiColors.textTertiary)
+  var body: some View {
+    Group {
+      if let session {
+        ZStack(alignment: .bottom) {
+          ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+              VStack(alignment: .leading, spacing: 8) {
+                Text("Selected session")
+                  .scaledFont(size: 11, weight: .semibold)
+                  .tracking(0.18)
+                  .foregroundStyle(CepessaColors.textSecondary)
 
-                            Text(session.displayTitle)
-                                .scaledFont(size: 28, weight: .semibold)
-                                .foregroundStyle(OmiColors.textPrimary)
-                                .lineLimit(2)
+                Text(LocalSessionRecapMarkdownDocument.title(for: session, language: selectedDocumentLanguage))
+                  .scaledFont(size: 28, weight: .semibold)
+                  .foregroundStyle(CepessaColors.textPrimary)
+                  .lineLimit(2)
 
-                            Text(session.startedAt.formatted(date: .complete, time: .shortened))
-                                .scaledFont(size: 12)
-                                .foregroundStyle(OmiColors.textTertiary)
-                        }
+                Text(session.startedAt.formatted(date: .complete, time: .shortened))
+                  .scaledFont(size: 12)
+                  .foregroundStyle(CepessaColors.textSecondary)
+              }
 
-                        HStack(spacing: 8) {
-                            infoPill(session.status.label)
-                            infoPill("\(session.segments.count) \(session.segments.count == 1 ? "segment" : "segments")")
-                            infoPill("\(session.attachments.count + session.captureArtifacts.count) artifacts")
-                            infoPill(session.recap.sections.isEmpty ? "Recap pending" : "Structured recap")
-                        }
-
-                        detailBlock("Structured recap", subtitle: "The recap appears in sections so you can edit or reuse one part at a time.") {
-                            if session.recap.overview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && session.recap.sections.isEmpty {
-                                Text("Recap is still being prepared.")
-                                    .scaledFont(size: 13)
-                                    .foregroundStyle(OmiColors.textSecondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(14)
-                                    .background(OmiColors.backgroundSecondary.opacity(0.82))
-                                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            } else {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    if !session.recap.overview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                        recapOverviewCard(session.recap.overview)
-                                    }
-
-                                    ForEach(session.recap.sections) { section in
-                                        recapSectionCard(section)
-                                    }
-                                }
-                            }
-                        }
-
-                        detailBlock("Transcript", subtitle: "The transcript keeps the original flow of the session, including mixed Hebrew and English.") {
-                            if session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                Text("Transcript not available yet.")
-                                    .scaledFont(size: 13)
-                                    .foregroundStyle(OmiColors.textSecondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(14)
-                                    .background(OmiColors.backgroundSecondary.opacity(0.82))
-                                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            } else {
-                                Text(session.transcriptText)
-                                    .scaledFont(size: 13)
-                                    .foregroundStyle(OmiColors.textSecondary)
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(14)
-                                    .background(OmiColors.backgroundSecondary.opacity(0.82))
-                                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            }
-                        }
-
-                        detailBlock("Context timeline", subtitle: "Screenshots, documents, and captures stay pinned to the exact session moment.") {
-                            if session.attachments.isEmpty && session.captureArtifacts.isEmpty {
-                                Text("Screenshots, clips, and documents captured during the session will appear here with exact timestamps.")
-                                    .scaledFont(size: 13)
-                                    .foregroundStyle(OmiColors.textSecondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(14)
-                                    .background(OmiColors.backgroundSecondary.opacity(0.82))
-                                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            } else {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    if !session.attachments.isEmpty {
-                                        Text("Attachments")
-                                            .scaledFont(size: 12, weight: .semibold)
-                                            .foregroundStyle(OmiColors.textPrimary)
-
-                                        VStack(spacing: 8) {
-                                            ForEach(session.attachments) { attachment in
-                                                artifactRow(
-                                                    icon: icon(for: attachment.kind),
-                                                    tint: tint(for: attachment.kind),
-                                                    title: attachment.title,
-                                                    subtitle: artifactSubtitle(for: attachment)
-                                                )
-                                            }
-                                        }
-                                    }
-
-                                    if !session.captureArtifacts.isEmpty {
-                                        Text("Captured context")
-                                            .scaledFont(size: 12, weight: .semibold)
-                                            .foregroundStyle(OmiColors.textPrimary)
-
-                                        VStack(spacing: 8) {
-                                            ForEach(session.captureArtifacts) { artifact in
-                                                artifactRow(
-                                                    icon: icon(for: artifact.kind),
-                                                    tint: tint(for: artifact.kind),
-                                                    title: artifact.title,
-                                                    subtitle: artifactSubtitle(for: artifact)
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .padding(24)
-                }
-            } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "sparkles.rectangle.stack")
-                        .scaledFont(size: 28)
-                        .foregroundStyle(OmiColors.textTertiary)
-
-                    Text("Choose a session")
-                        .scaledFont(size: 16, weight: .semibold)
-                        .foregroundStyle(OmiColors.textPrimary)
-
-                    Text("Transcript, recap, and artifact context appear here for the selected session.")
-                        .scaledFont(size: 12)
-                        .foregroundStyle(OmiColors.textSecondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(24)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .omiPanel(
-            fill: OmiColors.backgroundTertiary.opacity(0.4),
-            radius: 28,
-            stroke: OmiColors.border.opacity(0.26),
-            shadowOpacity: 0.12,
-            shadowRadius: 18,
-            shadowY: 10
-        )
-    }
-
-    private func detailBlock<Content: View>(
-        _ title: String,
-        subtitle: String? = nil,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .scaledFont(size: 14, weight: .semibold)
-                    .foregroundStyle(OmiColors.textPrimary)
-
-                if let subtitle {
-                    Text(subtitle)
-                        .scaledFont(size: 12)
-                        .foregroundStyle(OmiColors.textTertiary)
-                }
-            }
-
-            content()
-        }
-    }
-
-    private func infoPill(_ text: String) -> some View {
-        Text(text)
-            .scaledFont(size: 10, weight: .medium)
-            .foregroundStyle(OmiColors.textTertiary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(OmiColors.backgroundRaised.opacity(0.72))
-            .clipShape(Capsule())
-    }
-
-    private func recapOverviewCard(_ text: String) -> some View {
-        Text(text)
-            .scaledFont(size: 13)
-            .foregroundStyle(OmiColors.textSecondary)
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-            .background(
-                LinearGradient(
-                    colors: [OmiColors.backgroundSecondary.opacity(0.92), OmiColors.backgroundRaised.opacity(0.9)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
+              HStack(spacing: 8) {
+                infoPill(session.status.label)
+                infoPill(
+                  "\(session.segments.count) \(session.segments.count == 1 ? "segment" : "segments")"
                 )
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(OmiColors.border.opacity(0.18), lineWidth: 1)
-            )
-    }
+                infoPill("\(session.attachments.count + session.captureArtifacts.count) artifacts")
+                infoPill(session.transcriptText.isEmpty ? "Transcript pending" : "Transcript ready")
+              }
 
-    private func recapSectionCard(_ section: LocalSessionRecapSection) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Circle()
-                    .fill(recapTint(for: section.kind).opacity(0.9))
-                    .frame(width: 8, height: 8)
+              detailBlock(
+                "Transcript",
+                subtitle:
+                  "Read the captured transcript for this session."
+              ) {
+                LocalSessionTranscriptPlainPreview(session: session)
+              }
 
-                Text(section.title.isEmpty ? section.kind.displayTitle : section.title)
-                    .scaledFont(size: 13, weight: .semibold)
-                    .foregroundStyle(OmiColors.textPrimary)
-            }
-
-            if !section.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(section.summary)
-                    .scaledFont(size: 12)
-                    .foregroundStyle(OmiColors.textSecondary)
+              detailBlock(
+                "Transcript",
+                subtitle:
+                  "The transcript keeps the original flow of the session, including mixed Hebrew and English."
+              ) {
+                if session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                  Text("Transcript not available yet.")
+                    .scaledFont(size: 13)
+                    .foregroundStyle(CepessaColors.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }
+                    .padding(14)
+                    .background(CepessaColors.backgroundSecondary.opacity(0.82))
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                } else {
+                  LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(session.segments) { segment in
+                      VStack(alignment: .leading, spacing: 5) {
+                        Text(segment.timestamp.formatted(date: .omitted, time: .shortened))
+                          .scaledFont(size: 10.5, weight: .semibold)
+                          .foregroundStyle(CepessaColors.textTertiary)
 
-            if !section.bullets.isEmpty {
-                VStack(alignment: .leading, spacing: 7) {
-                    ForEach(section.bullets, id: \.self) { bullet in
-                        HStack(alignment: .top, spacing: 8) {
-                            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                                .fill(OmiColors.textTertiary.opacity(0.65))
-                                .frame(width: 5, height: 5)
-                                .padding(.top, 6)
-
-                            Text(bullet)
-                                .scaledFont(size: 12)
-                                .foregroundStyle(OmiColors.textSecondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
+                        Text(segment.text)
+                          .scaledFont(size: 13)
+                          .foregroundStyle(CepessaColors.textSecondary)
+                          .textSelection(.enabled)
+                          .frame(maxWidth: .infinity, alignment: .leading)
+                      }
+                      .padding(12)
+                      .frame(maxWidth: .infinity, alignment: .leading)
+                      .background(CepessaColors.backgroundSecondary.opacity(0.82))
+                      .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
+                  }
                 }
+              }
+
+              detailBlock(
+                "Context timeline",
+                subtitle:
+                  "Screenshots, documents, and captures stay pinned to the exact session moment."
+              ) {
+                if session.attachments.isEmpty && session.captureArtifacts.isEmpty {
+                  Text(
+                    "Screenshots, clips, and documents captured during the session will appear here with exact timestamps."
+                  )
+                  .scaledFont(size: 13)
+                  .foregroundStyle(CepessaColors.textSecondary)
+                  .frame(maxWidth: .infinity, alignment: .leading)
+                  .padding(14)
+                  .background(CepessaColors.backgroundSecondary.opacity(0.82))
+                  .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                } else {
+                  VStack(alignment: .leading, spacing: 10) {
+                    if !session.attachments.isEmpty {
+                      Text("Attachments")
+                        .scaledFont(size: 12, weight: .semibold)
+                        .foregroundStyle(CepessaColors.textPrimary)
+
+                      VStack(spacing: 8) {
+                        ForEach(session.attachments) { attachment in
+                          artifactRow(
+                            icon: icon(for: attachment.kind),
+                            tint: tint(for: attachment.kind),
+                            title: attachment.title,
+                            subtitle: artifactSubtitle(for: attachment)
+                          )
+                        }
+                      }
+                    }
+
+                    if !session.captureArtifacts.isEmpty {
+                      Text("Captured context")
+                        .scaledFont(size: 12, weight: .semibold)
+                        .foregroundStyle(CepessaColors.textPrimary)
+
+                      VStack(spacing: 8) {
+                        ForEach(session.captureArtifacts) { artifact in
+                          artifactRow(
+                            icon: icon(for: artifact.kind),
+                            tint: tint(for: artifact.kind),
+                            title: artifact.title,
+                            subtitle: artifactSubtitle(for: artifact)
+                          )
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             }
+            .padding(24)
+            .padding(.bottom, 76)
+          }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(OmiColors.backgroundSecondary.opacity(0.82))
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(OmiColors.border.opacity(0.18), lineWidth: 1)
-        )
+      } else {
+        VStack(spacing: 12) {
+          Image(systemName: "sparkles.rectangle.stack")
+            .scaledFont(size: 28)
+            .foregroundStyle(CepessaColors.textTertiary)
+
+          Text("Choose a session")
+            .scaledFont(size: 16, weight: .semibold)
+            .foregroundStyle(CepessaColors.textPrimary)
+
+          Text("Transcript, recap, and artifact context appear here for the selected session.")
+            .scaledFont(size: 12)
+            .foregroundStyle(CepessaColors.textSecondary)
+            .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(24)
+      }
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .cepessaCanvas(radius: 24)
+    .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: session?.id)
+  }
 
-    private func artifactRow(icon: String, tint: Color, title: String, subtitle: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 24, height: 24)
-                .background(tint.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+  private func detailBlock<Content: View>(
+    _ title: String,
+    subtitle: String? = nil,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 10) {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(title)
+          .scaledFont(size: 14, weight: .semibold)
+          .foregroundStyle(CepessaColors.textPrimary)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .scaledFont(size: 12.5, weight: .semibold)
-                    .foregroundStyle(OmiColors.textPrimary)
+        if let subtitle {
+          Text(subtitle)
+            .scaledFont(size: 12)
+            .foregroundStyle(CepessaColors.textSecondary)
+        }
+      }
 
-                Text(subtitle)
-                    .scaledFont(size: 11)
-                    .foregroundStyle(OmiColors.textTertiary)
+      content()
+    }
+  }
+
+  private func infoPill(_ text: String) -> some View {
+    Text(text)
+      .scaledFont(size: 10, weight: .medium)
+      .foregroundStyle(CepessaColors.textSecondary)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 6)
+      .background(CepessaColors.backgroundRaised.opacity(0.72))
+      .clipShape(Capsule())
+  }
+
+  private func recapOverviewCard(_ text: String) -> some View {
+    Text(text)
+      .scaledFont(size: 13)
+      .foregroundStyle(CepessaColors.textSecondary)
+      .textSelection(.enabled)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(14)
+      .background(
+        LinearGradient(
+          colors: [
+            CepessaColors.backgroundSecondary.opacity(0.92),
+            CepessaColors.backgroundRaised.opacity(0.9),
+          ],
+          startPoint: .topLeading,
+          endPoint: .bottomTrailing
+        )
+      )
+      .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+      .overlay(
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+          .stroke(CepessaColors.border.opacity(0.18), lineWidth: 1)
+      )
+  }
+
+  private func recapSectionCard(_ section: LocalSessionRecapSection) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
+        Circle()
+          .fill(recapTint(for: section.kind).opacity(0.9))
+          .frame(width: 8, height: 8)
+
+        Text(section.title.isEmpty ? section.kind.displayTitle : section.title)
+          .scaledFont(size: 13, weight: .semibold)
+          .foregroundStyle(CepessaColors.textPrimary)
+      }
+
+      if !section.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        Text(section.summary)
+          .scaledFont(size: 12)
+          .foregroundStyle(CepessaColors.textSecondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+      }
+
+      if !section.bullets.isEmpty {
+        VStack(alignment: .leading, spacing: 7) {
+          ForEach(section.bullets, id: \.self) { bullet in
+            HStack(alignment: .top, spacing: 8) {
+              RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(CepessaColors.textTertiary.opacity(0.65))
+                .frame(width: 5, height: 5)
+                .padding(.top, 6)
+
+              Text(bullet)
+                .scaledFont(size: 12)
+                .foregroundStyle(CepessaColors.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+          }
+        }
+      }
+    }
+    .padding(14)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(CepessaColors.backgroundSecondary.opacity(0.82))
+    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    .overlay(
+      RoundedRectangle(cornerRadius: 18, style: .continuous)
+        .stroke(CepessaColors.border.opacity(0.18), lineWidth: 1)
+    )
+  }
+
+  private func artifactRow(icon: String, tint: Color, title: String, subtitle: String) -> some View
+  {
+    HStack(alignment: .top, spacing: 12) {
+      Image(systemName: icon)
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(tint)
+        .frame(width: 24, height: 24)
+        .background(tint.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+      VStack(alignment: .leading, spacing: 3) {
+        Text(title)
+          .scaledFont(size: 12.5, weight: .semibold)
+          .foregroundStyle(CepessaColors.textPrimary)
+
+        Text(subtitle)
+          .scaledFont(size: 11)
+          .foregroundStyle(CepessaColors.textSecondary)
+      }
+
+      Spacer(minLength: 0)
+    }
+    .padding(12)
+    .background(CepessaColors.backgroundSecondary.opacity(0.82))
+    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    .overlay(
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .stroke(CepessaColors.border.opacity(0.16), lineWidth: 1)
+    )
+  }
+
+  private func artifactSubtitle(for attachment: LocalSessionAttachment) -> String {
+    let stamp = attachment.sessionOffset.map { Self.timeString(for: $0) } ?? "00:00"
+    return "\(stamp) • \(attachment.source.displayName)"
+  }
+
+  private func artifactSubtitle(for artifact: LocalSessionCaptureArtifact) -> String {
+    let stamp = artifact.sessionOffset.map { Self.timeString(for: $0) } ?? "00:00"
+    let suffix = artifact.notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let suffix, !suffix.isEmpty else {
+      return "\(stamp) • Session capture"
+    }
+    return "\(stamp) • \(suffix)"
+  }
+
+  private func icon(for kind: LocalSessionAttachment.Kind) -> String {
+    switch kind {
+    case .file: return "doc.text"
+    case .image: return "photo"
+    case .audio: return "waveform"
+    case .link: return "link"
+    case .capture: return "rectangle.on.rectangle"
+    }
+  }
+
+  private func icon(for kind: LocalSessionCaptureArtifact.Kind) -> String {
+    switch kind {
+    case .floatingBarCapture: return "dock.rectangle"
+    case .screenCapture: return "display"
+    case .clipboardCapture: return "clipboard"
+    case .note: return "note.text"
+    }
+  }
+
+  private func tint(for kind: LocalSessionAttachment.Kind) -> Color {
+    switch kind {
+    case .file: return CepessaColors.purplePrimary
+    case .image: return CepessaColors.success
+    case .audio: return CepessaColors.warning
+    case .link: return CepessaColors.textPrimary
+    case .capture: return CepessaColors.purplePrimary
+    }
+  }
+
+  private func tint(for kind: LocalSessionCaptureArtifact.Kind) -> Color {
+    switch kind {
+    case .floatingBarCapture: return CepessaColors.purplePrimary
+    case .screenCapture: return CepessaColors.success
+    case .clipboardCapture: return CepessaColors.warning
+    case .note: return CepessaColors.textPrimary
+    }
+  }
+
+  private func recapTint(for kind: LocalSessionRecapSection.Kind) -> Color {
+    switch kind {
+    case .overview: return CepessaColors.purplePrimary
+    case .keyPoints: return CepessaColors.success
+    case .decisions: return CepessaColors.warning
+    case .actionItem: return CepessaColors.error
+    case .openQuestions: return CepessaColors.textTertiary
+    case .nextSteps: return CepessaColors.success
+    case .notes: return CepessaColors.textPrimary
+    }
+  }
+
+  private static func timeString(for interval: TimeInterval) -> String {
+    let totalSeconds = max(0, Int(interval.rounded()))
+    return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
+  }
+
+  private var selectedDocumentLanguage: LocalSessionDocumentLanguage {
+    LocalSessionDocumentLanguage(rawValue: documentLanguage)
+      ?? session.map(LocalSessionRecapMarkdownDocument.preferredLanguage(for:))
+      ?? .hebrew
+  }
+
+}
+
+private struct LocalSessionTranscriptPlainPreview: View {
+  let session: LocalMeetingSession
+
+  var body: some View {
+    let transcript = session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+    Group {
+      if transcript.isEmpty {
+        Text("Transcript not available yet.")
+          .scaledFont(size: 13)
+          .foregroundStyle(CepessaColors.textSecondary)
+      } else {
+        Text(transcript)
+          .scaledFont(size: 13)
+          .foregroundStyle(CepessaColors.textPrimary)
+          .textSelection(.enabled)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(18)
+    .background(CepessaColors.backgroundSecondary.opacity(0.82))
+    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+  }
+}
+
+private struct LocalSessionRecapWorkspace: View {
+  let session: LocalMeetingSession
+  let language: LocalSessionDocumentLanguage
+  @Binding var languageSelection: String
+  let isRegenerating: Bool
+  let onRegenerate: () -> Void
+
+  private var hasRecap: Bool {
+    !session.recap.overview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      || !session.recap.sections.isEmpty
+  }
+
+  var body: some View {
+    recapSurface
+      .frame(maxWidth: .infinity, alignment: .topLeading)
+  }
+
+  @ViewBuilder
+  private var recapSurface: some View {
+    if hasRecap {
+      VStack(alignment: .trailing, spacing: 12) {
+        HStack(spacing: 10) {
+          regenerateRecapButton
+          LocalSessionDocumentLanguageToggle(selection: $languageSelection)
+        }
+
+        if isRegenerating {
+          HStack(spacing: 8) {
+            ProgressView()
+              .controlSize(.small)
+              .scaleEffect(0.72)
+
+            Text(
+              "Rewriting the brief from the session material. If the model is slow, a local fallback will finish it."
+            )
+            .scaledFont(size: 12)
+            .foregroundStyle(CepessaColors.textSecondary)
 
             Spacer(minLength: 0)
+          }
+          .padding(.horizontal, 12)
+          .padding(.vertical, 10)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .background(CepessaColors.capture.opacity(0.08))
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+          .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+              .stroke(CepessaColors.capture.opacity(0.18), lineWidth: 1)
+          )
         }
-        .padding(12)
-        .background(OmiColors.backgroundSecondary.opacity(0.82))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+        LocalSessionMarkdownDocumentPreview(
+          markdown: LocalSessionRecapMarkdownDocument.markdown(
+            for: session,
+            language: language,
+            includeTranscript: false
+          ),
+          language: language
+        )
+      }
+    } else {
+      Text("Recap is still being prepared.")
+        .scaledFont(size: 13)
+        .foregroundStyle(CepessaColors.textSecondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(CepessaColors.backgroundSecondary.opacity(0.82))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+  }
+
+  private var regenerateRecapButton: some View {
+    Button(action: onRegenerate) {
+      Label(isRegenerating ? "Refreshing" : "Rewrite brief", systemImage: "arrow.clockwise")
+        .scaledFont(size: 12, weight: .semibold)
+    }
+    .buttonStyle(.bordered)
+    .controlSize(.small)
+    .disabled(
+      isRegenerating
+        || session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    )
+    .help("Read the transcript again and create a new recap.")
+  }
+}
+
+struct LocalSessionMarkdownDocumentPreview: View, Equatable {
+  let markdown: String
+  let language: LocalSessionDocumentLanguage
+  private let markdownBlocks: [LocalSessionMarkdownBlock]
+
+  init(markdown: String, language: LocalSessionDocumentLanguage = .english) {
+    self.markdown = markdown
+    self.language = language
+    self.markdownBlocks = Self.blocks(from: markdown)
+  }
+
+  static func == (
+    lhs: LocalSessionMarkdownDocumentPreview, rhs: LocalSessionMarkdownDocumentPreview
+  )
+    -> Bool
+  {
+    lhs.markdown == rhs.markdown && lhs.language == rhs.language
+  }
+
+  var body: some View {
+    VStack(alignment: stackAlignment, spacing: 0) {
+      if markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        VStack(spacing: 10) {
+          Image(systemName: "doc")
+            .font(.system(size: 25, weight: .light))
+            .foregroundStyle(CepessaColors.textTertiary)
+          Text("Document is empty.")
+            .scaledFont(size: 14, weight: .medium)
+            .foregroundStyle(CepessaColors.textSecondary)
+        }
+        .padding(.top, 96)
+        .padding(.bottom, 120)
+        .frame(maxWidth: 780, minHeight: 320, alignment: .center)
+      } else {
+        VStack(alignment: stackAlignment, spacing: 20) {
+          ForEach(Array(markdownBlocks.enumerated()), id: \.offset) { _, block in
+            renderedBlock(block)
+          }
+        }
+        .padding(.horizontal, 56)
+        .padding(.top, 40)
+        .padding(.bottom, 70)
+        .frame(maxWidth: 780, alignment: frameAlignment)
+        .frame(maxWidth: .infinity, alignment: textFrameAlignment)
+      }
+    }
+    .environment(\.layoutDirection, language == .hebrew ? .rightToLeft : .leftToRight)
+    .frame(maxWidth: .infinity, alignment: textFrameAlignment)
+  }
+
+  @ViewBuilder
+  private func renderedBlock(_ block: LocalSessionMarkdownBlock) -> some View {
+    switch block {
+    case .heading(let level, let text):
+      Text(inlineMarkdown(text))
+        .scaledFont(size: headingSize(for: level), weight: .semibold)
+        .tracking(0)
+        .foregroundStyle(CepessaColors.textPrimary.opacity(level == 1 ? 0.98 : 0.92))
+        .multilineTextAlignment(textAlignment)
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: textFrameAlignment)
+        .padding(.top, level == 1 ? 0 : 10)
+
+    case .paragraph(let text):
+      Text(inlineMarkdown(text))
+        .scaledFont(size: 15)
+        .lineSpacing(5)
+        .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
+        .multilineTextAlignment(textAlignment)
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: textFrameAlignment)
+
+    case .unorderedList(let items):
+      VStack(alignment: stackAlignment, spacing: 9) {
+        ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+          unorderedListRow(item)
+        }
+      }
+
+    case .orderedList(let items):
+      VStack(alignment: stackAlignment, spacing: 9) {
+        ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+          orderedListRow(index: index, item: item)
+        }
+      }
+
+    case .quote(let text):
+      Text(inlineMarkdown(text))
+        .scaledFont(size: 14.5)
+        .lineSpacing(4)
+        .foregroundStyle(CepessaColors.textSecondary)
+        .multilineTextAlignment(textAlignment)
+        .textSelection(.enabled)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: textFrameAlignment)
+        .background(
+          CepessaColors.purplePrimary.opacity(0.07),
+          in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .overlay(alignment: language == .hebrew ? .trailing : .leading) {
+          Capsule()
+            .fill(CepessaColors.purplePrimary.opacity(0.65))
+            .frame(width: 3)
+            .padding(.vertical, 10)
+        }
+
+    case .code(let text):
+      Text(text)
+        .scaledFont(size: 12.5, design: .monospaced)
+        .foregroundStyle(CepessaColors.textPrimary.opacity(0.86))
+        .textSelection(.enabled)
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: textFrameAlignment)
+        .background(
+          Color.black.opacity(0.045), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+
+    case .rule:
+      Rectangle()
+        .fill(CepessaColors.border.opacity(0.5))
+        .frame(height: 1)
+        .padding(.vertical, 4)
+    }
+  }
+
+  private var stackAlignment: HorizontalAlignment {
+    language == .hebrew ? .trailing : .leading
+  }
+
+  private var frameAlignment: Alignment {
+    language == .hebrew ? .topTrailing : .topLeading
+  }
+
+  private var textFrameAlignment: Alignment {
+    language == .hebrew ? .trailing : .leading
+  }
+
+  private var textAlignment: TextAlignment {
+    language == .hebrew ? .trailing : .leading
+  }
+
+  @ViewBuilder
+  private func unorderedListRow(_ item: String) -> some View {
+    if language == .hebrew {
+      HStack(alignment: .firstTextBaseline, spacing: 11) {
+        listItemText(item)
+        listBullet
+      }
+    } else {
+      HStack(alignment: .firstTextBaseline, spacing: 11) {
+        listBullet
+        listItemText(item)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func orderedListRow(index: Int, item: String) -> some View {
+    if language == .hebrew {
+      HStack(alignment: .firstTextBaseline, spacing: 11) {
+        listItemText(item)
+        orderedListMarker(index: index)
+      }
+    } else {
+      HStack(alignment: .firstTextBaseline, spacing: 11) {
+        orderedListMarker(index: index)
+        listItemText(item)
+      }
+    }
+  }
+
+  private var listBullet: some View {
+    Circle()
+      .fill(CepessaColors.purplePrimary.opacity(0.72))
+      .frame(width: 5, height: 5)
+  }
+
+  private func orderedListMarker(index: Int) -> some View {
+    Text("\(index + 1).")
+      .scaledFont(size: 12.5, weight: .semibold, design: .rounded)
+      .foregroundStyle(CepessaColors.purplePrimary)
+      .frame(width: 26, alignment: language == .hebrew ? .leading : .trailing)
+  }
+
+  private func listItemText(_ item: String) -> some View {
+    Text(inlineMarkdown(item))
+      .scaledFont(size: 14.5)
+      .lineSpacing(4)
+      .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
+      .multilineTextAlignment(textAlignment)
+      .textSelection(.enabled)
+      .frame(maxWidth: .infinity, alignment: textFrameAlignment)
+  }
+
+  private func inlineMarkdown(_ text: String) -> AttributedString {
+    (try? AttributedString(markdown: text)) ?? AttributedString(text)
+  }
+
+  private func headingSize(for level: Int) -> CGFloat {
+    switch level {
+    case 1: return 31
+    case 2: return 22
+    case 3: return 17
+    default: return 15.5
+    }
+  }
+
+  static func blocks(from markdown: String) -> [LocalSessionMarkdownBlock] {
+    var blocks: [LocalSessionMarkdownBlock] = []
+    var paragraph: [String] = []
+    var unordered: [String] = []
+    var ordered: [String] = []
+    var quote: [String] = []
+    var code: [String] = []
+    var isInCode = false
+
+    func flushParagraph() {
+      guard !paragraph.isEmpty else { return }
+      blocks.append(.paragraph(paragraph.joined(separator: " ")))
+      paragraph.removeAll()
+    }
+
+    func flushUnordered() {
+      guard !unordered.isEmpty else { return }
+      blocks.append(.unorderedList(unordered))
+      unordered.removeAll()
+    }
+
+    func flushOrdered() {
+      guard !ordered.isEmpty else { return }
+      blocks.append(.orderedList(ordered))
+      ordered.removeAll()
+    }
+
+    func flushQuote() {
+      guard !quote.isEmpty else { return }
+      blocks.append(.quote(quote.joined(separator: "\n")))
+      quote.removeAll()
+    }
+
+    func flushCode() {
+      guard !code.isEmpty else { return }
+      blocks.append(.code(code.joined(separator: "\n")))
+      code.removeAll()
+    }
+
+    func flushAll() {
+      flushParagraph()
+      flushUnordered()
+      flushOrdered()
+      flushQuote()
+    }
+
+    for rawLine in markdown.replacingOccurrences(of: "\r\n", with: "\n").components(
+      separatedBy: "\n")
+    {
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+
+      if isInCode {
+        if line.hasPrefix("```") {
+          flushCode()
+          isInCode = false
+        } else {
+          code.append(rawLine)
+        }
+        continue
+      }
+
+      if line.hasPrefix("```") {
+        flushAll()
+        isInCode = true
+        continue
+      }
+
+      if line.isEmpty {
+        flushAll()
+        continue
+      }
+
+      if let heading = parseHeading(line) {
+        flushAll()
+        blocks.append(.heading(level: heading.level, text: heading.text))
+        continue
+      }
+
+      if isHorizontalRule(line) {
+        flushAll()
+        blocks.append(.rule)
+        continue
+      }
+
+      if let item = parseUnorderedItem(line) {
+        flushParagraph()
+        flushOrdered()
+        flushQuote()
+        unordered.append(item)
+        continue
+      } else {
+        flushUnordered()
+      }
+
+      if let item = parseOrderedItem(line) {
+        flushParagraph()
+        flushUnordered()
+        flushQuote()
+        ordered.append(item)
+        continue
+      } else {
+        flushOrdered()
+      }
+
+      if line.hasPrefix(">") {
+        flushParagraph()
+        flushUnordered()
+        flushOrdered()
+        quote.append(String(line.dropFirst()).trimmingCharacters(in: .whitespaces))
+        continue
+      } else {
+        flushQuote()
+      }
+
+      paragraph.append(line)
+    }
+
+    if isInCode {
+      flushCode()
+    }
+    flushAll()
+    return blocks.isEmpty ? [.paragraph(markdown)] : blocks
+  }
+
+  private static func parseHeading(_ line: String) -> (level: Int, text: String)? {
+    let prefix = line.prefix { $0 == "#" }
+    guard !prefix.isEmpty, prefix.count <= 6 else { return nil }
+    let remainder = line.dropFirst(prefix.count)
+    guard remainder.first == " " else { return nil }
+    return (prefix.count, String(remainder).trimmingCharacters(in: .whitespaces))
+  }
+
+  private static func parseUnorderedItem(_ line: String) -> String? {
+    guard line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") else { return nil }
+    return String(line.dropFirst(2))
+  }
+
+  private static func parseOrderedItem(_ line: String) -> String? {
+    let digits = line.prefix { $0.isNumber }
+    guard !digits.isEmpty else { return nil }
+    let suffix = line.dropFirst(digits.count)
+    guard suffix.hasPrefix(". ") else { return nil }
+    return String(suffix.dropFirst(2))
+  }
+
+  private static func isHorizontalRule(_ line: String) -> Bool {
+    let stripped = line.replacingOccurrences(of: " ", with: "")
+    return stripped == "---" || stripped == "***" || stripped == "___"
+  }
+}
+
+struct LocalSessionDocumentLanguageToggle: View {
+  @Binding var selection: String
+
+  private var selectedLanguage: LocalSessionDocumentLanguage {
+    LocalSessionDocumentLanguage(rawValue: selection) ?? .english
+  }
+
+  var body: some View {
+    HStack(spacing: 4) {
+      ForEach(LocalSessionDocumentLanguage.allCases) { language in
+        Button {
+          selection = language.rawValue
+        } label: {
+          Text(language.displayTitle)
+            .scaledFont(size: 12, weight: .semibold)
+            .foregroundStyle(
+              selectedLanguage == language ? CepessaColors.textPrimary : CepessaColors.textSecondary
+            )
+            .frame(minWidth: 74)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background {
+              if selectedLanguage == language {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                  .fill(Color.white.opacity(0.84))
+                  .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                      .stroke(CepessaColors.capture.opacity(0.22), lineWidth: 1)
+                  )
+              }
+            }
+        }
+        .buttonStyle(CepessaPressStyle(scale: 0.97, pressedBrightness: -0.02))
+        .accessibilityLabel("Show document in \(language.displayTitle)")
+        .accessibilityAddTraits(selectedLanguage == language ? [.isSelected] : [])
+      }
+    }
+    .padding(4)
+    .background(CepessaColors.paperRaised.opacity(0.72))
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .overlay(
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .stroke(CepessaColors.border.opacity(0.16), lineWidth: 1)
+    )
+  }
+}
+
+private struct LocalSessionDocumentChatRail: View {
+  @ObservedObject var model: LocalMeetingAppModel
+  let session: LocalMeetingSession
+  @State private var draft = ""
+  @State private var showsProposalPreview = false
+
+  private var chat: LocalSessionDocumentChat {
+    model.sessions.first(where: { $0.id == session.id })?.documentChat ?? session.documentChat
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      headerView
+
+      if let error = chat.errorMessage, chat.status == .failed {
+        offlineState(error)
+      }
+
+      chatHistory
+
+      if let proposal = chat.pendingProposal {
+        pendingProposalCard(proposal)
+      }
+
+      composer
+    }
+    .padding(.horizontal, 18)
+    .padding(.vertical, 14)
+    .background {
+      RoundedRectangle(cornerRadius: 28, style: .continuous)
+        .fill(.ultraThinMaterial)
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(OmiColors.border.opacity(0.16), lineWidth: 1)
+          LinearGradient(
+            colors: [
+              Color.white.opacity(0.54),
+              CepessaColors.backgroundSecondary.opacity(0.18),
+              Color.white.opacity(0.22),
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+          )
+        )
+        .overlay(
+          RoundedRectangle(cornerRadius: 28, style: .continuous)
+            .stroke(Color.white.opacity(0.64), lineWidth: 0.8)
+            .blur(radius: 0.2)
+            .padding(0.5)
+        )
+        .overlay(
+          RoundedRectangle(cornerRadius: 28, style: .continuous)
+            .stroke(CepessaColors.border.opacity(0.18), lineWidth: 1)
         )
     }
-
-    private func artifactSubtitle(for attachment: LocalSessionAttachment) -> String {
-        let stamp = attachment.sessionOffset.map { Self.timeString(for: $0) } ?? "00:00"
-        return "\(stamp) • \(attachment.source.displayName)"
+    .overlay(alignment: .topLeading) {
+      Capsule()
+        .fill(Color.white.opacity(0.42))
+        .frame(width: 190, height: 1)
+        .padding(.leading, 36)
+        .padding(.top, 1)
     }
+    .shadow(color: .white.opacity(0.55), radius: 1, x: 0, y: -1)
+    .shadow(color: .black.opacity(0.075), radius: 28, x: 0, y: 14)
+    .shadow(color: .black.opacity(0.035), radius: 8, x: 0, y: 2)
+  }
 
-    private func artifactSubtitle(for artifact: LocalSessionCaptureArtifact) -> String {
-        let stamp = artifact.sessionOffset.map { Self.timeString(for: $0) } ?? "00:00"
-        let suffix = artifact.notes?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let suffix, !suffix.isEmpty else {
-            return "\(stamp) • Session capture"
+  private var headerView: some View {
+    HStack(alignment: .top, spacing: 10) {
+      Image(systemName: "sparkle.magnifyingglass")
+        .scaledFont(size: 13, weight: .semibold)
+        .foregroundStyle(CepessaColors.purplePrimary)
+        .frame(width: 30, height: 30)
+        .background(
+          .thinMaterial,
+          in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+        .overlay(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(Color.white.opacity(0.48), lineWidth: 0.8)
+        )
+
+      VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 8) {
+          Text("Document chat")
+            .scaledFont(size: 13, weight: .semibold)
+            .foregroundStyle(CepessaColors.textPrimary)
+
+          Text("Local model")
+            .scaledFont(size: 9.5, weight: .semibold)
+            .foregroundStyle(CepessaColors.purplePrimary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(
+              .thinMaterial,
+              in: Capsule()
+            )
+            .overlay(
+              Capsule()
+                .stroke(CepessaColors.purplePrimary.opacity(0.14), lineWidth: 0.8)
+            )
         }
-        return "\(stamp) • \(suffix)"
-    }
 
-    private func icon(for kind: LocalSessionAttachment.Kind) -> String {
-        switch kind {
-        case .file: return "doc.text"
-        case .image: return "photo"
-        case .audio: return "waveform"
-        case .link: return "link"
-        case .capture: return "rectangle.on.rectangle"
+        Text("Suggest edits, review the diff, then apply explicitly.")
+          .scaledFont(size: 11)
+          .foregroundStyle(CepessaColors.textSecondary)
+      }
+
+      Spacer(minLength: 0)
+
+      if chat.undoSnapshot != nil {
+        Button {
+          model.undoLastDocumentChatEdit(for: session.id)
+        } label: {
+          Image(systemName: "arrow.uturn.backward")
+            .scaledFont(size: 12, weight: .semibold)
+            .frame(width: 30, height: 30)
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Undo last document edit")
+        .help("Undo last document edit")
+      }
     }
+  }
 
-    private func icon(for kind: LocalSessionCaptureArtifact.Kind) -> String {
-        switch kind {
-        case .floatingBarCapture: return "dock.rectangle"
-        case .screenCapture: return "display"
-        case .clipboardCapture: return "clipboard"
-        case .note: return "note.text"
+  @ViewBuilder
+  private var chatHistory: some View {
+    if chat.messages.isEmpty {
+      emptyChatState
+    } else {
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 10) {
+          ForEach(chat.messages) { message in
+            messageBubble(message)
+          }
         }
+        .padding(.vertical, 2)
+      }
+      .frame(minHeight: 72, maxHeight: 150)
+      .scrollIndicators(.hidden)
     }
+  }
 
-    private func tint(for kind: LocalSessionAttachment.Kind) -> Color {
-        switch kind {
-        case .file: return OmiColors.purplePrimary
-        case .image: return OmiColors.success
-        case .audio: return OmiColors.warning
-        case .link: return OmiColors.textPrimary
-        case .capture: return OmiColors.purplePrimary
+  private var composer: some View {
+    VStack(spacing: 10) {
+      TextField(
+        "Ask the local model to tighten the recap, rename speakers, or fix a line",
+        text: $draft,
+        axis: .vertical
+      )
+      .lineLimit(2...4)
+      .textFieldStyle(.plain)
+      .padding(12)
+      .background(
+        .thinMaterial,
+        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+          .stroke(Color.white.opacity(0.42), lineWidth: 0.8)
+      )
+      .disabled(chat.status == .sending)
+
+      HStack(alignment: .center, spacing: 10) {
+        Text(chat.status == .sending ? "Local model is reading the document..." : "Local model")
+          .scaledFont(size: 10)
+          .foregroundStyle(CepessaColors.textTertiary)
+
+        Spacer(minLength: 0)
+
+        Button {
+          model.sendDocumentChatMessage(draft, for: session.id)
+          draft = ""
+        } label: {
+          if chat.status == .sending {
+            HStack(spacing: 6) {
+              ProgressView()
+                .controlSize(.small)
+              Text("Sending")
+            }
+          } else {
+            Label("Send", systemImage: "arrow.up.circle.fill")
+          }
         }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.regular)
+        .frame(minHeight: 40)
+        .disabled(
+          draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || chat.status == .sending
+        )
+      }
     }
+  }
 
-    private func tint(for kind: LocalSessionCaptureArtifact.Kind) -> Color {
-        switch kind {
-        case .floatingBarCapture: return OmiColors.purplePrimary
-        case .screenCapture: return OmiColors.success
-        case .clipboardCapture: return OmiColors.warning
-        case .note: return OmiColors.textPrimary
+  private var emptyChatState: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Text("Start with a precise edit")
+        .scaledFont(size: 11, weight: .semibold)
+        .foregroundStyle(CepessaColors.textPrimary)
+
+      HStack(spacing: 8) {
+        suggestionButton("Make the overview sharper.")
+        suggestionButton("Rename Speaker 1 to the client name.")
+        suggestionButton("Fix the segment where I said launch gate, not lunch gate.")
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(12)
+    .background(
+      .thinMaterial,
+      in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .stroke(Color.white.opacity(0.36), lineWidth: 0.8)
+    )
+    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+  }
+
+  private func suggestionButton(_ prompt: String) -> some View {
+    Button {
+      draft = prompt
+    } label: {
+      HStack(alignment: .center, spacing: 8) {
+        Image(systemName: "arrow.turn.down.right")
+          .scaledFont(size: 10, weight: .semibold)
+          .foregroundStyle(CepessaColors.purplePrimary.opacity(0.82))
+        Text("\"\(prompt)\"")
+          .scaledFont(size: 11)
+          .foregroundStyle(CepessaColors.textSecondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 9)
+      .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+      .background(
+        Color.white.opacity(0.22),
+        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .stroke(Color.white.opacity(0.32), lineWidth: 0.7)
+      )
+      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+    .buttonStyle(CepessaPressStyle(scale: 0.985))
+    .disabled(chat.status == .sending)
+  }
+
+  private func offlineState(_ error: String) -> some View {
+    HStack(alignment: .center, spacing: 8) {
+      Label("Local model offline", systemImage: "wifi.slash")
+        .scaledFont(size: 11, weight: .semibold)
+        .foregroundStyle(CepessaColors.error)
+
+      Text("Install the app model, then retry.")
+        .scaledFont(size: 10.5)
+        .foregroundStyle(CepessaColors.textSecondary)
+        .lineLimit(1)
+    }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 7)
+    .background(CepessaColors.error.opacity(0.055))
+    .clipShape(Capsule())
+    .help(error)
+  }
+
+  private func messageBubble(_ message: LocalSessionDocumentChatMessage) -> some View {
+    let isUser = message.role == .user
+    return HStack {
+      if isUser {
+        Spacer(minLength: 36)
+      }
+
+      VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
+        Text(message.text)
+          .scaledFont(size: 11.5)
+          .foregroundStyle(isUser ? Color.white : CepessaColors.textPrimary)
+          .textSelection(.enabled)
+          .padding(.horizontal, 11)
+          .padding(.vertical, 9)
+          .background(
+            isUser
+              ? CepessaColors.purplePrimary.opacity(0.9)
+              : CepessaColors.backgroundRaised.opacity(0.82),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+          )
+
+        if !isUser, !message.sourceCitations.isEmpty {
+          citationStrip(message.sourceCitations, limit: 2)
         }
-    }
+      }
+      .frame(maxWidth: 280, alignment: isUser ? .trailing : .leading)
 
-    private func recapTint(for kind: LocalSessionRecapSection.Kind) -> Color {
-        switch kind {
-        case .overview: return OmiColors.purplePrimary
-        case .keyPoints: return OmiColors.success
-        case .decisions: return OmiColors.warning
-        case .actionItem: return OmiColors.error
-        case .openQuestions: return OmiColors.textTertiary
-        case .nextSteps: return OmiColors.success
-        case .notes: return OmiColors.textPrimary
+      if !isUser {
+        Spacer(minLength: 36)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+  }
+
+  private func pendingProposalCard(_ proposal: LocalSessionDocumentEditProposal) -> some View {
+    VStack(alignment: .leading, spacing: 9) {
+      Label("Pending proposal", systemImage: "doc.badge.gearshape")
+        .scaledFont(size: 11, weight: .semibold)
+        .foregroundStyle(CepessaColors.textPrimary)
+
+      VStack(alignment: .leading, spacing: 5) {
+        if proposal.recapPatch != nil {
+          proposalLine("Recap edits ready")
         }
+        if proposal.sessionTitle != nil {
+          proposalLine("Title update ready")
+        }
+        if proposal.documentMarkdown != nil {
+          proposalLine("Markdown document replacement ready")
+        }
+        if !proposal.transcriptPatches.isEmpty {
+          proposalLine("\(proposal.transcriptPatches.count) targeted transcript correction(s)")
+        }
+        if !proposal.speakerRenames.isEmpty {
+          proposalLine("\(proposal.speakerRenames.count) speaker rename(s)")
+        }
+        ForEach(proposal.warnings, id: \.self) { warning in
+          proposalLine("Warning: \(warning)")
+        }
+      }
+
+      if showsProposalPreview {
+        proposalPreview(proposal)
+      }
+
+      if !proposal.sourceCitations.isEmpty {
+        citationStrip(proposal.sourceCitations, limit: 3)
+      }
+
+      HStack(spacing: 8) {
+        Button(showsProposalPreview ? "Hide preview" : "Preview changes") {
+          showsProposalPreview.toggle()
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .frame(minHeight: 40)
+
+        Button("Discard") {
+          model.discardPendingDocumentChatProposal(for: session.id)
+          showsProposalPreview = false
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .frame(minHeight: 40)
+
+        Button("Apply") {
+          model.applyPendingDocumentChatProposal(for: session.id)
+          showsProposalPreview = false
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.regular)
+        .frame(minHeight: 40)
+      }
+    }
+    .padding(11)
+    .background(CepessaColors.purplePrimary.opacity(0.08))
+    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    .overlay(
+      RoundedRectangle(cornerRadius: 14, style: .continuous)
+        .stroke(CepessaColors.purplePrimary.opacity(0.18), lineWidth: 1)
+    )
+  }
+
+  private func proposalLine(_ text: String) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 7) {
+      Circle()
+        .fill(CepessaColors.purplePrimary.opacity(0.7))
+        .frame(width: 4, height: 4)
+      Text(text)
+        .scaledFont(size: 10.5)
+        .foregroundStyle(CepessaColors.textSecondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+  }
+
+  private func proposalPreview(_ proposal: LocalSessionDocumentEditProposal) -> some View {
+    VStack(alignment: .leading, spacing: 7) {
+      if let overview = proposal.recapPatch?.overview,
+        !overview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      {
+        previewSection("Overview", overview)
+      }
+
+      if let documentMarkdown = proposal.documentMarkdown {
+        let preview = documentMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        previewSection(
+          "Markdown document",
+          preview.isEmpty ? "The document will be blank." : preview
+        )
+      }
+
+      ForEach(Array((proposal.recapPatch?.sections ?? []).enumerated()), id: \.offset) {
+        _, section in
+        previewSection(
+          section.title.isEmpty ? section.kind.displayTitle : section.title, section.summary)
+      }
+
+      ForEach(proposal.transcriptPatches, id: \.segmentID) { patch in
+        previewSection("Transcript \(patch.segmentID.uuidString.prefix(8))", patch.text)
+      }
+
+      ForEach(proposal.speakerRenames, id: \.oldName) { rename in
+        previewSection("Speaker rename", "\(rename.oldName) -> \(rename.newName)")
+      }
+    }
+    .padding(10)
+    .background(CepessaColors.backgroundRaised.opacity(0.72))
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+  }
+
+  private func previewSection(_ title: String, _ body: String) -> some View {
+    VStack(alignment: .leading, spacing: 3) {
+      Text(title)
+        .scaledFont(size: 10.5, weight: .semibold)
+        .foregroundStyle(CepessaColors.textPrimary)
+      Text(body.isEmpty ? "Replace section with empty body." : body)
+        .scaledFont(size: 10.5)
+        .foregroundStyle(CepessaColors.textSecondary)
+        .lineLimit(4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+  }
+
+  private func citationStrip(
+    _ citations: [LocalSessionDocumentSourceCitation],
+    limit: Int
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 5) {
+      ForEach(citations.prefix(limit)) { citation in
+        HStack(alignment: .top, spacing: 6) {
+          Image(systemName: "quote.opening")
+            .scaledFont(size: 8.5, weight: .semibold)
+            .foregroundStyle(CepessaColors.purplePrimary.opacity(0.8))
+            .frame(width: 12, height: 12)
+
+          VStack(alignment: .leading, spacing: 2) {
+            Text(citation.title)
+              .scaledFont(size: 9.5, weight: .semibold)
+              .foregroundStyle(CepessaColors.textPrimary)
+              .lineLimit(1)
+            Text(citation.excerpt)
+              .scaledFont(size: 9.5)
+              .foregroundStyle(CepessaColors.textTertiary)
+              .lineLimit(2)
+          }
+        }
+      }
+    }
+    .padding(.horizontal, 9)
+    .padding(.vertical, 7)
+    .background(CepessaColors.backgroundRaised.opacity(0.58))
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+  }
+}
+
+enum LocalSessionMarkdownBlock: Equatable {
+  case heading(level: Int, text: String)
+  case paragraph(String)
+  case unorderedList([String])
+  case orderedList([String])
+  case quote(String)
+  case code(String)
+  case rule
+}
+
+@MainActor
+final class CepessaStorageSettingsModel: ObservableObject {
+  @Published private(set) var sessionsBytes: Int64 = 0
+  @Published private(set) var clipsBytes: Int64 = 0
+  @Published private(set) var cleanupMessage: String?
+
+  private let fileManager: FileManager
+  let sessionsRoot: URL
+  let clipsRoot: URL
+
+  init(fileManager: FileManager = .default) {
+    self.fileManager = fileManager
+    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("Cepessa", isDirectory: true)
+    self.sessionsRoot = appSupport.appendingPathComponent("Sessions", isDirectory: true)
+    self.clipsRoot = appSupport.appendingPathComponent("Clips", isDirectory: true)
+    refresh()
+  }
+
+  var sessionsSizeText: String { Self.byteCountFormatter.string(fromByteCount: sessionsBytes) }
+  var clipsSizeText: String { Self.byteCountFormatter.string(fromByteCount: clipsBytes) }
+  var totalSizeText: String { Self.byteCountFormatter.string(fromByteCount: sessionsBytes + clipsBytes) }
+
+  func refresh() {
+    sessionsBytes = directorySize(at: sessionsRoot)
+    clipsBytes = directorySize(at: clipsRoot)
+  }
+
+  func clearSessions() {
+    clearContents(of: sessionsRoot, label: "sessions")
+  }
+
+  func clearClips() {
+    clearContents(of: clipsRoot, label: "CLIPS")
+  }
+
+  private func clearContents(of directory: URL, label: String) {
+    do {
+      guard fileManager.fileExists(atPath: directory.path) else {
+        cleanupMessage = "No \(label) storage to clear."
+        refresh()
+        return
+      }
+      let children = try fileManager.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: nil,
+        options: [.skipsHiddenFiles]
+      )
+      for child in children {
+        try fileManager.removeItem(at: child)
+      }
+      cleanupMessage = "Cleared \(label) storage."
+    } catch {
+      cleanupMessage = "Could not clear \(label): \(error.localizedDescription)"
+    }
+    refresh()
+  }
+
+  private func directorySize(at root: URL) -> Int64 {
+    guard let enumerator = fileManager.enumerator(
+      at: root,
+      includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+      options: [.skipsHiddenFiles]
+    ) else {
+      return 0
     }
 
-    private static func timeString(for interval: TimeInterval) -> String {
-        let totalSeconds = max(0, Int(interval.rounded()))
-        return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
+    var total: Int64 = 0
+    for case let fileURL as URL in enumerator {
+      guard
+        let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+        values.isRegularFile == true
+      else {
+        continue
+      }
+      total += Int64(values.fileSize ?? 0)
     }
+    return total
+  }
+
+  private static let byteCountFormatter: ByteCountFormatter = {
+    let formatter = ByteCountFormatter()
+    formatter.allowedUnits = [.useKB, .useMB, .useGB]
+    formatter.countStyle = .file
+    return formatter
+  }()
 }
 
 struct CepessaSessionsSettingsPage: View {
-    @AppStorage("cepessa.sessions.keepAudio") private var keepAudio = true
-    @AppStorage("cepessa.sessions.preferredTranscriptLanguage") private var transcriptLanguage = "Mixed"
-    @AppStorage("cepessa.sessions.preferredRecapStyle") private var recapStyle = "Structured recap"
-    @AppStorage("cepessa.sessions.floatingBarEnabled") private var floatingBarEnabled = true
+  @StateObject private var storageModel = CepessaStorageSettingsModel()
+  @AppStorage("cepessa.sessions.keepAudio") private var keepAudio = true
+  @AppStorage("cepessa.sessions.preferredTranscriptLanguage") private var transcriptLanguage =
+    "Mixed"
+  @AppStorage("cepessa.sessions.transcriptionSpeedMode") private var transcriptionSpeedMode =
+    "Balanced"
+  @AppStorage(CepessaSessionFloatingBarPreferences.enabledKey) private var floatingBarEnabled =
+    true
+  @State private var openSettingsPickerTitle: String?
 
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [OmiColors.backgroundPrimary, OmiColors.backgroundSecondary.opacity(0.96)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
+  var body: some View {
+    ZStack {
+      LinearGradient(
+        colors: [CepessaColors.backgroundPrimary, CepessaColors.backgroundSecondary.opacity(0.96)],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+      )
+      .ignoresSafeArea()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Cepessa Sessions")
-                            .scaledFont(size: 11, weight: .semibold)
-                            .tracking(0.18)
-                            .foregroundStyle(OmiColors.textTertiary)
+      ScrollView {
+        VStack(alignment: .leading, spacing: 18) {
+          VStack(alignment: .leading, spacing: 10) {
+            Text("Sessions")
+              .scaledFont(size: 11, weight: .semibold)
+              .tracking(0.18)
+              .foregroundStyle(CepessaColors.textTertiary)
 
-                        Text("Workspace Settings")
-                            .scaledFont(size: 30, weight: .semibold)
-                            .foregroundStyle(OmiColors.textPrimary)
+            Text("Workspace Settings")
+              .scaledFont(size: 30, weight: .semibold)
+              .foregroundStyle(CepessaColors.textPrimary)
 
-                        Text("Tune capture behavior, storage, and permissions for this Mac.")
-                            .scaledFont(size: 13)
-                            .foregroundStyle(OmiColors.textTertiary)
-                    }
+            Text("Tune capture behavior, storage, and permissions for this Mac.")
+              .scaledFont(size: 13)
+              .foregroundStyle(CepessaColors.textSecondary)
+          }
 
-                    settingsCard(title: "Capture") {
-                        VStack(spacing: 14) {
-                            pickerRow(title: "Transcript language", value: $transcriptLanguage, options: ["Mixed", "Hebrew-first", "English-first"])
-                            pickerRow(title: "Recap style", value: $recapStyle, options: ["Structured recap", "Concise recap", "Action items only"])
+          settingsCard(title: "Capture") {
+            VStack(spacing: 14) {
+              pickerRow(
+                title: "Transcript language", value: $transcriptLanguage,
+                options: ["Mixed", "Hebrew-first", "English-first"])
+              pickerRow(
+                title: "Transcription speed", value: $transcriptionSpeedMode,
+                options: ["Fast draft", "Balanced", "Most accurate"])
 
-                            Text("Keep everything local by default. Cepessa can preserve raw audio, build a structured recap after each session, and keep the floating capture bar visible while you work.")
-                                .scaledFont(size: 12)
-                                .foregroundStyle(OmiColors.textTertiary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+              Text(
+                "Fast draft starts with lighter local models when available. Hebrew-first and English-first add a language hint while keeping bilingual detection on."
+              )
+              .scaledFont(size: 12)
+              .foregroundStyle(CepessaColors.textSecondary)
+              .frame(maxWidth: .infinity, alignment: .leading)
 
-                            Toggle(isOn: $keepAudio) {
-                                Text("Keep raw audio after processing")
-                                    .scaledFont(size: 13)
-                                    .foregroundStyle(OmiColors.textPrimary)
-                            }
-                            .toggleStyle(.switch)
+              Toggle(isOn: $keepAudio) {
+                Text("Keep raw audio after processing")
+                  .scaledFont(size: 13)
+                  .foregroundStyle(CepessaColors.textPrimary)
+              }
+              .toggleStyle(.switch)
 
-                            Toggle(isOn: $floatingBarEnabled) {
-                                Text("Show the floating capture bar during live sessions")
-                                    .scaledFont(size: 13)
-                                    .foregroundStyle(OmiColors.textPrimary)
-                            }
-                            .toggleStyle(.switch)
-                        }
-                    }
+              Toggle(isOn: $floatingBarEnabled) {
+                Text("Show floating recording bar")
+                  .scaledFont(size: 13)
+                  .foregroundStyle(CepessaColors.textPrimary)
+              }
+              .toggleStyle(.switch)
 
-                    settingsCard(title: "Permissions") {
-                        VStack(spacing: 12) {
-                            permissionRow(title: "Microphone access", isGranted: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
-                            permissionRow(title: "Screen capture access", isGranted: CGPreflightScreenCaptureAccess())
-
-                            HStack(spacing: 10) {
-                                settingsAction(title: "Open Microphone Privacy") {
-                                    openSystemSettings(anchor: "Privacy_Microphone")
-                                }
-                                settingsAction(title: "Open Screen Recording Privacy") {
-                                    openSystemSettings(anchor: "Privacy_ScreenCapture")
-                                }
-                            }
-                        }
-                    }
-
-                    settingsCard(title: "Local storage") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Sessions, transcripts, recaps, audio, and attachments stay here by default.")
-                                .scaledFont(size: 12)
-                                .foregroundStyle(OmiColors.textTertiary)
-
-                            Text(storageRoot.path)
-                                .scaledFont(size: 12)
-                                .foregroundStyle(OmiColors.textSecondary)
-                                .textSelection(.enabled)
-
-                            HStack(spacing: 10) {
-                                settingsAction(title: "Reveal Sessions Folder") {
-                                    NSWorkspace.shared.activateFileViewerSelecting([storageRoot])
-                                }
-                                settingsAction(title: "Reveal Models Folder") {
-                                    NSWorkspace.shared.activateFileViewerSelecting([modelsRoot])
-                                }
-                            }
-                        }
-                    }
-                }
-                .padding(24)
+              Text(
+                "A draggable recording control appears while capture is live. The status bar still shows recording and transcription progress."
+              )
+              .scaledFont(size: 12)
+              .foregroundStyle(CepessaColors.textSecondary)
+              .frame(maxWidth: .infinity, alignment: .leading)
             }
-        }
-        .onAppear {
-            CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
-        }
-        .onChange(of: floatingBarEnabled) { _, _ in
-            CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
-        }
-    }
+          }
 
-    private var storageRoot: URL {
-        fileLayout.sessionsDirectory
-    }
+          settingsCard(title: "Permissions") {
+            VStack(spacing: 12) {
+              permissionRow(
+                title: "Microphone access",
+                isGranted: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
+              permissionRow(
+                title: "Screen capture access", isGranted: CGPreflightScreenCaptureAccess())
 
-    private var modelsRoot: URL {
-        fileLayout.modelsDirectory
-    }
-
-    private var fileLayout: LocalMeetingFileLayout {
-        LocalMeetingFileLayout(
-            baseDirectory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("Cepessa", isDirectory: true)
-        )
-    }
-
-    private func settingsCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(title)
-                .scaledFont(size: 18, weight: .semibold)
-                .foregroundStyle(OmiColors.textPrimary)
-
-            content()
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .omiPanel(
-            fill: OmiColors.backgroundTertiary.opacity(0.42),
-            radius: 24,
-            stroke: OmiColors.border.opacity(0.24),
-            shadowOpacity: 0.1,
-            shadowRadius: 14,
-            shadowY: 8
-        )
-    }
-
-    private func pickerRow(title: String, value: Binding<String>, options: [String]) -> some View {
-        HStack {
-            Text(title)
-                .scaledFont(size: 13)
-                .foregroundStyle(OmiColors.textPrimary)
-
-            Spacer(minLength: 20)
-
-            Picker(title, selection: value) {
-                ForEach(options, id: \.self) { option in
-                    Text(option).tag(option)
+              HStack(spacing: 10) {
+                settingsAction(title: "Open Microphone Privacy") {
+                  openSystemSettings(anchor: "Privacy_Microphone")
                 }
+                settingsAction(title: "Open Screen Recording Privacy") {
+                  openSystemSettings(anchor: "Privacy_ScreenCapture")
+                }
+              }
             }
-            .pickerStyle(.menu)
-            .frame(width: 180)
+          }
+
+          settingsCard(title: "Local storage") {
+            VStack(alignment: .leading, spacing: 12) {
+              Text("Sessions, transcripts, CLIPS, audio, and attachments stay on this Mac by default.")
+                .scaledFont(size: 12)
+                .foregroundStyle(CepessaColors.textSecondary)
+
+              storageUsageRow(
+                title: "Sessions",
+                detail: storageModel.sessionsRoot.path,
+                size: storageModel.sessionsSizeText
+              )
+
+              storageUsageRow(
+                title: "CLIPS",
+                detail: storageModel.clipsRoot.path,
+                size: storageModel.clipsSizeText
+              )
+
+              storageUsageRow(
+                title: "Total",
+                detail: "Local Cepessa storage",
+                size: storageModel.totalSizeText
+              )
+
+              HStack(spacing: 10) {
+                settingsAction(title: "Reveal Sessions Folder") {
+                  NSWorkspace.shared.activateFileViewerSelecting([storageModel.sessionsRoot])
+                }
+                settingsAction(title: "Reveal CLIPS Folder") {
+                  NSWorkspace.shared.activateFileViewerSelecting([storageModel.clipsRoot])
+                }
+                settingsAction(title: "Reveal Models Folder") {
+                  NSWorkspace.shared.activateFileViewerSelecting([modelsRoot])
+                }
+              }
+
+              HStack(spacing: 10) {
+                settingsAction(title: "Refresh Storage") {
+                  storageModel.refresh()
+                }
+                settingsAction(title: "Clear Sessions") {
+                  storageModel.clearSessions()
+                  CepessaSessionsStore.shared.model.loadStoredSessions()
+                }
+                settingsAction(title: "Clear CLIPS") {
+                  storageModel.clearClips()
+                }
+              }
+
+              if let cleanupMessage = storageModel.cleanupMessage {
+                Text(cleanupMessage)
+                  .scaledFont(size: 12, weight: .semibold)
+                  .foregroundStyle(CepessaColors.textSecondary)
+              }
+            }
+          }
         }
+        .padding(24)
+      }
     }
+    .onAppear {
+      CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
+      CepessaSessionStatusBarController.shared.connect(model: CepessaSessionsStore.shared.model)
+      storageModel.refresh()
+    }
+    .onChange(of: floatingBarEnabled) { _, _ in
+      CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
+    }
+    .onExitCommand {
+      guard openSettingsPickerTitle != nil else { return }
+      withAnimation(.easeOut(duration: 0.12)) {
+        openSettingsPickerTitle = nil
+      }
+    }
+  }
 
-    private func permissionRow(title: String, isGranted: Bool) -> some View {
-        HStack {
-            Label(title, systemImage: isGranted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                .scaledFont(size: 13, weight: .medium)
-                .foregroundStyle(isGranted ? OmiColors.textPrimary : OmiColors.warning)
+  private var modelsRoot: URL {
+    fileLayout.modelsDirectory
+  }
 
-            Spacer(minLength: 0)
+  private var fileLayout: LocalMeetingFileLayout {
+    LocalMeetingFileLayout(
+      baseDirectory: FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Cepessa", isDirectory: true)
+    )
+  }
 
-            Text(isGranted ? "Ready" : "Needs access")
-                .scaledFont(size: 11, weight: .semibold)
-                .foregroundStyle(isGranted ? OmiColors.backgroundPrimary : Color.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(isGranted ? OmiColors.success : OmiColors.warning)
-                .clipShape(Capsule())
+  private func settingsCard<Content: View>(title: String, @ViewBuilder content: () -> Content)
+    -> some View
+  {
+    VStack(alignment: .leading, spacing: 14) {
+      Text(title)
+        .scaledFont(size: 18, weight: .semibold)
+        .foregroundStyle(CepessaColors.textPrimary)
+
+      content()
+    }
+    .padding(20)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .cepessaPaper(radius: 16)
+  }
+
+  private func pickerRow(title: String, value: Binding<String>, options: [String]) -> some View {
+    HStack {
+      Text(title)
+        .scaledFont(size: 13)
+        .foregroundStyle(CepessaColors.textPrimary)
+
+      Spacer(minLength: 20)
+
+      CepessaToolbarMenu(
+        isOpen: Binding(
+          get: { openSettingsPickerTitle == title },
+          set: { openSettingsPickerTitle = $0 ? title : nil }
+        ),
+        alignment: .trailing,
+        label: {
+          HStack(spacing: 8) {
+            Text(value.wrappedValue)
+              .scaledFont(size: 12, weight: .semibold)
+              .foregroundStyle(CepessaColors.textPrimary)
+              .lineLimit(1)
+
+            Image(systemName: "chevron.down")
+              .scaledFont(size: 8.5, weight: .bold)
+              .foregroundStyle(CepessaColors.textTertiary)
+          }
+          .padding(.horizontal, 12)
+          .frame(width: 190, height: 40, alignment: .trailing)
+          .background(CepessaColors.backgroundRaised.opacity(0.72))
+          .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+          .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+              .stroke(CepessaColors.border.opacity(0.18), lineWidth: 1)
+          }
+        },
+        content: {
+          VStack(spacing: 3) {
+            ForEach(options, id: \.self) { option in
+              settingsMenuOption(title: option, isSelected: value.wrappedValue == option) {
+                value.wrappedValue = option
+                openSettingsPickerTitle = nil
+              }
+            }
+          }
+          .frame(width: 210)
         }
+      )
     }
+  }
 
-    private func settingsAction(title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .scaledFont(size: 12, weight: .semibold)
-                .foregroundStyle(OmiColors.textPrimary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(OmiColors.backgroundSecondary.opacity(0.84))
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
+  private func settingsMenuOption(
+    title: String,
+    isSelected: Bool,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      HStack(spacing: 9) {
+        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+          .scaledFont(size: 12, weight: .semibold)
+          .foregroundStyle(isSelected ? CepessaColors.accentPrimary : CepessaColors.textTertiary)
 
-    private func openSystemSettings(anchor: String) {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") else { return }
-        NSWorkspace.shared.open(url)
+        Text(title)
+          .scaledFont(size: 12, weight: .semibold)
+          .foregroundStyle(CepessaColors.textPrimary)
+          .lineLimit(1)
+
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 8)
+      .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
+      .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
+    .buttonStyle(CepessaPressStyle(scale: 0.985, pressedBrightness: -0.01))
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(title)
+    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+  }
+
+  private func permissionRow(title: String, isGranted: Bool) -> some View {
+    HStack {
+      Label(title, systemImage: isGranted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+        .scaledFont(size: 13, weight: .medium)
+        .foregroundStyle(isGranted ? CepessaColors.textPrimary : CepessaColors.warning)
+
+      Spacer(minLength: 0)
+
+      Text(isGranted ? "Ready" : "Needs access")
+        .scaledFont(size: 11, weight: .semibold)
+        .foregroundStyle(isGranted ? CepessaColors.backgroundPrimary : Color.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(isGranted ? CepessaColors.success : CepessaColors.warning)
+        .clipShape(Capsule())
+    }
+  }
+
+  private func settingsAction(title: String, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Text(title)
+        .scaledFont(size: 12, weight: .semibold)
+        .foregroundStyle(CepessaColors.textPrimary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(CepessaColors.backgroundSecondary.opacity(0.84))
+        .clipShape(Capsule())
+    }
+    .buttonStyle(CepessaPressStyle(scale: 0.975))
+  }
+
+  private func storageUsageRow(title: String, detail: String, size: String) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 12) {
+      VStack(alignment: .leading, spacing: 3) {
+        Text(title)
+          .scaledFont(size: 13, weight: .semibold)
+          .foregroundStyle(CepessaColors.textPrimary)
+        Text(detail)
+          .scaledFont(size: 11)
+          .foregroundStyle(CepessaColors.textSecondary)
+          .lineLimit(1)
+          .truncationMode(.middle)
+          .textSelection(.enabled)
+      }
+      Spacer(minLength: 0)
+      Text(size)
+        .scaledFont(size: 13, weight: .semibold, design: .monospaced)
+        .foregroundStyle(CepessaColors.textPrimary)
+    }
+    .padding(12)
+    .background(CepessaColors.backgroundRaised.opacity(0.72))
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+  }
+
+  private func openSystemSettings(anchor: String) {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")
+    else { return }
+    NSWorkspace.shared.open(url)
+  }
 }
 
-private extension LocalMeetingSessionStatus {
-    var label: String {
-        switch self {
-        case .recording: return "Recording"
-        case .transcribing: return "Processing"
-        case .ready: return "Ready"
-        case .failed: return "Needs attention"
-        }
+extension LocalMeetingSessionStatus {
+  fileprivate var label: String {
+    switch self {
+    case .recording: return "Recording"
+    case .transcribing: return "Processing"
+    case .ready: return "Ready"
+    case .failed: return "Needs attention"
     }
+  }
 
-    var badgeColor: Color {
-        switch self {
-        case .recording: return OmiColors.error
-        case .transcribing: return OmiColors.purplePrimary
-        case .ready: return OmiColors.success
-        case .failed: return OmiColors.warning
-        }
+  fileprivate var badgeColor: Color {
+    switch self {
+    case .recording: return CepessaColors.error
+    case .transcribing: return CepessaColors.purplePrimary
+    case .ready: return CepessaColors.success
+    case .failed: return CepessaColors.warning
     }
+  }
 }
 
-private extension LocalSessionAttachment.Source {
-    var displayName: String {
-        switch self {
-        case .manual: return "Manual"
-        case .transcript: return "Transcript anchor"
-        case .floatingBar: return "Floating bar"
-        case .imported: return "Imported"
-        }
+extension LocalSessionAttachment.Source {
+  fileprivate var displayName: String {
+    switch self {
+    case .manual: return "Manual"
+    case .transcript: return "Transcript anchor"
+    case .floatingBar: return "Floating bar"
+    case .imported: return "Imported"
     }
-}
-
-private extension LocalSessionRecapSection.Kind {
-    var displayTitle: String {
-        switch self {
-        case .overview: return "Overview"
-        case .keyPoints: return "Key points"
-        case .decisions: return "Decisions"
-        case .actionItem: return "Action items"
-        case .openQuestions: return "Open questions"
-        case .nextSteps: return "Next steps"
-        case .notes: return "Notes"
-        }
-    }
+  }
 }

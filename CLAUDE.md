@@ -123,7 +123,7 @@ See service descriptions in AGENTS.md. Update both files when service boundaries
 ### Localization Required
 
 - All user-facing strings must use l10n. Use `context.l10n.keyName` instead of hardcoded strings. Add new keys to ARB files using `jq` (never read full ARB files - they're large and will burn tokens). See skill `add-a-new-localization-key-l10n-arb` for details.
-- **Translate all locales**: When adding new l10n keys, provide real translations for all 33 non-English locales — do not leave English text in non-English ARB files. Use the `omi-add-missing-language-keys-l10n` skill to generate proper translations. Ensure `{parameter}` placeholders match the English ARB exactly.
+- **Translate all locales**: When adding new l10n keys, provide real translations for all 33 non-English locales — do not leave English text in non-English ARB files. Ensure `{parameter}` placeholders match the English ARB exactly.
 - After modifying ARB files in `app/lib/l10n/`, regenerate the localization files:
 ```bash
 cd app && flutter gen-l10n
@@ -184,7 +184,7 @@ Install agent-swift once: `brew install beastoin/tap/agent-swift`. Requires Acce
 cd desktop && ./run.sh
 
 # 2. Connect to the running app
-agent-swift connect --bundle-id com.omi.desktop-dev
+agent-swift connect --bundle-id me.cepessa.sessions.local
 
 # 3. See what's on screen
 agent-swift snapshot -i              # interactive elements only (recommended)
@@ -214,9 +214,9 @@ agent-swift screenshot /tmp/after-change.png  # capture app window
 - JSON output: `--json` flag, `AGENT_SWIFT_JSON=1` env var, or pipe to auto-detect.
 - 15 commands: `doctor`, `connect`, `disconnect`, `status`, `snapshot`, `press`, `click`, `fill`, `get`, `find`, `screenshot`, `is`, `wait`, `scroll`, `schema`.
 - Works with any macOS app (SwiftUI, AppKit, Electron) — no Marionette or app-side setup.
-- Bundle ID for dev: `com.omi.desktop-dev`. For prod: `com.omi.computer-macos`.
-- **Named test bundles**: When testing a feature or bug fix, ALWAYS create a separate named bundle with `OMI_APP_NAME="feature-name" ./run.sh`. This installs to `/Applications/feature-name.app` with bundle ID `com.omi.feature-name`, running side-by-side with "Omi Dev" and "Omi Beta". NEVER overwrite "Omi Dev" when testing a specific change — the user may have it running. Connect agent-swift with `--bundle-id com.omi.feature-name`.
-- Keep the bundle suffix and app name identical so auth callbacks reopen the correct app. Example: `1233.app` should use `com.omi.1233`, `search.app` should use `com.omi.search`, and mismatches like `1233.app` with `com.omi.desktop-dev` are not allowed.
+- Bundle ID for dev: `me.cepessa.sessions.local`.
+- **Named test bundles**: When testing a feature or bug fix, ALWAYS create a separate named bundle so it can run side-by-side with your main local install. Connect agent-swift with that bundle ID.
+- Keep the bundle suffix and app name identical so auth callbacks reopen the correct app.
 - **App flows & exploration skill**: See `desktop/e2e/SKILL.md` for navigation architecture, screen map, interaction patterns (click vs press), and known flows. Read this when developing features or exploring the app.
 - When asked to build or rebuild the desktop app for testing, don't stop at a successful compile: launch the named test app, interact with it programmatically to confirm it actually runs, and report any environment blocker if full interaction is impossible.
 
@@ -236,7 +236,7 @@ Note: Files ending in `.gen.dart` or `.g.dart` are auto-generated and should not
 black --line-length 120 --skip-string-normalization <files>
 ```
 
-### C/C++ (firmware: omi/, omiGlass/)
+### C/C++ (firmware directories)
 ```bash
 clang-format -i <files>
 ```

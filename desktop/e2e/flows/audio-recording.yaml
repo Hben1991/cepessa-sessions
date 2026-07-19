@@ -1,7 +1,7 @@
 version: 2
 name: audio-recording
 description: Audio recording flow — verify microphone permission, Start Recording button, transcription state, and stop recording
-app: com.omi.computer-macos
+app: me.cepessa.sessions.local
 covers:
   - desktop/Desktop/Sources/MainWindow/Pages/ConversationsPage.swift
   - desktop/Desktop/Sources/AudioCaptureService.swift

@@ -1,8 +1,8 @@
-# Omi Issue Triage Guide
+# Cepessa Sessions Issue Triage Guide
 
-This document explains how issues are evaluated and prioritized in the Omi repository.
+This document explains how issues are evaluated and prioritized in the Cepessa Sessions repository.
 
-Omi is a memory-first product. The highest priority is protecting the core memory loop:
+Cepessa Sessions is a memory-first product. The highest priority is protecting the core memory loop:
 
 Capture -> Understand -> Remember -> Retrieve -> Act
 
@@ -12,13 +12,13 @@ Issues are not prioritized by popularity or reactions. They are prioritized by h
 
 ## 1. Core Principle
 
-If Omi fails to capture or preserve memory, nothing else matters.
+If Cepessa Sessions fails to capture or preserve memory, nothing else matters.
 
 All triage decisions flow from this principle.
 
 ---
 
-## 2. Omi Core Layers
+## 2. Cepessa Sessions Core Layers
 
 Every issue must be mapped to one primary layer.
 
@@ -26,7 +26,7 @@ Every issue must be mapped to one primary layer.
 - Understand: Speech-to-text, language detection, diarization, transcription accuracy
 - Memory: Memory creation, syncing, storage, metadata, privacy boundaries
 - Intelligence: Summaries, insights, action items, reasoning across memories
-- Retrieval / Action: Search, asking Omi questions, tasks, exports, integrations
+- Retrieval / Action: Search, asking Cepessa questions, tasks, exports, integrations
 - UX / Polish: UI layout, animations, wording
 - Docs / Tooling: Documentation, examples, developer tooling
 
@@ -62,7 +62,7 @@ How broken is the behavior?
 
 ### 4.2 Trust Impact (1-5)
 
-Omi is a memory product, so trust is critical.
+Cepessa Sessions is a memory product, so trust is critical.
 
 - 5: Data loss or missing memories
 - 4: Incorrect or corrupted memories
@@ -174,7 +174,7 @@ Issues are labeled with exactly one label from each category.
 - Issues are signals, not commands. Community input is invaluable, but maintainers decide priority.
 - Popularity does not determine urgency. Reactions and comments do not outweigh core system health.
 - Data loss outranks feature requests. Any issue involving missing or corrupted memories is always high priority.
-- Capture failures outrank intelligence improvements. Omi must record before it can reason.
+- Capture failures outrank intelligence improvements. Cepessa Sessions must record before it can reason.
 
 ---
 
@@ -202,6 +202,6 @@ Example: Improve summary phrasing
 
 ## 11. Final Principle
 
-Omi exists to remember life. Anything that threatens memory reliability takes precedence over everything else.
+Cepessa Sessions exists to remember life. Anything that threatens memory reliability takes precedence over everything else.
 
-This guide exists to keep Omi reliable, trustworthy, and sustainable as it grows.
+This guide exists to keep Cepessa Sessions reliable, trustworthy, and sustainable as it grows.

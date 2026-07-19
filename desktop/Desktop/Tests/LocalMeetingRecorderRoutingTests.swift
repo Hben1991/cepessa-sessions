@@ -1,6 +1,6 @@
 import XCTest
 import CoreAudio
-@testable import Omi_Computer
+@testable import CepessaSessions
 
 final class LocalMeetingRecorderRoutingTests: XCTestCase {
     func testInitialMicrophoneRouteUsesSystemDefaultInput() {

@@ -14,7 +14,7 @@ Options (via environment variables):
   OMI_SKIP_TUNNEL=1        Skip Cloudflare tunnel (use OMI_API_URL from .env directly)
   AUTH_PORT=10200           Auth service port (default: 10200)
   PORT=10201                Rust backend port (default: 10201, never use 8080)
-  OMI_APP_NAME="Omi Dev"   App name (default: "Omi Dev")
+  OMI_APP_NAME="Sessions"  App name (default: "Sessions")
   OMI_PYTHON_API_URL="..."  Python backend URL (subscriptions, payments, etc; default: https://api.omi.me)
   OMI_SIGN_IDENTITY="..."  Code signing identity (auto-detected if not set)
   OMI_ENABLE_LOCAL_AUTOMATION=1  Enable agent-swift automation bridge
@@ -91,9 +91,23 @@ substep() {
     printf "[%6.1fs]   ├─ %s\n" "$total_elapsed" "$1"
 }
 
+fix_local_model_runner_linkage() {
+    local runner_path="$1"
+    [ -f "$runner_path" ] || return 0
+
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$runner_path" 2>/dev/null || true
+    install_name_tool -add_rpath "@loader_path/../Frameworks" "$runner_path" 2>/dev/null || true
+    install_name_tool \
+        -change "@rpath/llama.framework/Versions/Current/llama" \
+        "@loader_path/../Frameworks/llama.framework/Versions/Current/llama" \
+        "$runner_path" 2>/dev/null || true
+}
+
 # App configuration
-BINARY_NAME="Omi Computer"  # Package.swift target — binary paths, pkill, CFBundleExecutable
-APP_NAME="${OMI_APP_NAME:-Omi Dev}"
+BINARY_NAME="CepessaSessions"  # Package.swift target — binary paths, pkill, CFBundleExecutable
+LOCAL_MODEL_RUNNER_NAME="CepessaLocalModelRunner"
+RESOURCE_BUNDLE_NAME="CepessaSessions_CepessaSessions.bundle"
+APP_NAME="${OMI_APP_NAME:-Sessions}"
 IS_NAMED_BUNDLE=false
 [ -n "${OMI_APP_NAME:-}" ] && IS_NAMED_BUNDLE=true
 
@@ -102,26 +116,27 @@ slugify_identifier() {
 }
 
 if [ "$IS_NAMED_BUNDLE" = false ]; then
-    EXPECTED_BUNDLE_ID="com.omi.desktop-dev"
-    EXPECTED_URL_SCHEME="omi-computer-dev"
+    EXPECTED_BUNDLE_ID="me.cepessa.sessions.local"
+    EXPECTED_URL_SCHEME="cepessa-sessions-dev"
 else
     APP_SLUG="$(slugify_identifier "$APP_NAME")"
     if [ -z "$APP_SLUG" ]; then
         echo "ERROR: OMI_APP_NAME must contain at least one letter or number"
         exit 1
     fi
-    EXPECTED_BUNDLE_ID="com.omi.$APP_SLUG"
-    EXPECTED_URL_SCHEME="omi-$APP_SLUG"
+    EXPECTED_BUNDLE_ID="me.cepessa.$APP_SLUG"
+    EXPECTED_URL_SCHEME="cepessa-$APP_SLUG"
 fi
 
 BUNDLE_ID="${OMI_BUNDLE_ID:-$EXPECTED_BUNDLE_ID}"
-BUILD_DIR="build"
+BUILD_DIR="${OMI_BUILD_DIR:-build}"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 APP_PATH="/Applications/$APP_NAME.app"
 APP_DESKTOP_PATH="$HOME/Desktop/$APP_NAME.app"
 APP_DOWNLOADS_PATH="$HOME/Downloads/$APP_NAME.app"
 SIGN_IDENTITY="${OMI_SIGN_IDENTITY:-}"
 URL_SCHEME="${OMI_URL_SCHEME:-$EXPECTED_URL_SCHEME}"
+SWIFT_SCRATCH_PATH="${OMI_SWIFT_SCRATCH_PATH:-${TMPDIR:-/tmp}/cepessa-sessions-run-build}"
 
 if [ "$BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]; then
     echo "ERROR: APP_NAME '$APP_NAME' must use bundle ID '$EXPECTED_BUNDLE_ID' (got '$BUNDLE_ID')"
@@ -190,6 +205,7 @@ rm -f /tmp/omi-dev.log 2>/dev/null || true
 step "Cleaning up conflicting app bundles..."
 # Clean old build names from local build dir
 rm -rf "$BUILD_DIR/Omi Computer.app" 2>/dev/null
+rm -rf "$BUILD_DIR/Cepessa Sessions Dev.app" "$BUILD_DIR/Cepessa Sessions.app" 2>/dev/null
 rm -rf "$APP_BUNDLE" 2>/dev/null
 CONFLICTING_APPS=(
     "$APP_PATH"
@@ -208,10 +224,14 @@ done
 find "$(dirname "$0")/../app/build" -name "$APP_NAME.app" -type d -exec rm -rf {} + 2>/dev/null || true
 # Kill stale app bundles from other repo clones (e.g. ~/omi-desktop/)
 # These confuse LaunchServices and get launched instead of the /Applications copy.
-find "$HOME" -maxdepth 4 -name "$APP_NAME.app" -type d -not -path "$APP_BUNDLE" -not -path "$APP_PATH" 2>/dev/null | while read stale; do
-    substep "Removing stale clone: $stale"
-    rm -rf "$stale"
-done
+if [ "${OMI_SKIP_STALE_APP_SCAN:-0}" = "1" ]; then
+    substep "Skipping stale app scan (OMI_SKIP_STALE_APP_SCAN=1)"
+else
+    find "$HOME" -maxdepth 4 -name "$APP_NAME.app" -type d -not -path "$APP_BUNDLE" -not -path "$APP_PATH" 2>/dev/null | while read stale; do
+        substep "Removing stale clone: $stale"
+        rm -rf "$stale"
+    done
+fi
 
 if [ "${OMI_SKIP_TUNNEL:-0}" != "1" ]; then
     step "Starting Cloudflare quick tunnel..."
@@ -397,7 +417,9 @@ fi
 
 step "Building acp-bridge (npm install + tsc)..."
 ACP_BRIDGE_DIR="$(dirname "$0")/acp-bridge"
-if [ -d "$ACP_BRIDGE_DIR" ]; then
+if [ "${OMI_SKIP_ACP_BRIDGE:-0}" = "1" ]; then
+    substep "Skipping acp-bridge build (OMI_SKIP_ACP_BRIDGE=1)"
+elif [ -d "$ACP_BRIDGE_DIR" ]; then
     cd "$ACP_BRIDGE_DIR"
     if [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules/.package-lock.json" ]; then
         substep "Installing npm dependencies"
@@ -416,7 +438,10 @@ if [ -f scripts/check_schema_docs.sh ]; then
 fi
 
 step "Building Swift app (swift build -c debug)..."
-xcrun swift build -c debug --package-path Desktop
+mkdir -p "$SWIFT_SCRATCH_PATH"
+xcrun swift build -c debug --package-path Desktop --scratch-path "$SWIFT_SCRATCH_PATH"
+xcrun swift build -c debug --package-path Desktop --scratch-path "$SWIFT_SCRATCH_PATH" --product "$LOCAL_MODEL_RUNNER_NAME"
+SWIFT_BUILD_DIR="$(xcrun swift build -c debug --package-path Desktop --scratch-path "$SWIFT_SCRATCH_PATH" --show-bin-path)"
 
 auth_debug "AFTER swift build: auth_isSignedIn=$(defaults read "$BUNDLE_ID" auth_isSignedIn 2>&1 || true)"
 
@@ -426,28 +451,43 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 
-substep "Copying binary ($(du -h "Desktop/.build/debug/$BINARY_NAME" 2>/dev/null | cut -f1))"
-cp -f "Desktop/.build/debug/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
+substep "Copying binary ($(du -h "$SWIFT_BUILD_DIR/$BINARY_NAME" 2>/dev/null | cut -f1))"
+cp -f "$SWIFT_BUILD_DIR/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
+
+if [ -f "$SWIFT_BUILD_DIR/$LOCAL_MODEL_RUNNER_NAME" ]; then
+    substep "Copying local model runner"
+    cp -f "$SWIFT_BUILD_DIR/$LOCAL_MODEL_RUNNER_NAME" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
+fi
 
 substep "Adding rpath for Frameworks"
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME" 2>/dev/null || true
+if [ -f "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" ]; then
+    fix_local_model_runner_linkage "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
+fi
 
 # Copy Sparkle framework
-SPARKLE_FRAMEWORK="Desktop/.build/arm64-apple-macosx/debug/Sparkle.framework"
+SPARKLE_FRAMEWORK="$SWIFT_BUILD_DIR/Sparkle.framework"
 if [ -d "$SPARKLE_FRAMEWORK" ]; then
     substep "Copying Sparkle framework ($(du -sh "$SPARKLE_FRAMEWORK" 2>/dev/null | cut -f1))"
     rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
     cp -R "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
 fi
 
+LLAMA_FRAMEWORK="$SWIFT_BUILD_DIR/llama.framework"
+if [ -d "$LLAMA_FRAMEWORK" ]; then
+    substep "Copying llama framework"
+    rm -rf "$APP_BUNDLE/Contents/Frameworks/llama.framework"
+    cp -R "$LLAMA_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
+fi
+
 # Copy HeapSwiftCore framework and its dependency CSSwiftProtobuf
-HEAP_FRAMEWORK="Desktop/.build/artifacts/heap-swift-core-sdk/HeapSwiftCore/HeapSwiftCore.xcframework/macos-arm64_x86_64/HeapSwiftCore.framework"
+HEAP_FRAMEWORK="$SWIFT_SCRATCH_PATH/artifacts/heap-swift-core-sdk/HeapSwiftCore/HeapSwiftCore.xcframework/macos-arm64_x86_64/HeapSwiftCore.framework"
 if [ -d "$HEAP_FRAMEWORK" ]; then
     substep "Copying HeapSwiftCore framework"
     rm -rf "$APP_BUNDLE/Contents/Frameworks/HeapSwiftCore.framework"
     cp -R "$HEAP_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
 fi
-CSPROTOBUF_FRAMEWORK="Desktop/.build/artifacts/csswiftprotobuf/CSSwiftProtobuf/CSSwiftProtobuf.xcframework/macos-arm64_x86_64/CSSwiftProtobuf.framework"
+CSPROTOBUF_FRAMEWORK="$SWIFT_SCRATCH_PATH/artifacts/csswiftprotobuf/CSSwiftProtobuf/CSSwiftProtobuf.xcframework/macos-arm64_x86_64/CSSwiftProtobuf.framework"
 if [ -d "$CSPROTOBUF_FRAMEWORK" ]; then
     substep "Copying CSSwiftProtobuf framework"
     rm -rf "$APP_BUNDLE/Contents/Frameworks/CSSwiftProtobuf.framework"
@@ -460,31 +500,61 @@ cp -f Desktop/Info.plist "$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $APP_NAME" "$APP_BUNDLE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 $URL_SCHEME" "$APP_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 $URL_SCHEME" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
 
 auth_debug "AFTER plist edits: auth_isSignedIn=$(defaults read "$BUNDLE_ID" auth_isSignedIn 2>&1 || true)"
 
 substep "Copying GoogleService-Info.plist"
 if [ -f "Desktop/Sources/GoogleService-Info-Dev.plist" ]; then
     cp -f Desktop/Sources/GoogleService-Info-Dev.plist "$APP_BUNDLE/Contents/Resources/GoogleService-Info.plist"
-else
+elif [ -f "Desktop/Sources/GoogleService-Info.plist" ]; then
     cp -f Desktop/Sources/GoogleService-Info.plist "$APP_BUNDLE/Contents/Resources/"
 fi
-/usr/libexec/PlistBuddy -c "Set :BUNDLE_ID $BUNDLE_ID" "$APP_BUNDLE/Contents/Resources/GoogleService-Info.plist" 2>/dev/null || true
+if [ -f "$APP_BUNDLE/Contents/Resources/GoogleService-Info.plist" ]; then
+    /usr/libexec/PlistBuddy -c "Set :BUNDLE_ID $BUNDLE_ID" "$APP_BUNDLE/Contents/Resources/GoogleService-Info.plist" 2>/dev/null || true
+fi
 
 # Copy resource bundle (contains app assets like permissions.gif, herologo.png, etc.)
-RESOURCE_BUNDLE="Desktop/.build/arm64-apple-macosx/debug/Omi Computer_Omi Computer.bundle"
+RESOURCE_BUNDLE="$SWIFT_BUILD_DIR/$RESOURCE_BUNDLE_NAME"
 if [ -d "$RESOURCE_BUNDLE" ]; then
     substep "Copying resource bundle ($(du -sh "$RESOURCE_BUNDLE" 2>/dev/null | cut -f1))"
     cp -Rf "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/"
 fi
+for SWIFT_RESOURCE_BUNDLE in "$SWIFT_BUILD_DIR"/*.bundle; do
+    [ -d "$SWIFT_RESOURCE_BUNDLE" ] || continue
+    BUNDLE_BASENAME="$(basename "$SWIFT_RESOURCE_BUNDLE")"
+    substep "Copying SwiftPM resource bundle $BUNDLE_BASENAME"
+    rm -rf "$APP_BUNDLE/Contents/Resources/$BUNDLE_BASENAME"
+    cp -Rf "$SWIFT_RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/"
+done
+for GGML_RESOURCE_DIR in \
+    "$HOME/Applications/TypeWhisper.app/Contents/PlugIns/IvritASRPlugin.bundle/Contents/Resources/Helpers" \
+    "/Applications/TypeWhisper.app/Contents/PlugIns/IvritASRPlugin.bundle/Contents/Resources/Helpers" \
+    "/Users/ben/Documents/App/General/typewhisper-mac/IvritASRHelper/Resources" \
+    "/Users/ben/Documents/App/General/typewhisper-mac/Vendor/whisper.spm/Sources/whisper"; do
+    if [ -f "$GGML_RESOURCE_DIR/ggml-metal.metal" ] && [ -f "$GGML_RESOURCE_DIR/ggml-common.h" ]; then
+        substep "Copying GGML Metal shader resources"
+        cp -f "$GGML_RESOURCE_DIR/ggml-metal.metal" "$APP_BUNDLE/Contents/Resources/"
+        cp -f "$GGML_RESOURCE_DIR/ggml-common.h" "$APP_BUNDLE/Contents/Resources/"
+        break
+    fi
+done
 
 substep "Copying acp-bridge"
-if [ -d "$ACP_BRIDGE_DIR/dist" ]; then
+if [ "${OMI_SKIP_ACP_BRIDGE:-0}" = "1" ]; then
+    substep "Skipping acp-bridge copy (OMI_SKIP_ACP_BRIDGE=1)"
+elif [ -d "$ACP_BRIDGE_DIR/dist" ]; then
     mkdir -p "$APP_BUNDLE/Contents/Resources/acp-bridge"
     cp -Rf "$ACP_BRIDGE_DIR/dist" "$APP_BUNDLE/Contents/Resources/acp-bridge/"
     cp -f "$ACP_BRIDGE_DIR/package.json" "$APP_BUNDLE/Contents/Resources/acp-bridge/"
-    cp -Rf "$ACP_BRIDGE_DIR/node_modules" "$APP_BUNDLE/Contents/Resources/acp-bridge/"
+    if [ "${OMI_SKIP_ACP_NODE_MODULES:-0}" = "1" ]; then
+        substep "Skipping acp-bridge node_modules copy (OMI_SKIP_ACP_NODE_MODULES=1)"
+    else
+        rm -rf "$APP_BUNDLE/Contents/Resources/acp-bridge/node_modules"
+        ditto --norsrc --noextattr --noqtn --noacl \
+            "$ACP_BRIDGE_DIR/node_modules" \
+            "$APP_BUNDLE/Contents/Resources/acp-bridge/node_modules"
+    fi
 fi
 
 substep "Copying .env.app"
@@ -571,8 +641,20 @@ fi
 
 auth_debug "BEFORE signing: $(defaults read "$BUNDLE_ID" auth_isSignedIn 2>&1 || true)"
 
+step "Normalizing bundle file permissions..."
+chmod -R u+w "$APP_BUNDLE"
+
 step "Removing extended attributes (xattr -cr)..."
 xattr -cr "$APP_BUNDLE"
+find "$APP_BUNDLE" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
+find "$APP_BUNDLE" -exec xattr -d 'com.apple.fileprovider.fpfs#P' {} \; 2>/dev/null || true
+
+step "Staging app bundle outside FileProvider metadata..."
+SIGNING_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/cepessa-signing.XXXXXX")
+SIGNING_APP_BUNDLE="$SIGNING_ROOT/$APP_NAME.app"
+ditto --norsrc --noextattr --noqtn --noacl "$APP_BUNDLE" "$SIGNING_APP_BUNDLE"
+chmod -R u+w "$SIGNING_APP_BUNDLE"
+APP_BUNDLE="$SIGNING_APP_BUNDLE"
 
 step "Signing app with hardened runtime..."
 # Auto-detect a stable signing identity so TCC permissions persist across rebuilds.
@@ -593,6 +675,14 @@ if [ -n "$SIGN_IDENTITY" ]; then
         substep "Signing Sparkle framework"
         codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
     fi
+    if [ -d "$APP_BUNDLE/Contents/Frameworks/llama.framework" ]; then
+        substep "Signing llama framework"
+        codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/Frameworks/llama.framework"
+    fi
+    if [ -f "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME" ]; then
+        substep "Signing local model runner"
+        codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/MacOS/$LOCAL_MODEL_RUNNER_NAME"
+    fi
     if [ -d "$APP_BUNDLE/Contents/Frameworks/CSSwiftProtobuf.framework" ]; then
         substep "Signing CSSwiftProtobuf framework"
         codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/Frameworks/CSSwiftProtobuf.framework"
@@ -603,7 +693,7 @@ if [ -n "$SIGN_IDENTITY" ]; then
     fi
     # Sign the bundled node binary with developer identity + Node.entitlements
     # (macOS requires executables inside app bundles to be properly signed)
-    NODE_BIN="$APP_BUNDLE/Contents/Resources/Omi Computer_Omi Computer.bundle/node"
+    NODE_BIN="$APP_BUNDLE/Contents/Resources/$RESOURCE_BUNDLE_NAME/node"
     if [ -f "$NODE_BIN" ]; then
         substep "Signing bundled node binary"
         codesign --force --options runtime --entitlements Desktop/Node.entitlements --sign "$SIGN_IDENTITY" "$NODE_BIN"
@@ -615,7 +705,7 @@ if [ -n "$SIGN_IDENTITY" ]; then
     #
     # Named bundles always use fallback — they have no provisioning profile, so
     # com.apple.developer.applesignin would cause launchd to reject the launch.
-    EFFECTIVE_ENTITLEMENTS="Desktop/Omi.entitlements"
+    EFFECTIVE_ENTITLEMENTS="Desktop/Cepessa.entitlements"
     PROFILE_PATH="$APP_BUNDLE/Contents/embedded.provisionprofile"
     USE_FALLBACK_ENTITLEMENTS=false
 
@@ -637,7 +727,7 @@ if [ -n "$SIGN_IDENTITY" ]; then
     fi
 
     if [ "$USE_FALLBACK_ENTITLEMENTS" = true ]; then
-        cp Desktop/Omi.entitlements /tmp/omi-local-dev.entitlements
+        cp Desktop/Cepessa.entitlements /tmp/omi-local-dev.entitlements
         /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.applesignin" /tmp/omi-local-dev.entitlements 2>/dev/null || true
         rm -f "$PROFILE_PATH"
         EFFECTIVE_ENTITLEMENTS="/tmp/omi-local-dev.entitlements"
@@ -663,6 +753,9 @@ step "Installing to /Applications/..."
 # Install to /Applications/ so "Quit & Reopen" (after granting screen recording
 # permission) launches the correct binary instead of a stale copy elsewhere.
 ditto "$APP_BUNDLE" "$APP_PATH"
+chmod -R u+w "$APP_PATH"
+find "$APP_PATH" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
+find "$APP_PATH" -exec xattr -d 'com.apple.fileprovider.fpfs#P' {} \; 2>/dev/null || true
 substep "Installed to $APP_PATH"
 
 step "Clearing stale LaunchServices registration..."

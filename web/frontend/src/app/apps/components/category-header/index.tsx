@@ -13,17 +13,17 @@ export function CategoryHeader({ category, totalApps }: CategoryHeaderProps) {
 
   return (
     <div className="flex items-center gap-2 sm:gap-4">
-      <div className={`rounded-lg p-2 sm:rounded-xl sm:p-3 ${metadata.theme.accent}`}>
-        <Icon className={`h-5 w-5 sm:h-8 sm:w-8 ${metadata.theme.primary}`} />
+      <div className="rounded-xl border border-[rgba(248,244,234,0.08)] bg-[rgba(213,168,79,0.12)] p-2 text-[var(--market-accent-soft)] sm:rounded-2xl sm:p-3">
+        <Icon className="h-5 w-5 sm:h-8 sm:w-8" />
       </div>
       <div className="min-w-0 flex-1">
-        <h1 className="flex items-center gap-2 text-xl font-bold text-white sm:text-2xl md:text-3xl">
+        <h1 className="flex items-center gap-2 text-xl font-bold tracking-[-0.035em] text-[var(--market-ink)] sm:text-2xl md:text-3xl">
           {metadata.displayName}
-          <span className="inline-flex items-center rounded-full bg-white/5 px-2 py-0.5 text-sm text-gray-400 sm:text-base">
+          <span className="inline-flex items-center rounded-xl bg-white/5 px-2 py-0.5 font-mono text-sm tabular-nums text-[var(--market-muted)] sm:text-base">
             {totalApps}
           </span>
         </h1>
-        <p className="mt-0.5 line-clamp-1 text-sm text-gray-400 sm:mt-2 sm:line-clamp-none sm:text-base">
+        <p className="mt-0.5 line-clamp-1 text-sm leading-6 text-[var(--market-muted)] sm:mt-2 sm:line-clamp-none sm:text-base">
           {metadata.description}
         </p>
       </div>

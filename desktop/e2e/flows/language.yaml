@@ -4,7 +4,7 @@
 version: 2
 name: language
 description: Language mode switching in Settings > Transcription — radio buttons, language picker, and back navigation
-app: com.omi.computer-macos
+app: me.cepessa.sessions.local
 covers:
   - desktop/Desktop/Sources/MainWindow/Pages/SettingsPage.swift
   - desktop/Desktop/Sources/MainWindow/SettingsSidebar.swift

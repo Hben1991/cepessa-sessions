@@ -76,8 +76,8 @@ export function SearchBar({ className, allApps, onSearching }: SearchBarProps) {
             className={cn(
               'absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 transition-colors',
               isFocused || searchQuery
-                ? 'text-[#6C8EEF]'
-                : 'text-gray-400 group-hover:text-[#6C8EEF]',
+                ? 'text-[var(--market-accent)]'
+                : 'text-[var(--market-muted)] group-hover:text-[var(--market-accent)]',
             )}
           />
           <input
@@ -90,12 +90,12 @@ export function SearchBar({ className, allApps, onSearching }: SearchBarProps) {
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
             placeholder="Search apps, categories, or capabilities..."
-            className="h-12 w-full rounded-full bg-[#1A1F2E] pl-11 pr-11 text-sm text-white placeholder-gray-400 outline-none ring-1 ring-white/5 transition-all hover:ring-white/10 focus:bg-[#242938] focus:ring-[#6C8EEF]/50"
+            className="h-12 w-full rounded-2xl border border-[rgba(248,244,234,0.08)] bg-[rgba(27,25,20,0.8)] pl-11 pr-11 text-sm text-[var(--market-ink)] placeholder-[var(--market-muted)] outline-none ring-0 transition-all hover:border-[rgba(248,244,234,0.16)] focus:border-[rgba(213,168,79,0.42)] focus:bg-[#211f19]"
           />
           {searchQuery && (
             <button
               onClick={clearSearch}
-              className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 transition-colors hover:text-white"
+              className="absolute right-4 top-1/2 -translate-y-1/2 text-[var(--market-muted)] transition-colors hover:text-[var(--market-ink)]"
             >
               <X className="h-4 w-4" />
             </button>
@@ -107,7 +107,7 @@ export function SearchBar({ className, allApps, onSearching }: SearchBarProps) {
       {isSearching && (
         <div className="container mx-auto mt-8">
           <div className="space-y-4">
-            <h2 className="text-xl font-semibold text-white">
+            <h2 className="text-xl font-semibold tracking-[-0.025em] text-[var(--market-ink)]">
               Search Results ({searchResults.length})
             </h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

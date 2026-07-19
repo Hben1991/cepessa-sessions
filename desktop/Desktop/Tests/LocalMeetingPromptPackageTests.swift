@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import Omi_Computer
+@testable import CepessaSessions
 
 final class LocalMeetingPromptPackageTests: XCTestCase {
     private var tempRootURL: URL!

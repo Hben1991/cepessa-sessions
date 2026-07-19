@@ -1,7 +1,7 @@
 version: 2
 name: navigation
 description: Desktop sidebar navigation — verify all 7 sidebar sections load correctly via click navigation
-app: com.omi.computer-macos
+app: me.cepessa.sessions.local
 covers:
   - desktop/Desktop/Sources/MainWindow/SidebarView.swift
   - desktop/Desktop/Sources/MainWindow/DesktopHomeView.swift

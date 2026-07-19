@@ -1,11 +1,11 @@
-# E2E Flow: Chat — AI conversation with Ask Omi
+# E2E Flow: Chat — AI conversation with Cepessa
 # Tests: Open chat, send message, receive AI response, message actions, conversation history
 # Core feature: AI chat interface for asking questions and getting contextual answers
 
 version: 2
 name: chat
 description: Chat flow — navigate to Chat page, send a message, verify AI response streams, test message actions (copy, regenerate), browse conversation history
-app: com.omi.computer-macos
+app: me.cepessa.sessions.local
 covers:
   - desktop/Desktop/Sources/MainWindow/Pages/ChatPage.swift
   - desktop/Desktop/Sources/Chat/ChatProvider.swift

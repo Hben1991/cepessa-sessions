@@ -1,8 +1,9 @@
 import os
 from enum import Enum
 import json
-from typing import List, Optional
+from typing import Any, List, Optional
 from datetime import datetime, timedelta
+from pathlib import Path
 import requests
 import logging
 from mcp.server import Server
@@ -63,6 +64,11 @@ base_url = os.getenv("OMI_API_BASE_URL", "https://api.omi.me/v1/mcp/")
 if not base_url or base_url == "":
     raise Exception("Base URL not found")
 
+DEFAULT_CEPESSA_SESSIONS_ROOT = (
+    Path.home() / "Library/Application Support/Cepessa/Sessions"
+)
+DEFAULT_CEPESSA_CLIPS_ROOT = Path.home() / "Library/Application Support/Cepessa/Clips"
+
 
 class OmiTools(str, Enum):
     GET_MEMORIES = "get_memories"
@@ -71,6 +77,16 @@ class OmiTools(str, Enum):
     EDIT_MEMORY = "edit_memory"
     GET_CONVERSATIONS = "get_conversations"
     GET_CONVERSATION_BY_ID = "get_conversation_by_id"
+    LIST_LOCAL_SESSIONS = "list_local_sessions"
+    GET_LOCAL_SESSION_TRANSCRIPT = "get_local_session_transcript"
+    SEARCH_LOCAL_SESSION_TRANSCRIPTS = "search_local_session_transcripts"
+    UPDATE_LOCAL_SESSION_TITLE = "update_local_session_title"
+    GET_LOCAL_SESSION_DATA = "get_local_session_data"
+    LIST_LOCAL_SESSION_FILES = "list_local_session_files"
+    UPDATE_LOCAL_SESSION_FIELDS = "update_local_session_fields"
+    LIST_LOCAL_CLIPS = "list_local_clips"
+    GET_LOCAL_CLIP = "get_local_clip"
+    LIST_LOCAL_CLIP_FILES = "list_local_clip_files"
 
 
 class GetMemories(BaseModel):
@@ -78,9 +94,13 @@ class GetMemories(BaseModel):
         description="The user's MCP API key. If not provided, it will be read from the OMI_API_KEY environment variable. For more details, see https://docs.omi.me/doc/developer/MCP",
         default=None,
     )
-    categories: List[MemoryCategory] = Field(description="The categories of memories to filter by.", default=[])
+    categories: List[MemoryCategory] = Field(
+        description="The categories of memories to filter by.", default=[]
+    )
     limit: int = Field(description="The number of memories to retrieve.", default=100)
-    offset: int = Field(description="The offset of the memories to retrieve.", default=0)
+    offset: int = Field(
+        description="The offset of the memories to retrieve.", default=0
+    )
 
 
 class CreateMemory(BaseModel):
@@ -89,7 +109,9 @@ class CreateMemory(BaseModel):
         default=None,
     )
     content: str = Field(description="The content of the memory.")
-    category: MemoryCategory = Field(description="The category of the memory to create.")
+    category: MemoryCategory = Field(
+        description="The category of the memory to create."
+    )
 
 
 class DeleteMemory(BaseModel):
@@ -114,11 +136,21 @@ class GetConversations(BaseModel):
         description="The user's MCP API key. If not provided, it will be read from the OMI_API_KEY environment variable. For more details, see https://docs.omi.me/doc/developer/MCP",
         default=None,
     )
-    start_date: Optional[str] = Field(description="Filter conversations after this date (yyyy-mm-dd)", default=None)
-    end_date: Optional[str] = Field(description="Filter conversations before this date (yyyy-mm-dd)", default=None)
-    categories: List[ConversationCategory] = Field(description="Filter by conversation categories.", default=[])
-    limit: int = Field(description="The number of conversations to retrieve.", default=100)
-    offset: int = Field(description="The offset of the conversations to retrieve.", default=0)
+    start_date: Optional[str] = Field(
+        description="Filter conversations after this date (yyyy-mm-dd)", default=None
+    )
+    end_date: Optional[str] = Field(
+        description="Filter conversations before this date (yyyy-mm-dd)", default=None
+    )
+    categories: List[ConversationCategory] = Field(
+        description="Filter by conversation categories.", default=[]
+    )
+    limit: int = Field(
+        description="The number of conversations to retrieve.", default=100
+    )
+    offset: int = Field(
+        description="The offset of the conversations to retrieve.", default=0
+    )
 
 
 class GetConversationById(BaseModel):
@@ -127,6 +159,103 @@ class GetConversationById(BaseModel):
         default=None,
     )
     conversation_id: str = Field(description="The ID of the conversation to retrieve.")
+
+
+class ListLocalSessions(BaseModel):
+    sessions_root: Optional[str] = Field(
+        description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
+        default=None,
+    )
+    limit: int = Field(
+        description="The number of local sessions to retrieve.", default=20
+    )
+    offset: int = Field(
+        description="The offset of the local sessions to retrieve.", default=0
+    )
+
+
+class GetLocalSessionTranscript(BaseModel):
+    session_id: str = Field(description="The local Cepessa session ID to retrieve.")
+    sessions_root: Optional[str] = Field(
+        description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
+        default=None,
+    )
+
+
+class SearchLocalSessionTranscripts(BaseModel):
+    query: str = Field(
+        description="Case-insensitive words to search for in local transcript text."
+    )
+    sessions_root: Optional[str] = Field(
+        description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
+        default=None,
+    )
+    limit: int = Field(
+        description="Maximum number of matching sessions to return.", default=10
+    )
+
+
+class UpdateLocalSessionTitle(BaseModel):
+    session_id: str = Field(description="The local Cepessa session ID to rename.")
+    title: str = Field(
+        description="The new title to write into the local session.json file."
+    )
+    sessions_root: Optional[str] = Field(
+        description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
+        default=None,
+    )
+
+
+class GetLocalSessionData(BaseModel):
+    session_id: str = Field(description="The local Cepessa session ID to retrieve.")
+    sessions_root: Optional[str] = Field(
+        description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
+        default=None,
+    )
+
+
+class ListLocalSessionFiles(BaseModel):
+    session_id: str = Field(description="The local Cepessa session ID to inspect.")
+    sessions_root: Optional[str] = Field(
+        description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
+        default=None,
+    )
+
+
+class UpdateLocalSessionFields(BaseModel):
+    session_id: str = Field(description="The local Cepessa session ID to update.")
+    fields: dict[str, Any] = Field(
+        description="Top-level JSON fields to merge into session.json. This enables current and future app-backed session features."
+    )
+
+
+class ListLocalClips(BaseModel):
+    clips_root: Optional[str] = Field(
+        description="Path to the Cepessa CLIPS root. Defaults to CEPESSA_CLIPS_ROOT or ~/Library/Application Support/Cepessa/Clips.",
+        default=None,
+    )
+    limit: int = Field(description="The number of local CLIPS to retrieve.", default=20)
+    offset: int = Field(description="The offset of the local CLIPS to retrieve.", default=0)
+
+
+class GetLocalClip(BaseModel):
+    clip_id: str = Field(description="The local Cepessa CLIP ID to retrieve.")
+    clips_root: Optional[str] = Field(
+        description="Path to the Cepessa CLIPS root. Defaults to CEPESSA_CLIPS_ROOT or ~/Library/Application Support/Cepessa/Clips.",
+        default=None,
+    )
+
+
+class ListLocalClipFiles(BaseModel):
+    clip_id: str = Field(description="The local Cepessa CLIP ID to inspect.")
+    clips_root: Optional[str] = Field(
+        description="Path to the Cepessa CLIPS root. Defaults to CEPESSA_CLIPS_ROOT or ~/Library/Application Support/Cepessa/Clips.",
+        default=None,
+    )
+    sessions_root: Optional[str] = Field(
+        description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
+        default=None,
+    )
 
 
 def get_memories(
@@ -198,7 +327,11 @@ def get_conversations(
     if end_date:
         try:
             # Set to end of day (23:59:59) so the entire day is included
-            params["end_date"] = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1) - timedelta(seconds=1)).isoformat()
+            params["end_date"] = (
+                datetime.strptime(end_date, "%Y-%m-%d")
+                + timedelta(days=1)
+                - timedelta(seconds=1)
+            ).isoformat()
         except ValueError:
             logger.warning(f"Could not parse end date: {end_date}")
     if categories:
@@ -219,6 +352,384 @@ def get_conversation_by_id(api_key: str, conversation_id: str) -> dict:
         headers={"Authorization": f"Bearer {api_key}"},
     )
     return response.json()
+
+
+def _local_sessions_root(sessions_root: Optional[str] = None) -> Path:
+    raw_root = sessions_root or os.getenv("CEPESSA_SESSIONS_ROOT")
+    if raw_root:
+        return Path(raw_root).expanduser()
+    return DEFAULT_CEPESSA_SESSIONS_ROOT
+
+
+def _local_clips_root(clips_root: Optional[str] = None) -> Path:
+    raw_root = clips_root or os.getenv("CEPESSA_CLIPS_ROOT")
+    if raw_root:
+        return Path(raw_root).expanduser()
+    return DEFAULT_CEPESSA_CLIPS_ROOT
+
+
+def _read_local_session(session_json_path: Path) -> dict:
+    with session_json_path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _write_local_session(session_json_path: Path, session: dict) -> None:
+    temporary_path = session_json_path.with_suffix(".json.tmp")
+    with temporary_path.open("w", encoding="utf-8") as file:
+        json.dump(session, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+    temporary_path.replace(session_json_path)
+
+
+def _local_session_paths(sessions_root: Optional[str] = None) -> list[Path]:
+    root = _local_sessions_root(sessions_root)
+    if not root.exists():
+        return []
+    return sorted(root.glob("*/session.json"))
+
+
+def _local_clip_paths(clips_root: Optional[str] = None) -> list[Path]:
+    root = _local_clips_root(clips_root)
+    if not root.exists():
+        return []
+    return sorted(root.glob("*/clip.json"))
+
+
+def _session_segments(session: dict) -> list[dict]:
+    segments = session.get("transcriptSegments")
+    if not segments:
+        segments = session.get("segments")
+    return segments if isinstance(segments, list) else []
+
+
+def _segment_line(segment: dict) -> str:
+    speaker = str(segment.get("speaker") or "Speaker").strip() or "Speaker"
+    text = str(segment.get("text") or "").strip()
+    return f"{speaker}: {text}".strip()
+
+
+def _session_started_at(session: dict) -> str:
+    return str(session.get("startedAt") or "")
+
+
+def _session_summary(session: dict, session_json_path: Path) -> dict:
+    segments = _session_segments(session)
+    preview_lines = [
+        _segment_line(segment)
+        for segment in segments
+        if str(segment.get("text") or "").strip()
+    ]
+    return {
+        "id": str(session.get("id") or session_json_path.parent.name),
+        "title": str(session.get("title") or "Untitled session"),
+        "started_at": _session_started_at(session),
+        "status": session.get("status"),
+        "transcript_segment_count": len(segments),
+        "transcript_preview": " ".join(preview_lines)[:500],
+    }
+
+
+def _clip_transcript_segments(clip: dict) -> list[dict]:
+    segments = clip.get("transcriptSegments")
+    return segments if isinstance(segments, list) else []
+
+
+def _clip_summary(clip: dict, clip_json_path: Path) -> dict:
+    segments = _clip_transcript_segments(clip)
+    preview = " ".join(
+        str(segment.get("text") or "").strip()
+        for segment in segments
+        if str(segment.get("text") or "").strip()
+    )
+    return {
+        "id": str(clip.get("id") or clip_json_path.parent.name),
+        "title": str(clip.get("title") or "Untitled CLIP"),
+        "started_at": str(clip.get("startedAt") or ""),
+        "ended_at": clip.get("endedAt"),
+        "status": clip.get("status"),
+        "intent": clip.get("intent"),
+        "transcript_segment_count": len(segments),
+        "transcript_preview": preview[:500],
+        "clip_directory": str(clip_json_path.parent),
+        "video_path": str(clip_json_path.parent / str(clip.get("videoFileName") or "clip-video.mov")),
+    }
+
+
+def list_local_sessions(
+    sessions_root: Optional[str] = None, limit: int = 20, offset: int = 0
+) -> list[dict]:
+    sessions = []
+    for session_json_path in _local_session_paths(sessions_root):
+        try:
+            session = _read_local_session(session_json_path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        sessions.append(_session_summary(session, session_json_path))
+
+    sessions.sort(key=lambda session: session.get("started_at") or "", reverse=True)
+    return sessions[max(0, offset) : max(0, offset) + max(0, limit)]
+
+
+def list_local_clips(
+    clips_root: Optional[str] = None, limit: int = 20, offset: int = 0
+) -> list[dict]:
+    clips = []
+    for clip_json_path in _local_clip_paths(clips_root):
+        try:
+            clip = _read_local_session(clip_json_path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        clips.append(_clip_summary(clip, clip_json_path))
+
+    clips.sort(key=lambda clip: clip.get("started_at") or "", reverse=True)
+    return clips[max(0, offset) : max(0, offset) + max(0, limit)]
+
+
+def _resolve_local_session_json(
+    session_id: str, sessions_root: Optional[str] = None
+) -> Path:
+    if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
+        raise ValueError("Invalid local session ID.")
+
+    session_json_path = (
+        _local_sessions_root(sessions_root) / session_id / "session.json"
+    )
+    if not session_json_path.exists():
+        raise FileNotFoundError(f"Local session not found: {session_id}")
+    return session_json_path
+
+
+def _resolve_local_clip_json(clip_id: str, clips_root: Optional[str] = None) -> Path:
+    if "/" in clip_id or "\\" in clip_id or clip_id in {"", ".", ".."}:
+        raise ValueError("Invalid local CLIP ID.")
+
+    clip_json_path = _local_clips_root(clips_root) / clip_id / "clip.json"
+    if not clip_json_path.exists():
+        raise FileNotFoundError(f"Local CLIP not found: {clip_id}")
+    return clip_json_path
+
+
+def _transcript_markdown(session: dict) -> str:
+    lines = []
+    for segment in _session_segments(session):
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        timestamp = str(segment.get("timestamp") or "").strip()
+        speaker = str(segment.get("speaker") or "Speaker").strip() or "Speaker"
+        prefix = f"[{timestamp}] " if timestamp else ""
+        lines.append(f"- {prefix}{speaker}: {text}")
+    return "\n".join(lines)
+
+
+def get_local_session_transcript(
+    session_id: str, sessions_root: Optional[str] = None
+) -> dict:
+    session_json_path = _resolve_local_session_json(session_id, sessions_root)
+    session = _read_local_session(session_json_path)
+    segments = _session_segments(session)
+    return {
+        "id": str(session.get("id") or session_json_path.parent.name),
+        "title": str(session.get("title") or "Untitled session"),
+        "started_at": _session_started_at(session),
+        "status": session.get("status"),
+        "transcript_segment_count": len(segments),
+        "transcript_markdown": _transcript_markdown(session),
+        "recap": session.get("recap"),
+        "document_markdown": session.get("documentMarkdown"),
+        "session_json_path": str(session_json_path),
+    }
+
+
+def get_local_session_data(
+    session_id: str, sessions_root: Optional[str] = None
+) -> dict:
+    session_json_path = _resolve_local_session_json(session_id, sessions_root)
+    session = _read_local_session(session_json_path)
+    return {
+        "id": str(session.get("id") or session_json_path.parent.name),
+        "session": session,
+        "session_directory": str(session_json_path.parent),
+        "session_json_path": str(session_json_path),
+    }
+
+
+def get_local_clip(clip_id: str, clips_root: Optional[str] = None) -> dict:
+    clip_json_path = _resolve_local_clip_json(clip_id, clips_root)
+    clip = _read_local_session(clip_json_path)
+    clip_directory = clip_json_path.parent
+    return {
+        "id": str(clip.get("id") or clip_json_path.parent.name),
+        "clip": clip,
+        "transcript_segments": _clip_transcript_segments(clip),
+        "post_notes": clip.get("postNotes") or "",
+        "clip_directory": str(clip_directory),
+        "clip_json_path": str(clip_json_path),
+        "video_path": str(clip_directory / str(clip.get("videoFileName") or "clip-video.mov")),
+        "audio_path": str(clip_directory / str(clip.get("audioFileName") or "clip-audio.wav")),
+        "transcript_path": str(clip_directory / str(clip.get("transcriptFileName") or "transcript.json")),
+        "notes_path": str(clip_directory / str(clip.get("notesFileName") or "notes.md")),
+    }
+
+
+def _file_inventory_entry(file_path: Path, session_directory: Path) -> dict:
+    stat = file_path.stat()
+    return {
+        "path": str(file_path),
+        "relative_path": file_path.relative_to(session_directory).as_posix(),
+        "size_bytes": stat.st_size,
+        "extension": file_path.suffix,
+    }
+
+
+def list_local_session_files(
+    session_id: str, sessions_root: Optional[str] = None
+) -> dict:
+    session_json_path = _resolve_local_session_json(session_id, sessions_root)
+    session_directory = session_json_path.parent
+    files = []
+    for file_path in sorted(session_directory.rglob("*")):
+        if file_path.is_file() and file_path.name != "session.json":
+            files.append(_file_inventory_entry(file_path, session_directory))
+    return {
+        "id": session_id,
+        "session_directory": str(session_directory),
+        "files": files,
+    }
+
+
+def list_local_clip_files(clip_id: str, clips_root: Optional[str] = None) -> dict:
+    clip_json_path = _resolve_local_clip_json(clip_id, clips_root)
+    clip_directory = clip_json_path.parent
+    files = []
+    for file_path in sorted(clip_directory.rglob("*")):
+        if file_path.is_file():
+            files.append(_file_inventory_entry(file_path, clip_directory))
+    return {
+        "id": clip_id,
+        "clip_directory": str(clip_directory),
+        "files": files,
+    }
+
+
+def _matching_snippet(text: str, query: str, radius: int = 120) -> str:
+    lower_text = text.lower()
+    lower_query = query.lower()
+    index = lower_text.find(lower_query)
+    if index < 0:
+        terms = [term for term in lower_query.split() if term]
+        indexes = [
+            lower_text.find(term) for term in terms if lower_text.find(term) >= 0
+        ]
+        index = min(indexes) if indexes else 0
+    start = max(0, index - radius)
+    end = min(len(text), index + len(query) + radius)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return f"{prefix}{text[start:end].strip()}{suffix}"
+
+
+def search_local_session_transcripts(
+    query: str,
+    sessions_root: Optional[str] = None,
+    limit: int = 10,
+) -> list[dict]:
+    normalized_query = query.strip().lower()
+    if not normalized_query:
+        return []
+
+    matches = []
+    terms = [term for term in normalized_query.split() if term]
+    for session_json_path in _local_session_paths(sessions_root):
+        try:
+            session = _read_local_session(session_json_path)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        transcript_text = "\n".join(
+            _segment_line(segment)
+            for segment in _session_segments(session)
+            if str(segment.get("text") or "").strip()
+        )
+        lower_transcript = transcript_text.lower()
+        if normalized_query not in lower_transcript and not all(
+            term in lower_transcript for term in terms
+        ):
+            continue
+
+        summary = _session_summary(session, session_json_path)
+        summary["snippet"] = _matching_snippet(transcript_text, query)
+        matches.append(summary)
+
+    matches.sort(key=lambda session: session.get("started_at") or "", reverse=True)
+    return matches[: max(0, limit)]
+
+
+def update_local_session_title(
+    session_id: str,
+    title: str,
+    sessions_root: Optional[str] = None,
+) -> dict:
+    new_title = title.strip()
+    if not new_title:
+        raise ValueError("Local session title cannot be empty.")
+
+    session_json_path = _resolve_local_session_json(session_id, sessions_root)
+    session = _read_local_session(session_json_path)
+    old_title = str(session.get("title") or "")
+    session["title"] = new_title
+    _write_local_session(session_json_path, session)
+
+    updated = _read_local_session(session_json_path)
+    summary = _session_summary(updated, session_json_path)
+    summary["old_title"] = old_title
+    summary["new_title"] = new_title
+    summary["session_json_path"] = str(session_json_path)
+    return summary
+
+
+def update_local_session_fields(
+    session_id: str,
+    fields: dict[str, Any],
+    sessions_root: Optional[str] = None,
+) -> dict:
+    if not isinstance(fields, dict) or not fields:
+        raise ValueError("fields must be a non-empty object.")
+
+    protected_fields = {"id"}
+    blocked = sorted(protected_fields.intersection(fields.keys()))
+    if blocked:
+        raise ValueError(
+            f"Cannot update protected session field(s): {', '.join(blocked)}"
+        )
+
+    session_json_path = _resolve_local_session_json(session_id, sessions_root)
+    session = _read_local_session(session_json_path)
+    for key, value in fields.items():
+        session[key] = value
+    _write_local_session(session_json_path, session)
+
+    updated = _read_local_session(session_json_path)
+    summary = _session_summary(updated, session_json_path)
+    summary["updated_fields"] = sorted(fields.keys())
+    summary["session_json_path"] = str(session_json_path)
+    return summary
+
+
+def requires_omi_api_key(tool_name: str) -> bool:
+    local_tools = {
+        OmiTools.LIST_LOCAL_SESSIONS.value,
+        OmiTools.GET_LOCAL_SESSION_TRANSCRIPT.value,
+        OmiTools.SEARCH_LOCAL_SESSION_TRANSCRIPTS.value,
+        OmiTools.UPDATE_LOCAL_SESSION_TITLE.value,
+        OmiTools.GET_LOCAL_SESSION_DATA.value,
+        OmiTools.LIST_LOCAL_SESSION_FILES.value,
+        OmiTools.UPDATE_LOCAL_SESSION_FIELDS.value,
+        OmiTools.LIST_LOCAL_CLIPS.value,
+        OmiTools.GET_LOCAL_CLIP.value,
+        OmiTools.LIST_LOCAL_CLIP_FILES.value,
+    }
+    return str(tool_name) not in local_tools
 
 
 async def serve(uid: str | None) -> None:
@@ -262,15 +773,182 @@ async def serve(uid: str | None) -> None:
                 description="Retrieve a conversation by ID including each segment of the transcript.",
                 inputSchema=GetConversationById.model_json_schema(),
             ),
+            Tool(
+                name=OmiTools.LIST_LOCAL_SESSIONS,
+                description="List local Cepessa Sessions stored on this Mac. Use this before fetching a local transcript.",
+                inputSchema=ListLocalSessions.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.GET_LOCAL_SESSION_TRANSCRIPT,
+                description="Retrieve a local Cepessa Session transcript directly from the app's session.json storage.",
+                inputSchema=GetLocalSessionTranscript.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.SEARCH_LOCAL_SESSION_TRANSCRIPTS,
+                description="Search local Cepessa Session transcripts stored on this Mac and return matching snippets.",
+                inputSchema=SearchLocalSessionTranscripts.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.UPDATE_LOCAL_SESSION_TITLE,
+                description="Rename a local Cepessa Session by writing the title field in the app's session.json storage.",
+                inputSchema=UpdateLocalSessionTitle.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.GET_LOCAL_SESSION_DATA,
+                description="Retrieve the full raw local Cepessa Session JSON, including current and future app feature fields.",
+                inputSchema=GetLocalSessionData.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.LIST_LOCAL_SESSION_FILES,
+                description="List all files inside a local Cepessa Session directory, including images, audio, exports, and future feature artifacts.",
+                inputSchema=ListLocalSessionFiles.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.UPDATE_LOCAL_SESSION_FIELDS,
+                description="Atomically merge top-level JSON fields into a local Cepessa session.json file for app-backed current and future features.",
+                inputSchema=UpdateLocalSessionFields.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.LIST_LOCAL_CLIPS,
+                description="List local Cepessa CLIPS stored on this Mac. CLIPS include screen video, transcript, and post notes.",
+                inputSchema=ListLocalClips.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.GET_LOCAL_CLIP,
+                description="Retrieve a local Cepessa CLIP bundle, including manifest JSON, transcript segments, notes, and media file paths.",
+                inputSchema=GetLocalClip.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.LIST_LOCAL_CLIP_FILES,
+                description="List every file inside a local Cepessa CLIP directory, including video, audio, transcript, and notes artifacts.",
+                inputSchema=ListLocalClipFiles.model_json_schema(),
+            ),
         ]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         logger.info(f"Calling tool: {name} with arguments: {arguments}")
 
+        if name == OmiTools.LIST_LOCAL_SESSIONS:
+            result = list_local_sessions(
+                sessions_root=arguments.get("sessions_root"),
+                limit=arguments.get("limit", 20),
+                offset=arguments.get("offset", 0),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.GET_LOCAL_SESSION_TRANSCRIPT:
+            result = get_local_session_transcript(
+                session_id=arguments["session_id"],
+                sessions_root=arguments.get("sessions_root"),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.SEARCH_LOCAL_SESSION_TRANSCRIPTS:
+            result = search_local_session_transcripts(
+                query=arguments["query"],
+                sessions_root=arguments.get("sessions_root"),
+                limit=arguments.get("limit", 10),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.UPDATE_LOCAL_SESSION_TITLE:
+            result = update_local_session_title(
+                session_id=arguments["session_id"],
+                title=arguments["title"],
+                sessions_root=arguments.get("sessions_root"),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.GET_LOCAL_SESSION_DATA:
+            result = get_local_session_data(
+                session_id=arguments["session_id"],
+                sessions_root=arguments.get("sessions_root"),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.LIST_LOCAL_SESSION_FILES:
+            result = list_local_session_files(
+                session_id=arguments["session_id"],
+                sessions_root=arguments.get("sessions_root"),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.UPDATE_LOCAL_SESSION_FIELDS:
+            result = update_local_session_fields(
+                session_id=arguments["session_id"],
+                fields=arguments["fields"],
+                sessions_root=arguments.get("sessions_root"),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.LIST_LOCAL_CLIPS:
+            result = list_local_clips(
+                clips_root=arguments.get("clips_root"),
+                limit=arguments.get("limit", 20),
+                offset=arguments.get("offset", 0),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.GET_LOCAL_CLIP:
+            result = get_local_clip(
+                clip_id=arguments["clip_id"],
+                clips_root=arguments.get("clips_root"),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.LIST_LOCAL_CLIP_FILES:
+            result = list_local_clip_files(
+                clip_id=arguments["clip_id"],
+                clips_root=arguments.get("clips_root"),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
         api_key = arguments.get("api_key") or os.getenv("OMI_API_KEY")
         if not api_key:
-            raise ValueError("API key not provided and OMI_API_KEY environment variable not set.")
+            raise ValueError(
+                "API key not provided and OMI_API_KEY environment variable not set."
+            )
 
         if name == OmiTools.GET_MEMORIES:
             # return [TextContent(type="text", text=json.dumps(arguments, indent=2))]
@@ -327,7 +1005,9 @@ async def serve(uid: str | None) -> None:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == OmiTools.GET_CONVERSATION_BY_ID:
-            result = get_conversation_by_id(api_key, conversation_id=arguments["conversation_id"])
+            result = get_conversation_by_id(
+                api_key, conversation_id=arguments["conversation_id"]
+            )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         raise ValueError(f"Unknown tool: {name}")

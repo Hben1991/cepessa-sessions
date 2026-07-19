@@ -85,10 +85,13 @@ class AudioCaptureService: @unchecked Sendable {
     private var smoothedLevel: Float = 0.0
     private let noiseFloor: Float = 0.005  // Very low threshold for preamp noise
     private let decayRate: Float = 0.85    // Decay multiplier per frame (lower = faster decay)
+    private let audioLevelDispatchInterval: CFTimeInterval = 1.0 / 15.0
+    private var lastAudioLevelDispatchTime: CFAbsoluteTime = 0
+    private var lastDispatchedAudioLevel: Float = 0
 
     // Device change handling
     private var isReconfiguring = false
-    private let listenerQueue = DispatchQueue(label: "com.omi.audiocapture.listener")
+    private let listenerQueue = DispatchQueue(label: "me.cepessa.audiocapture.listener")
 
     // Silent-mic watchdog state — tracks peak amplitude within a ~1 second window
     // so we can detect a Bluetooth mic that's alive-but-silent (A2DP profile conflict).
@@ -97,7 +100,7 @@ class AudioCaptureService: @unchecked Sendable {
 
     /// Dedicated queue for CoreAudio device operations (start/stop/reconfigure)
     /// to avoid blocking the main thread on AudioDeviceStart/Stop calls.
-    private let audioQueue = DispatchQueue(label: "com.omi.audiocapture.device")
+    private let audioQueue = DispatchQueue(label: "me.cepessa.audiocapture.device")
 
     // MARK: - Public Methods
 
@@ -138,12 +141,14 @@ class AudioCaptureService: @unchecked Sendable {
     ///   - onAudioLevel: Optional callback receiving normalized audio level (0.0 - 1.0)
     func startCapture(onAudioChunk: @escaping AudioChunkHandler, onAudioLevel: AudioLevelHandler? = nil) async throws {
         guard !isCapturing else {
-            log("AudioCapture: Already capturing")
+            localMeetingLog("AudioCapture: Already capturing")
             return
         }
 
         self.onAudioChunk = onAudioChunk
         self.onAudioLevel = onAudioLevel
+        self.lastAudioLevelDispatchTime = 0
+        self.lastDispatchedAudioLevel = 0
 
         // All CoreAudio HAL calls (AudioObjectGetPropertyData, AudioDeviceStart, etc.) are
         // synchronous IPC to coreaudiod via mach_msg. After wake from sleep the daemon can
@@ -172,7 +177,7 @@ class AudioCaptureService: @unchecked Sendable {
 
         if let override = overrideDeviceID {
             inputDeviceID = override
-            log("AudioCapture: Using override device ID \(override)")
+            localMeetingLog("AudioCapture: Using override device ID \(override)")
         } else {
             var size = UInt32(MemoryLayout<AudioDeviceID>.size)
             var address = AudioObjectPropertyAddress(
@@ -202,7 +207,7 @@ class AudioCaptureService: @unchecked Sendable {
         }
 
         detectedSampleRate = streamFormat.mSampleRate
-        log("AudioCapture: Hardware format - \(streamFormat.mSampleRate)Hz, \(streamFormat.mChannelsPerFrame) channels")
+        localMeetingLog("AudioCapture: Hardware format - \(streamFormat.mSampleRate)Hz, \(streamFormat.mChannelsPerFrame) channels")
 
         // 3. Create mono input format (we mix to mono before conversion)
         guard let inputFmt = AVAudioFormat(
@@ -221,7 +226,7 @@ class AudioCaptureService: @unchecked Sendable {
         }
         self.targetFormat = targetFmt
 
-        log("AudioCapture: Target format - \(targetFmt.sampleRate)Hz, \(targetFmt.channelCount) channels, Float32")
+        localMeetingLog("AudioCapture: Target format - \(targetFmt.sampleRate)Hz, \(targetFmt.channelCount) channels, Float32")
 
         // 5. Create audio converter for resampling
         guard let converter = AVAudioConverter(from: inputFmt, to: targetFmt) else {
@@ -256,7 +261,7 @@ class AudioCaptureService: @unchecked Sendable {
         }
 
         isCapturing = true
-        log("AudioCapture: Started capturing")
+        localMeetingLog("AudioCapture: Started capturing")
 
         // 8. Install property listeners for device changes
         installPropertyListeners()
@@ -280,22 +285,31 @@ class AudioCaptureService: @unchecked Sendable {
         onAudioChunk = nil
         onAudioLevel = nil
 
-        // Clean up converter
-        audioConverter = nil
-        inputFormat = nil
-        targetFormat = nil
-        detectedSampleRate = 0.0
         smoothedLevel = 0.0
+        lastAudioLevelDispatchTime = 0
+        lastDispatchedAudioLevel = 0
 
         // AudioDeviceStop can block waiting for the IO thread — run off main thread
         if let procID = procID, devID != kAudioObjectUnknown {
-            audioQueue.async {
+            audioQueue.async { [self] in
                 AudioDeviceStop(devID, procID)
                 AudioDeviceDestroyIOProcID(devID, procID)
+
+                // CoreAudio can still deliver an IO callback while AudioDeviceStop is
+                // in flight, so only clear the conversion state after the IOProc is done.
+                self.audioConverter = nil
+                self.inputFormat = nil
+                self.targetFormat = nil
+                self.detectedSampleRate = 0.0
             }
+        } else {
+            audioConverter = nil
+            inputFormat = nil
+            targetFormat = nil
+            detectedSampleRate = 0.0
         }
 
-        log("AudioCapture: Stopped capturing")
+        localMeetingLog("AudioCapture: Stopped capturing")
     }
 
     /// Check if currently capturing
@@ -372,6 +386,25 @@ class AudioCaptureService: @unchecked Sendable {
         return status == noErr ? format : nil
     }
 
+    static func outputFrameCapacity(
+        inputFrameCount: UInt32,
+        sourceSampleRate: Double,
+        targetSampleRate: Double
+    ) -> AVAudioFrameCount? {
+        guard inputFrameCount > 0,
+              sourceSampleRate.isFinite,
+              sourceSampleRate > 0,
+              targetSampleRate.isFinite,
+              targetSampleRate > 0 else { return nil }
+
+        let convertedFrameCount = ceil(Double(inputFrameCount) * targetSampleRate / sourceSampleRate)
+        guard convertedFrameCount.isFinite,
+              convertedFrameCount > 0,
+              convertedFrameCount <= Double(UInt32.max) else { return nil }
+
+        return AVAudioFrameCount(convertedFrameCount)
+    }
+
     /// Handle incoming audio data from the IOProc callback
     private func handleAudioInput(_ inputData: UnsafePointer<AudioBufferList>?, timestamp: UnsafePointer<AudioTimeStamp>?) {
         guard isCapturing,
@@ -409,7 +442,13 @@ class AudioCaptureService: @unchecked Sendable {
         }
 
         // Convert to target format (16kHz mono)
-        let outputFrameCapacity = AVAudioFrameCount(ceil(Double(frameCount) * targetSampleRate / detectedSampleRate))
+        guard
+            let outputFrameCapacity = Self.outputFrameCapacity(
+                inputFrameCount: frameCount,
+                sourceSampleRate: detectedSampleRate,
+                targetSampleRate: targetSampleRate
+            )
+        else { return }
         guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFmt, frameCapacity: outputFrameCapacity) else { return }
 
         var error: NSError?
@@ -428,7 +467,7 @@ class AudioCaptureService: @unchecked Sendable {
         converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
 
         if let error = error {
-            logError("AudioCapture: Conversion error", error: error)
+            localMeetingLogError("AudioCapture: Conversion error", error: error)
             return
         }
 
@@ -475,7 +514,7 @@ class AudioCaptureService: @unchecked Sendable {
                 if consecutiveSilentWindows >= silentMicWindowThreshold,
                    Self.isBluetoothTransport(deviceID: deviceID) {
                     silentMicDetectedFired = true
-                    log("AudioCapture: Bluetooth mic returning silence for \(consecutiveSilentWindows)s — falling back to built-in mic")
+                    localMeetingLog("AudioCapture: Bluetooth mic returning silence for \(consecutiveSilentWindows)s — falling back to built-in mic")
                     let handler = onSilentMicDetected
                     DispatchQueue.main.async { handler?() }
                 }
@@ -511,13 +550,31 @@ class AudioCaptureService: @unchecked Sendable {
             }
 
             let level = min(Float(1.0), smoothedLevel)
-            DispatchQueue.main.async {
-                levelHandler(level)
+            if shouldDispatchAudioLevel(level) {
+                DispatchQueue.main.async {
+                    levelHandler(level)
+                }
             }
         }
 
         // Send to callback
         onAudioChunk?(byteData)
+    }
+
+    private func shouldDispatchAudioLevel(_ level: Float) -> Bool {
+        let now = CFAbsoluteTimeGetCurrent()
+        let isFirstDispatch = lastAudioLevelDispatchTime == 0
+        let didReachInterval = now - lastAudioLevelDispatchTime >= audioLevelDispatchInterval
+        let didStartFromSilence = lastDispatchedAudioLevel == 0 && level > 0.05
+        let didReturnToSilence = lastDispatchedAudioLevel > 0 && level == 0
+
+        guard isFirstDispatch || didReachInterval || didStartFromSilence || didReturnToSilence else {
+            return false
+        }
+
+        lastAudioLevelDispatchTime = now
+        lastDispatchedAudioLevel = level
+        return true
     }
 
     // MARK: - Property Listeners
@@ -610,7 +667,7 @@ class AudioCaptureService: @unchecked Sendable {
         guard isCapturing, !isReconfiguring else { return }
         isReconfiguring = true
 
-        log("AudioCapture: Configuration changed, restarting with new device...")
+        localMeetingLog("AudioCapture: Configuration changed, restarting with new device...")
 
         // Stop IOProc on old device
         if let procID = ioProcID, deviceID != kAudioObjectUnknown {
@@ -663,7 +720,7 @@ class AudioCaptureService: @unchecked Sendable {
         )
 
         guard status == noErr, newDeviceID != kAudioObjectUnknown else {
-            log("AudioCapture: No valid input device after config change (attempt \(retryCount + 1))")
+            localMeetingLog("AudioCapture: No valid input device after config change (attempt \(retryCount + 1))")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
@@ -672,19 +729,19 @@ class AudioCaptureService: @unchecked Sendable {
 
         // Get new format
         guard let streamFormat = getStreamFormat(for: deviceID) else {
-            log("AudioCapture: Failed to get stream format (attempt \(retryCount + 1))")
+            localMeetingLog("AudioCapture: Failed to get stream format (attempt \(retryCount + 1))")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
 
         guard streamFormat.mSampleRate > 0, streamFormat.mChannelsPerFrame > 0 else {
-            log("AudioCapture: No valid format after config change (attempt \(retryCount + 1))")
+            localMeetingLog("AudioCapture: No valid format after config change (attempt \(retryCount + 1))")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
 
         detectedSampleRate = streamFormat.mSampleRate
-        log("AudioCapture: New hardware format - \(streamFormat.mSampleRate)Hz, \(streamFormat.mChannelsPerFrame) channels (attempt \(retryCount + 1))")
+        localMeetingLog("AudioCapture: New hardware format - \(streamFormat.mSampleRate)Hz, \(streamFormat.mChannelsPerFrame) channels (attempt \(retryCount + 1))")
 
         // Recreate input format and converter
         guard let inputFmt = AVAudioFormat(
@@ -693,7 +750,7 @@ class AudioCaptureService: @unchecked Sendable {
             channels: 1,
             interleaved: false
         ) else {
-            logError("AudioCapture: Failed to create input format")
+            localMeetingLogError("AudioCapture: Failed to create input format")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
@@ -701,7 +758,7 @@ class AudioCaptureService: @unchecked Sendable {
 
         guard let targetFmt = targetFormat,
               let newConverter = AVAudioConverter(from: inputFmt, to: targetFmt) else {
-            logError("AudioCapture: Failed to create converter for new format")
+            localMeetingLogError("AudioCapture: Failed to create converter for new format")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
@@ -715,7 +772,7 @@ class AudioCaptureService: @unchecked Sendable {
         }
 
         guard ioProcStatus == noErr, let validProcID = procID else {
-            logError("AudioCapture: Failed to create IOProc: \(ioProcStatus) (attempt \(retryCount + 1))")
+            localMeetingLogError("AudioCapture: Failed to create IOProc: \(ioProcStatus) (attempt \(retryCount + 1))")
             retryOrGiveUp(retryCount: retryCount)
             return
         }
@@ -724,7 +781,7 @@ class AudioCaptureService: @unchecked Sendable {
         // Start device
         let startStatus = AudioDeviceStart(deviceID, validProcID)
         guard startStatus == noErr else {
-            logError("AudioCapture: Failed to start device: \(startStatus) (attempt \(retryCount + 1))")
+            localMeetingLogError("AudioCapture: Failed to start device: \(startStatus) (attempt \(retryCount + 1))")
             AudioDeviceDestroyIOProcID(deviceID, validProcID)
             self.ioProcID = nil
             retryOrGiveUp(retryCount: retryCount)
@@ -752,19 +809,19 @@ class AudioCaptureService: @unchecked Sendable {
             formatBlock
         )
 
-        log("AudioCapture: Restarted with new configuration")
+        localMeetingLog("AudioCapture: Restarted with new configuration")
         isReconfiguring = false
     }
 
     private func retryOrGiveUp(retryCount: Int) {
         if retryCount < Self.maxRetries {
             let delay = Double(retryCount + 1) * 1.0  // 1s, 2s, 3s backoff
-            log("AudioCapture: Retrying in \(delay)s...")
+            localMeetingLog("AudioCapture: Retrying in \(delay)s...")
             audioQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.reconfigureAfterChange(retryCount: retryCount + 1)
             }
         } else {
-            logError("AudioCapture: Giving up after \(retryCount + 1) attempts")
+            localMeetingLogError("AudioCapture: Giving up after \(retryCount + 1) attempts")
             isReconfiguring = false
         }
     }

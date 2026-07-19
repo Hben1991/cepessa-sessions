@@ -22,29 +22,29 @@ export function FeaturedPluginCard({ plugin, hideStats }: FeaturedPluginCardProp
   return (
     <Link
       href={`/apps/${plugin.id}`}
-      className="group relative block h-full overflow-hidden rounded-xl bg-[#1A1F2E]"
+      className="market-card-hover group relative block h-full overflow-hidden rounded-[1.7rem] border border-[rgba(248,244,234,0.08)] bg-[rgba(27,25,20,0.72)]"
       data-plugin-card
       data-search-content={`${plugin.name} ${plugin.author} ${plugin.description}`}
       data-categories={plugin.category}
       data-capabilities={Array.from(plugin.capabilities).join(' ')}
     >
       {/* Image */}
-      <div className="aspect-[16/9] w-full overflow-hidden">
+      <div className="aspect-[16/9] w-full overflow-hidden border-b border-[rgba(248,244,234,0.08)]">
         <Image
           src={plugin.image || 'https://via.placeholder.com/400x225'}
           alt={plugin.name}
           width={400}
           height={225}
-          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+          className="h-full w-full object-cover saturate-[0.85] transition-transform duration-500 group-hover:scale-105"
           priority
         />
       </div>
 
       {/* Content */}
-      <div className="flex h-[9.5rem] flex-col gap-1.5 p-3 sm:h-[10.5rem] sm:gap-2 sm:p-4">
+      <div className="flex h-[9.5rem] flex-col gap-1.5 p-3 sm:h-[10.5rem] sm:gap-2 sm:p-5">
         {/* Title and NEW badge */}
         <div className="flex items-center gap-2">
-          <h3 className="line-clamp-1 flex-1 text-base font-medium text-white sm:text-lg">
+          <h3 className="line-clamp-1 flex-1 text-base font-semibold tracking-[-0.025em] text-[var(--market-ink)] sm:text-lg">
             {plugin.name}
           </h3>
           <NewBadge plugin={plugin} />
@@ -52,11 +52,11 @@ export function FeaturedPluginCard({ plugin, hideStats }: FeaturedPluginCardProp
 
         {/* Author Row */}
         <div className="flex items-center justify-between gap-2">
-          <span className="truncate text-xs text-gray-400 sm:text-sm">
+          <span className="truncate text-xs text-[var(--market-muted)] sm:text-sm">
             by {plugin.author}
           </span>
           {!hideStats && (
-            <div className="flex shrink-0 items-center gap-3 text-xs text-gray-400 sm:gap-4 sm:text-sm">
+            <div className="flex shrink-0 items-center gap-3 text-[0.72rem] font-medium text-[var(--market-muted)] sm:gap-4 sm:text-sm">
               <div className="flex items-center">
                 <Star className="mr-1 h-3.5 w-3.5 sm:h-4 sm:w-4" />
                 <span>{plugin.rating_avg?.toFixed(1) || '0.0'}</span>
@@ -70,7 +70,7 @@ export function FeaturedPluginCard({ plugin, hideStats }: FeaturedPluginCardProp
         </div>
 
         {/* Description */}
-        <p className="mt-auto line-clamp-2 text-xs text-gray-400 sm:text-sm">
+        <p className="mt-auto line-clamp-2 text-xs leading-5 text-[var(--market-muted)] transition-colors group-hover:text-[#d8d0c1] sm:text-sm">
           {plugin.description}
         </p>
       </div>

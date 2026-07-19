@@ -1,5 +1,5 @@
 """
-Local auth backend for OMI Computer macOS app.
+Local auth backend for the Cepessa Sessions macOS app.
 This fixes the hardcoded redirect_uri issue in the production backend.
 """
 import os
@@ -22,7 +22,7 @@ import pathlib
 # Load environment variables
 load_dotenv()
 
-app = FastAPI(title="OMI Computer Auth Backend")
+app = FastAPI(title="Cepessa Sessions Auth Backend")
 
 # Set up Jinja2 templates
 templates_path = pathlib.Path(__file__).parent / "templates"
@@ -154,7 +154,7 @@ async def auth_callback_apple_post(
             "request": request,
             "code": auth_code,
             "state": session_data.get('state') or '',
-            "redirect_uri": session_data.get('redirect_uri', 'omi-computer://auth/callback'),
+            "redirect_uri": session_data.get('redirect_uri', 'cepessa-sessions://auth/callback'),
         },
     )
 
@@ -191,7 +191,7 @@ async def auth_callback_google(
             "request": request,
             "code": auth_code,
             "state": session_data.get('state') or '',
-            "redirect_uri": session_data.get('redirect_uri', 'omi-computer://auth/callback'),
+            "redirect_uri": session_data.get('redirect_uri', 'cepessa-sessions://auth/callback'),
         },
     )
 

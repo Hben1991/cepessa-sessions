@@ -5,11 +5,11 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Cepessa Sessions</string>
+    <string>Sessions</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIconFile</key>
-    <string>OmiIcon</string>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -25,7 +25,7 @@
     <key>LSMinimumSystemVersion</key>
     <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
     <key>LSUIElement</key>
-    <false/>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAppTransportSecurity</key>
@@ -34,36 +34,14 @@
         <true/>
     </dict>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Cepessa Sessions needs screen recording permission so you can attach screenshots and screen regions to a session.</string>
+    <string>Sessions needs screen recording permission so you can attach screenshots and screen regions to a session.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>Cepessa Sessions needs Apple Events permission to inspect related apps while a session is running.</string>
+    <string>Sessions needs Apple Events permission to inspect related apps while a session is running.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Cepessa Sessions needs microphone access to record and transcribe your voice during a session.</string>
+    <string>Sessions needs microphone access to record and transcribe your voice during a session.</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>Cepessa Sessions needs permission to capture system audio for local session transcription.</string>
-    <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>Cepessa Sessions needs Bluetooth access when you choose a wireless audio device for capture.</string>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>Cepessa Sessions Callback</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>omi-computer-dev</string>
-            </array>
-        </dict>
-    </array>
-    <!-- Sparkle Auto-Update Configuration -->
-    <key>SUFeedURL</key>
-    <string>https://api.omi.me/v2/desktop/appcast.xml</string>
-    <key>SUPublicEDKey</key>
-    <string>vWleho4gIOl932wM4v9Gz+FTCt90+vUVdPHsRReFX40=</string>
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
-    <key>SUAutomaticallyUpdate</key>
-    <false/>
-    <key>SUScheduledCheckInterval</key>
-    <integer>600</integer>
+    <string>Sessions needs permission to capture system audio for local session transcription.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Sessions needs Bluetooth access when you choose a wireless audio device for capture.</string>
 </dict>
 </plist>

@@ -13,8 +13,8 @@ These rules apply to Codex when working in this repository.
 
 ## Safety Rules
 
-- Never kill, stop, or restart the production macOS app (`/Applications/omi.app`, bundle id `com.omi.computer-macos`) during local development or testing.
-- Development scripts/commands must target only dev app processes (for example `Omi Dev.app` / `com.omi.desktop-dev`), never production.
+- Never kill, stop, or restart the production macOS app during local development or testing.
+- Development scripts/commands must target only dev app processes, never production.
 
 ## Coding Guidelines
 
@@ -56,7 +56,7 @@ Helm charts: `backend/charts/{backend-listen,pusher,diarizer,vad,deepgram-self-h
 
 - **backend** (`main.py`) — REST API. Streams audio to pusher via WebSocket (`utils/pusher.py`). Calls diarizer for speaker embeddings (`utils/stt/speaker_embedding.py`). Calls vad for voice activity detection and speaker identification (`utils/stt/vad.py`, `utils/stt/speech_profile.py`). Calls deepgram for STT (`utils/stt/streaming.py`).
 - **pusher** (`pusher/main.py`) — Receives audio via binary WebSocket protocol. Calls diarizer and deepgram for speaker sample extraction (`utils/speaker_identification.py` → `utils/speaker_sample.py`).
-- **agent-proxy** (`agent-proxy/main.py`) — GKE. WebSocket proxy at `wss://agent.omi.me/v1/agent/ws`. Validates Firebase ID token, looks up `agentVm` in Firestore, proxies bidirectionally to VM's `ws://<ip>:8080/ws`. VM credentials never leave the server.
+- **agent-proxy** (`agent-proxy/main.py`) — GKE. WebSocket proxy for remote agent sessions. Validates Firebase ID token, looks up `agentVm` in Firestore, proxies bidirectionally to VM's `ws://<ip>:8080/ws`. VM credentials never leave the server.
 - **diarizer** (`diarizer/main.py`) — GPU. Speaker embeddings at `/v2/embedding`. Called by backend and pusher (`HOSTED_SPEAKER_EMBEDDING_API_URL`).
 - **vad** (`modal/main.py`) — GPU. `/v1/vad` (voice activity detection) and `/v1/speaker-identification` (speaker matching). Called by backend only (`HOSTED_VAD_API_URL`, `HOSTED_SPEECH_PROFILE_API_URL`).
 - **deepgram** — STT. Streaming uses self-hosted (`DEEPGRAM_SELF_HOSTED_URL`) or cloud based on `DEEPGRAM_SELF_HOSTED_ENABLED` (`utils/stt/streaming.py`). Pre-recorded always uses Deepgram cloud (`utils/stt/pre_recorded.py`). Called by backend and pusher.
@@ -69,7 +69,7 @@ If a PR changes how audio streaming, transcription, conversation lifecycle, spea
 ### App (Flutter)
 
 - All user-facing strings must use l10n (`context.l10n.keyName`). Add keys to ARB files using `jq` to avoid reading large files.
-- When adding new l10n keys, translate all 33 non-English locales — never leave English text in non-English ARB files. Use `omi-add-missing-language-keys-l10n` skill for translations. Ensure `{parameter}` placeholders match the English ARB exactly.
+- When adding new l10n keys, translate all 33 non-English locales — never leave English text in non-English ARB files. Ensure `{parameter}` placeholders match the English ARB exactly.
 - After modifying ARB files in `app/lib/l10n/`, regenerate localizations: `cd app && flutter gen-l10n`
 
 #### Verifying UI Changes (agent-flutter)
@@ -102,7 +102,7 @@ Requires: Accessibility permission for Terminal.app (System Settings → Privacy
 
 Edit → Verify → Evidence loop:
 1. Edit code, rebuild: `cd desktop && ./run.sh`
-2. Connect: `agent-swift connect --bundle-id com.omi.desktop-dev`
+2. Connect: `agent-swift connect --bundle-id me.cepessa.sessions.local`
 3. Verify: `agent-swift snapshot -i` (interactive elements only)
 4. Interact: `agent-swift click @e3` / `fill @e5 "text"` / `find role button click`
 5. Assert: `agent-swift is exists @e3` / `wait text "Settings"`
@@ -117,8 +117,8 @@ Key rules:
 - JSON output: `--json` flag, `AGENT_SWIFT_JSON=1` env var, or pipe to auto-detect.
 - 15 commands: `doctor`, `connect`, `disconnect`, `status`, `snapshot`, `press`, `click`, `fill`, `get`, `find`, `screenshot`, `is`, `wait`, `scroll`, `schema`.
 - Works with any macOS app (SwiftUI, AppKit, Electron) — zero app-side setup.
-- Dev bundle ID: `com.omi.desktop-dev`. Prod: `com.omi.computer-macos`.
-- If you launch a custom-named desktop test build, keep the bundle suffix and app name identical so auth callbacks reopen the correct app. Example: `1233.app` should use `com.omi.1233`, `search.app` should use `com.omi.search`, and mismatches like `1233.app` with `com.omi.desktop-dev` are not allowed.
+- Dev bundle ID: `me.cepessa.sessions.local`. Keep production and custom test bundle IDs aligned with the installed app name.
+- If you launch a custom-named desktop test build, keep the bundle suffix and app name identical so auth callbacks reopen the correct app.
 - App flows & exploration skill: See `desktop/e2e/SKILL.md` for navigation architecture, interaction patterns, and reference flows.
 - Full command reference: `agent-swift --help` or `agent-swift schema`.
 - When asked to build or rebuild the desktop app for testing, don't stop at a successful compile: launch the dev app, interact with it programmatically to confirm it actually runs, and report any environment blocker if full interaction is impossible.
@@ -130,7 +130,7 @@ Always format code after making changes. The pre-commit hook handles this automa
 - **Dart (app/)**: `dart format --line-length 120 <files>`
   - Files ending in `.gen.dart` or `.g.dart` are auto-generated and should not be formatted manually.
 - **Python (backend/)**: `black --line-length 120 --skip-string-normalization <files>`
-- **C/C++ (firmware: omi/, omiGlass/)**: `clang-format -i <files>`
+- **C/C++ (firmware directories)**: `clang-format -i <files>`
 
 ## Git
 

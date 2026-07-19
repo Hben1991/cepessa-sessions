@@ -89,7 +89,7 @@ export default async function AppsPage() {
   const { plugins, stats } = await getPluginsData();
 
   return (
-    <main className="min-h-screen bg-[#0B0F17]">
+    <main className="market-shell min-h-screen">
       <div className="relative">
         <AppList initialPlugins={plugins} initialStats={stats} />
         <ProductBanner variant="floating" />

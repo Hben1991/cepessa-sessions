@@ -269,7 +269,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
     // Navigate uri
     Uri? navigateToUri;
-    var pageAlias = "home";
+    var pageAlias = "hearth";
     var homePageIdx = 0;
     String? detailPageId;
 
@@ -285,6 +285,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       }
 
       switch (pageAlias) {
+        case "home":
+        case "hearth":
+          homePageIdx = 0;
+          break;
         case "action-items":
           homePageIdx = 1;
           break;
@@ -835,8 +839,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                           color: isSyncing
                               ? Colors.deepPurple.withValues(alpha: 0.2)
                               : hasPendingOnDevice
-                              ? Colors.orange.withValues(alpha: 0.15)
-                              : const Color(0xFF1F1F25),
+                                  ? Colors.orange.withValues(alpha: 0.15)
+                                  : const Color(0xFF1F1F25),
                           shape: BoxShape.circle,
                         ),
                         child: Icon(
@@ -845,8 +849,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                           color: isSyncing
                               ? Colors.deepPurpleAccent
                               : hasPendingOnDevice
-                              ? Colors.orangeAccent
-                              : Colors.white70,
+                                  ? Colors.orangeAccent
+                                  : Colors.white70,
                         ),
                       ),
                     );

@@ -1,75 +1,2342 @@
 import Foundation
 import XCTest
-@testable import Omi_Computer
+
+@testable import CepessaSessions
 
 final class LocalMeetingRecapGeneratorTests: XCTestCase {
-    func testDefaultLLMClientFallsBackToLocalGemma4Ollama() {
-        let client = LocalSessionRecapGenerator.defaultLLMClient(environment: [:])
-        let ollamaClient = client as? LocalSessionOllamaRecapClient
+  func testDefaultModelClientFallsBackToLocalModel() {
+    let client = LocalSessionRecapGenerator.defaultModelClient()
 
-        XCTAssertEqual(ollamaClient?.baseURL.absoluteString, "http://127.0.0.1:11434")
-        XCTAssertEqual(ollamaClient?.model, "gemma4:e4b")
-    }
+    XCTAssertNotNil(client as? LocalSessionEmbeddedRecapClient)
+  }
 
-    func testDefaultLLMClientHonorsEnvironmentOverrides() {
-        let client = LocalSessionRecapGenerator.defaultLLMClient(
-            environment: [
-                "CEPESSA_OLLAMA_BASE_URL": "http://localhost:22434",
-                "CEPESSA_OLLAMA_MODEL": "custom-gemma"
-            ]
+  func testEmbeddedLocalModelTimeoutScalesWithDocumentPromptSize() {
+    let shortTimeout = EmbeddedLocalLanguageModel.timeoutSeconds(
+      prompt: "Return JSON.",
+      maxTokens: 32
+    )
+    let longTimeout = EmbeddedLocalLanguageModel.timeoutSeconds(
+      prompt: String(repeating: "Detailed document context. ", count: 1_600),
+      maxTokens: 900
+    )
+
+    XCTAssertGreaterThanOrEqual(shortTimeout, 30)
+    XCTAssertGreaterThan(longTimeout, shortTimeout)
+    XCTAssertLessThanOrEqual(longTimeout, 90)
+  }
+
+  func testEmbeddedLocalModelFindsModelInsideSwiftPMResourceBundleDirectory() throws {
+    let fileManager = FileManager.default
+    let rootURL = fileManager.temporaryDirectory
+      .appendingPathComponent("CepessaEmbeddedModelTests", isDirectory: true)
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let resourceBundleURL =
+      rootURL
+      .appendingPathComponent("CepessaSessions_CepessaSessions.bundle", isDirectory: true)
+    let modelsURL = resourceBundleURL.appendingPathComponent("Models", isDirectory: true)
+    try fileManager.createDirectory(at: modelsURL, withIntermediateDirectories: true)
+    let modelURL = modelsURL.appendingPathComponent("cepessa-local-model.gguf")
+    try Data("model".utf8).write(to: modelURL)
+    defer { try? fileManager.removeItem(at: rootURL) }
+
+    let foundURL = EmbeddedLocalLanguageModelConfiguration.bundledModelURL(
+      inResourceDirectories: [rootURL, resourceBundleURL],
+      fileManager: fileManager
+    )
+
+    XCTAssertEqual(foundURL?.standardizedFileURL, modelURL.standardizedFileURL)
+  }
+
+  func testDeterministicGeneratorBuildsStructuredSections() async {
+    let generator = LocalSessionRecapGenerator(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 1_700_000)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "C15A3F3F-208F-4B16-BB45-5E48F85A1A77")!,
+      title: "Roadmap review",
+      startedAt: startedAt,
+      status: .transcribing,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "2A8B6BE2-D36F-4D71-B0CB-0624CEB1A1A4")!,
+          speaker: "Dana",
+          text:
+            "We decided to move the launch to next Thursday and I will send the updated plan tomorrow.",
+          timestamp: startedAt.addingTimeInterval(12)
+        ),
+        .init(
+          id: UUID(uuidString: "B2049D1F-C9EC-4A48-A213-0BB9AAFE7A02")!,
+          speaker: "Noam",
+          text:
+            "The open question is whether support can review the migration checklist by Monday?",
+          timestamp: startedAt.addingTimeInterval(48)
+        ),
+      ],
+      attachments: [
+        .init(
+          id: UUID(uuidString: "E9C75C6E-B804-4893-80DF-C0BE9B6E8C97")!,
+          kind: .image,
+          source: .floatingBar,
+          title: "Launch checklist",
+          timestamp: startedAt.addingTimeInterval(30),
+          sessionOffset: 30,
+          fileName: "checklist.png",
+          mimeType: "image/png",
+          urlString: "/tmp/checklist.png",
+          note: nil
         )
-        let ollamaClient = client as? LocalSessionOllamaRecapClient
+      ],
+      captureArtifacts: [],
+      audioArtifacts: .empty
+    )
 
-        XCTAssertEqual(ollamaClient?.baseURL.absoluteString, "http://localhost:22434")
-        XCTAssertEqual(ollamaClient?.model, "custom-gemma")
-    }
+    let recap = await generator.generateRecap(for: session)
 
-    func testDeterministicGeneratorBuildsStructuredSections() async {
-        let generator = LocalSessionRecapGenerator(llmClient: nil)
-        let startedAt = Date(timeIntervalSince1970: 1_700_000)
-        let session = LocalMeetingSession(
-            id: UUID(uuidString: "C15A3F3F-208F-4B16-BB45-5E48F85A1A77")!,
-            title: "Roadmap review",
-            startedAt: startedAt,
-            status: .transcribing,
-            transcriptSegments: [
-                .init(
-                    id: UUID(uuidString: "2A8B6BE2-D36F-4D71-B0CB-0624CEB1A1A4")!,
-                    speaker: "Dana",
-                    text: "We decided to move the launch to next Thursday and I will send the updated plan tomorrow.",
-                    timestamp: startedAt.addingTimeInterval(12)
-                ),
-                .init(
-                    id: UUID(uuidString: "B2049D1F-C9EC-4A48-A213-0BB9AAFE7A02")!,
-                    speaker: "Noam",
-                    text: "The open question is whether support can review the migration checklist by Monday?",
-                    timestamp: startedAt.addingTimeInterval(48)
-                )
-            ],
-            attachments: [
-                .init(
-                    id: UUID(uuidString: "E9C75C6E-B804-4893-80DF-C0BE9B6E8C97")!,
-                    kind: .image,
-                    source: .floatingBar,
-                    title: "Launch checklist",
-                    timestamp: startedAt.addingTimeInterval(30),
-                    sessionOffset: 30,
-                    fileName: "checklist.png",
-                    mimeType: "image/png",
-                    urlString: "/tmp/checklist.png",
-                    note: nil
-                )
-            ],
-            captureArtifacts: [],
-            audioArtifacts: .empty
+    XCTAssertFalse(recap.overview.isEmpty)
+    XCTAssertGreaterThanOrEqual(recap.sections.count, 4)
+    XCTAssertTrue(recap.sections.contains(where: { $0.kind == .decisions && !$0.bullets.isEmpty }))
+    XCTAssertTrue(recap.sections.contains(where: { $0.kind == .actionItem && !$0.bullets.isEmpty }))
+    XCTAssertTrue(
+      recap.sections.contains(where: { $0.kind == .openQuestions && !$0.bullets.isEmpty }))
+  }
+
+  func testDeterministicGeneratorBuildsConcreteHebrewFallbackBrief() async {
+    let generator = LocalSessionRecapGenerator(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 1_700_500)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "1F0B0C20-C0DD-488B-A4E7-907B649AE8C4")!,
+      title: "Hebrew product review",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "11DFA809-5614-4F48-A1B1-310BD11FEB75")!,
+          speaker: "Remote speaker",
+          text: "אוקיי.",
+          timestamp: startedAt
+        ),
+        .init(
+          id: UUID(uuidString: "AC787A31-B79E-47B1-9E28-0C40F4793126")!,
+          speaker: "Remote speaker",
+          text: "הגלילה באתר זזה לאט וקופצת, וזה פוגע בחוויית המשתמש.",
+          timestamp: startedAt.addingTimeInterval(30)
+        ),
+        .init(
+          id: UUID(uuidString: "8D016790-D657-473D-9B25-13E5D3DA2B5D")!,
+          speaker: "You",
+          text: "אני חושב שיותר חכם לחבר קודם Analytics ולראות איך המשתמשים באמת משתמשים באתר.",
+          timestamp: startedAt.addingTimeInterval(60)
+        ),
+        .init(
+          id: UUID(uuidString: "60F13690-B8EC-42E8-ADDF-17D1DCE99460")!,
+          speaker: "Remote speaker",
+          text: "סיכמנו שהכי חשוב להוסיף coming soon לסימולציות ריאיון.",
+          timestamp: startedAt.addingTimeInterval(90)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+
+    let recap = await generator.generateRecap(for: session)
+    let markdownSession = LocalMeetingSession(
+      id: session.id,
+      title: session.title,
+      startedAt: session.startedAt,
+      status: session.status,
+      transcriptSegments: session.transcriptSegments,
+      recap: recap,
+      audioArtifacts: session.audioArtifacts
+    )
+    let markdown = LocalSessionRecapMarkdownDocument(session: markdownSession).markdown
+
+    XCTAssertFalse(markdown.contains("No strong key points were extracted"))
+    XCTAssertFalse(markdown.contains("Opening line: Remote speaker: אוקיי"))
+    XCTAssertFalse(markdown.contains("Remote speaker:"))
+    XCTAssertFalse(markdown.contains("You:"))
+    XCTAssertTrue(markdown.contains("scrolling behavior"))
+    XCTAssertTrue(markdown.contains("analytics"))
+    XCTAssertTrue(markdown.contains("coming soon"))
+    XCTAssertTrue(markdown.contains("interview simulation"))
+    XCTAssertTrue(
+      markdown.contains("## Professional recommendation") || markdown.contains("## Next steps")
+        || markdown.contains("## המשך מומלץ"))
+  }
+
+  func testDeterministicFallbackDoesNotInjectWebsiteThemesFromGenericHebrewWords() async {
+    let generator = LocalSessionRecapGenerator(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 2_220_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "D96BEFDF-1D42-4716-9ACF-361DF7C5481C")!,
+      title: "Session 6 May 2026 at 23:38",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "46E71017-30EF-4807-95F6-060A3DEC73C8")!,
+          speaker: "Remote speaker",
+          text: "טוב, בקיצור, לא יודע, היא לא ענתה בהודעות יותר.",
+          timestamp: startedAt.addingTimeInterval(1)
+        ),
+        .init(
+          id: UUID(uuidString: "F8B5321F-9BCE-47FE-8923-64BE31F640BF")!,
+          speaker: "You",
+          text: "כאילו מה אנחנו רוצים ממנה, זה דבר ראשון.",
+          timestamp: startedAt.addingTimeInterval(65)
+        ),
+        .init(
+          id: UUID(uuidString: "23AE0191-E611-456E-B3A9-7868D11211E9")!,
+          speaker: "Remote speaker",
+          text: "אני לא יודע, אולי שווה לא לשתף על ספסה.",
+          timestamp: startedAt.addingTimeInterval(78)
+        ),
+        .init(
+          id: UUID(uuidString: "63D3F133-86E8-401B-B6D9-60AC0C085617")!,
+          speaker: "You",
+          text: "תשמע הוא מחשב עובד לאט, ולא ברור לי מה לאמץ לך ככה.",
+          timestamp: startedAt.addingTimeInterval(124)
+        ),
+        .init(
+          id: UUID(uuidString: "D334636E-8945-4F13-9A3E-E48A4E30C061")!,
+          speaker: "Remote speaker",
+          text: "מה זה כזה כבד? תעשה פה ראיונות.",
+          timestamp: startedAt.addingTimeInterval(138)
+        ),
+        .init(
+          id: UUID(uuidString: "B7F7CF6F-61E3-48A0-92E9-1548D5A482A0")!,
+          speaker: "You",
+          text: "אני עושה ללקוחות אתרים, אבל פה רק ניסינו להבין מה קורה בקבינט.",
+          timestamp: startedAt.addingTimeInterval(152)
+        ),
+        .init(
+          id: UUID(uuidString: "54B2B2B2-D8C7-4D8E-A0D8-BFA4A893A379")!,
+          speaker: "Remote speaker",
+          text: "הייתי צריך איזה משימת עדכון בעיצוב קיים, לא לבנות מחדש.",
+          timestamp: startedAt.addingTimeInterval(166)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+    session.contentClassification = .init(
+      type: .voiceNote,
+      confidence: 0.87,
+      rationale: "Detected a single-speaker message, reminder, or dictated update.",
+      generatedAt: startedAt.addingTimeInterval(180)
+    )
+
+    let recap = await generator.generateRecap(for: session)
+    let recapText =
+      ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+
+    XCTAssertFalse(recapText.contains("site performance"))
+    XCTAssertFalse(recapText.contains("scrolling behavior"))
+    XCTAssertFalse(recapText.contains("calls to action"))
+    XCTAssertFalse(recapText.contains("interview simulation"))
+    XCTAssertFalse(recapText.contains("HR and tech"))
+    XCTAssertFalse(recapText.contains("lighter visual"))
+    XCTAssertFalse(recapText.contains("היא לא ענתה בהודעות יותר"))
+    XCTAssertFalse(recapText.contains("אני לא יודע, אולי שווה לא לשתף על ספסה"))
+    XCTAssertFalse(recapText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+  }
+
+  func testEmbeddedRecapRejectsUnsupportedWebsiteClaimsAndFallsBackToTranscript() async {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {
+          "overview": "The voice note focused on site performance and scrolling behavior, clearer calls to action, and the interview simulation area.",
+          "keyPoints": [
+            {
+              "title": "Message highlights",
+              "summary": "The most useful details from the dictated message.",
+              "bullets": [
+                "Participants reported that parts of the site feel slow, jumpy, or hard to scroll.",
+                "The HR and tech interview simulation area is prominent."
+              ],
+              "startOffsetSeconds": 0,
+              "endOffsetSeconds": 30
+            }
+          ],
+          "decisions": [],
+          "actionItems": [],
+          "openQuestions": [],
+          "nextSteps": []
+        }
+        """
+    )
+    let generator = LocalSessionRecapGenerator(
+      modelClient: LocalSessionEmbeddedRecapClient(languageModel: languageModel)
+    )
+    let startedAt = Date(timeIntervalSince1970: 2_260_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "D96BEFDF-1D42-4716-9ACF-361DF7C5481C")!,
+      title: "Session 6 May 2026 at 23:38",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "46E71017-30EF-4807-95F6-060A3DEC73C8")!,
+          speaker: "Remote speaker",
+          text: "טוב, בקיצור, לא יודע, היא לא ענתה בהודעות יותר.",
+          timestamp: startedAt.addingTimeInterval(1)
+        ),
+        .init(
+          id: UUID(uuidString: "23AE0191-E611-456E-B3A9-7868D11211E9")!,
+          speaker: "Remote speaker",
+          text: "אני לא יודע, אולי שווה לא לשתף על ספסה.",
+          timestamp: startedAt.addingTimeInterval(78)
+        ),
+        .init(
+          id: UUID(uuidString: "63D3F133-86E8-401B-B6D9-60AC0C085617")!,
+          speaker: "You",
+          text: "תשמע, אני עושה ללקוחות אתרים, אבל פה דיברנו על קבינט ומה קורה אצלך במסך.",
+          timestamp: startedAt.addingTimeInterval(124)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+    session.contentClassification = .init(
+      type: .voiceNote,
+      confidence: 0.87,
+      rationale: "Detected a single-speaker message, reminder, or dictated update.",
+      generatedAt: startedAt.addingTimeInterval(180)
+    )
+
+    let recap = await generator.generateRecap(for: session)
+    let recapText =
+      ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+
+    XCTAssertFalse(recapText.contains("site performance"))
+    XCTAssertFalse(recapText.contains("scrolling behavior"))
+    XCTAssertFalse(recapText.contains("interview simulation"))
+    XCTAssertFalse(recapText.contains("היא לא ענתה בהודעות יותר"))
+    XCTAssertFalse(recapText.contains("אני לא יודע, אולי שווה לא לשתף על ספסה"))
+    XCTAssertFalse(recapText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+  }
+
+  func testEmbeddedRecapRejectsInstructionEchoesAndFallsBackToTranscript() async {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {
+          "overview": "Return only valid JSON. JSON shape: {\\\"overview\\\":\\\"...\\\",\\\"sections\\\":[]}",
+          "sections": [
+            {
+              "kind": "keyPoints",
+              "title": "Message highlights",
+              "summary": "Use empty arrays when there are no action items.",
+              "bullets": ["Final instruction: Return only the JSON object.", "The transcript was classified as voiceNote."]
+            }
+          ]
+        }
+        """
+    )
+    let generator = LocalSessionRecapGenerator(
+      modelClient: LocalSessionEmbeddedRecapClient(languageModel: languageModel)
+    )
+    let startedAt = Date(timeIntervalSince1970: 1_835_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "6D9F71F1-4B93-4900-89D7-F99AF10E9F74")!,
+      title: "Hebrew session",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "2F5F5661-C7DE-42C3-9CA6-4F11B2E07141")!,
+          speaker: "You",
+          text: "צריך לסכם את הפגישה ולכתוב מה עושים בהמשך עם קבינט.",
+          timestamp: startedAt.addingTimeInterval(4)
         )
+      ],
+      audioArtifacts: .empty
+    )
+    session.contentClassification = .init(
+      type: .meeting,
+      confidence: 0.84,
+      rationale: "Hebrew planning conversation.",
+      generatedAt: startedAt
+    )
 
-        let recap = await generator.generateRecap(for: session)
+    let recap = await generator.generateRecap(for: session)
+    let recapText =
+      ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
 
-        XCTAssertFalse(recap.overview.isEmpty)
-        XCTAssertEqual(recap.sections.count, 6)
-        XCTAssertTrue(recap.sections.contains(where: { $0.kind == .decisions && !$0.bullets.isEmpty }))
-        XCTAssertTrue(recap.sections.contains(where: { $0.kind == .actionItem && !$0.bullets.isEmpty }))
-        XCTAssertTrue(recap.sections.contains(where: { $0.kind == .openQuestions && !$0.bullets.isEmpty }))
+    XCTAssertFalse(recapText.lowercased().contains("return only valid json"))
+    XCTAssertFalse(recapText.lowercased().contains("json shape"))
+    XCTAssertFalse(recapText.lowercased().contains("final instruction"))
+    XCTAssertFalse(recapText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+  }
+
+  func testEmbeddedRecapPromptCompactsLongTranscriptAndRepeatsJSONInstruction() async throws {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {"overview":"Compact overview.","keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[],"nextSteps":[]}
+        """
+    )
+    let client = LocalSessionEmbeddedRecapClient(languageModel: languageModel)
+    let generator = LocalSessionRecapGenerator(modelClient: client)
+    let startedAt = Date(timeIntervalSince1970: 1_800_000)
+    let longText = String(
+      repeating: "This is a long transcript line with details and repeated context. ", count: 35)
+    let segments = (0..<260).map { index in
+      LocalMeetingTranscriptSegment(
+        id: UUID(),
+        speaker: index.isMultiple(of: 2) ? "Dana" : "Noam",
+        text: "\(index): \(longText)",
+        timestamp: startedAt.addingTimeInterval(TimeInterval(index * 4))
+      )
     }
+    var session = LocalMeetingSession(
+      id: UUID(),
+      title: "Long planning call",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: segments,
+      audioArtifacts: .empty
+    )
+    session.contentClassification = .init(
+      type: .meeting,
+      confidence: 0.88,
+      rationale: "Planning call with multiple speakers.",
+      generatedAt: startedAt.addingTimeInterval(20)
+    )
+
+    _ = await generator.generateRecap(for: session)
+
+    let prompt = try XCTUnwrap(languageModel.lastPrompt)
+    XCTAssertLessThan(prompt.count, 35_000)
+    XCTAssertTrue(prompt.contains("Full transcript coverage"))
+    XCTAssertTrue(prompt.contains("all 260 transcript segments are represented"))
+    XCTAssertFalse(prompt.contains("middle transcript segments omitted"))
+    XCTAssertTrue(prompt.contains("Clean the transcript before summarizing it"))
+    XCTAssertTrue(prompt.contains("urgent fixes from next-iteration improvements"))
+    XCTAssertTrue(prompt.contains("short professional recommendation"))
+    XCTAssertTrue(prompt.contains("Extract the relevant meeting brief"))
+    let transcriptRange = try XCTUnwrap(prompt.range(of: "Transcript:"))
+    let finalInstructionRange = try XCTUnwrap(
+      prompt.range(of: "Final instruction: Return only valid JSON", options: .backwards))
+    XCTAssertGreaterThan(finalInstructionRange.lowerBound, transcriptRange.lowerBound)
+  }
+
+  func testEmbeddedRecapPromptRequestsPeopleProjectAndAntiHallucinationGuardrails() async throws {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {"overview":"Compact overview.","keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[],"nextSteps":[]}
+        """
+    )
+    let generator = LocalSessionRecapGenerator(
+      modelClient: LocalSessionEmbeddedRecapClient(languageModel: languageModel)
+    )
+    let startedAt = Date(timeIntervalSince1970: 1_810_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "FE497144-2448-45D7-9DA8-3AA8E4C6C1E4")!,
+      title: "Project Atlas planning",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "7C68433E-FDA8-42FC-B120-DB9CA7D93B6D")!,
+          speaker: "Dana",
+          text: "Maya owns the launch checklist for Project Atlas.",
+          timestamp: startedAt.addingTimeInterval(12)
+        )
+      ],
+      audioArtifacts: .empty
+    )
+    session.contentClassification = .init(
+      type: .meeting,
+      confidence: 0.88,
+      rationale: "Planning call with multiple speakers.",
+      generatedAt: startedAt.addingTimeInterval(20)
+    )
+
+    _ = await generator.generateRecap(for: session)
+
+    let prompt = try XCTUnwrap(languageModel.lastPrompt)
+    XCTAssertTrue(prompt.contains("Extract project, client, or product names"))
+    XCTAssertTrue(prompt.contains("compact people lens inline"))
+    XCTAssertTrue(prompt.contains("who owns work"))
+    XCTAssertTrue(prompt.contains("Do not infer real attendee names from generic speaker labels"))
+    XCTAssertTrue(
+      prompt.contains("Do not invent project names, roles, attendees, or responsibilities"))
+    XCTAssertTrue(prompt.contains("Owner/person/team"))
+  }
+
+  func testContentClassifierUsesModelJsonBeforeRecapGeneration() async throws {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {"type":"voiceNote","confidence":0.86,"rationale":"Single-speaker dictated message with a clear recipient intent."}
+        """
+    )
+    let classifier = LocalSessionContentClassifier(
+      modelClient: LocalSessionEmbeddedContentClassificationClient(languageModel: languageModel)
+    )
+    let startedAt = Date(timeIntervalSince1970: 1_815_000)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "3D71C331-A2F2-4823-A035-961574AE7F3D")!,
+      title: "Voice memo",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "88F24B03-3E4C-4D11-BB76-B6AB9B70C467")!,
+          speaker: "Speaker 1",
+          text: "Send Noam a quick message that the export is ready and I will check it tomorrow.",
+          timestamp: startedAt.addingTimeInterval(6)
+        )
+      ],
+      audioArtifacts: .empty
+    )
+
+    let classification = await classifier.classifyContent(for: session)
+
+    XCTAssertEqual(classification.type, .voiceNote)
+    XCTAssertEqual(classification.confidence, 0.86, accuracy: 0.001)
+    XCTAssertTrue(classification.rationale.contains("Single-speaker"))
+    let prompt = try XCTUnwrap(languageModel.lastPrompt)
+    XCTAssertTrue(prompt.contains("meeting"))
+    XCTAssertTrue(prompt.contains("voiceNote"))
+    XCTAssertTrue(prompt.contains("videoCommentary"))
+    XCTAssertTrue(prompt.contains("generalTranscript"))
+  }
+
+  func testContentClassifierOverridesModelVoiceNoteWhenTranscriptIsMultiSpeakerMeeting()
+    async throws
+  {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {"type":"voiceNote","confidence":0.87,"rationale":"Detected a single-speaker message."}
+        """
+    )
+    let classifier = LocalSessionContentClassifier(
+      modelClient: LocalSessionEmbeddedContentClassificationClient(languageModel: languageModel)
+    )
+    let startedAt = Date(timeIntervalSince1970: 1_816_000)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "927754EE-551B-4CF4-A88E-2BD439337A79")!,
+      title: "Session 6 May 2026 at 23:38",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "35B7B46C-33A3-4316-84C1-F90B97E6B7F6")!,
+          speaker: "You",
+          text: "מה אנחנו רוצים מהפגישה הזאת ומה צריך לשתף עם הצוות?",
+          timestamp: startedAt.addingTimeInterval(4)
+        ),
+        .init(
+          id: UUID(uuidString: "43911D41-41E5-484A-9F33-2C808689C77D")!,
+          speaker: "Remote speaker",
+          text: "אם כן הפגישה תקרה, צריך לקבוע מה עושים בהמשך.",
+          timestamp: startedAt.addingTimeInterval(10)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+
+    let classification = await classifier.classifyContent(for: session)
+
+    XCTAssertEqual(classification.type, .meeting)
+    XCTAssertGreaterThanOrEqual(classification.confidence, 0.7)
+    XCTAssertTrue(classification.rationale.lowercased().contains("meeting"))
+  }
+
+  func testContentClassifierFallsBackToVideoCommentaryFromSystemAudioContext() async {
+    let classifier = LocalSessionContentClassifier(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 1_816_000)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "0BE46856-508D-45C6-A5E0-5D24BB6F69AD")!,
+      title: "Screen recording notes",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "E32D31EC-F426-4C81-A12D-B537DA51C149")!,
+          speaker: "System audio",
+          text:
+            "The video shows the onboarding screen and the narrator says the button is confusing.",
+          timestamp: startedAt.addingTimeInterval(4)
+        )
+      ],
+      audioArtifacts: .init(
+        micFileName: "mic.wav", systemFileName: "system.wav", mixedFileName: "mixed.wav")
+    )
+
+    let classification = await classifier.classifyContent(for: session)
+
+    XCTAssertEqual(classification.type, .videoCommentary)
+    XCTAssertGreaterThanOrEqual(classification.confidence, 0.7)
+  }
+
+  func testContentClassifierDoesNotTreatBareSystemAudioAsVideoCommentary() async {
+    let classifier = LocalSessionContentClassifier(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 1_816_500)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "99444D84-1F49-4F22-A585-A44F6D9FBE65")!,
+      title: "Session 2026-04-29",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "A28F3A5E-9B7A-412C-AD5C-C3783825F270")!,
+          speaker: "local model",
+          text: "אני רוצה לראות באמת שהוא מסכם את המסמך.",
+          timestamp: startedAt.addingTimeInterval(2)
+        )
+      ],
+      audioArtifacts: .init(
+        micFileName: "mic.wav",
+        systemFileName: "system.wav",
+        mixedFileName: "mixed.wav"
+      )
+    )
+
+    let classification = await classifier.classifyContent(for: session)
+
+    XCTAssertNotEqual(classification.type, .videoCommentary)
+    XCTAssertEqual(classification.type, .generalTranscript)
+  }
+
+  func testContentClassifierTreatsHebrewYoutubeSystemAudioAsVideoCommentary() async {
+    let classifier = LocalSessionContentClassifier(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 1_816_700)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "7E394154-B14B-4D4A-A71E-8C85EE05E06B")!,
+      title: "Session 30 Apr 2026 at 12:26",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "4BA0F1D4-F5A6-4730-9682-23ED70435932")!,
+          speaker: "You",
+          text: "ועכשיו אני למשל לוקח סרטון, בואו ניקח איזה סרטון",
+          timestamp: startedAt
+        ),
+        .init(
+          id: UUID(uuidString: "3C1F92EF-278D-4221-87AB-D9F2950094D7")!,
+          speaker: "You",
+          text: "ההיסטוריה שראיתי ביוטיוב, אני רוצה משהו בעברית.",
+          timestamp: startedAt.addingTimeInterval(4)
+        ),
+        .init(
+          id: UUID(uuidString: "6C023377-27BD-4B3A-A5E3-15020F88B5F0")!,
+          speaker: "Remote speaker",
+          text: "זה הלייב של מורה מבוכים של ערוץ דונקי.",
+          timestamp: startedAt.addingTimeInterval(8)
+        ),
+      ],
+      audioArtifacts: .init(
+        micFileName: "mic.wav",
+        systemFileName: "system.wav",
+        mixedFileName: "mixed.wav"
+      )
+    )
+
+    let classification = await classifier.classifyContent(for: session)
+
+    XCTAssertEqual(classification.type, .videoCommentary)
+  }
+
+  func testContentClassifierTreatsBusinessMeetingWithIncidentalVideoMentionsAsMeeting()
+    async
+  {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {"type":"videoCommentary","confidence":0.88,"rationale":"Detected video and system-audio signals."}
+        """
+    )
+    let classifier = LocalSessionContentClassifier(
+      modelClient: LocalSessionEmbeddedContentClassificationClient(languageModel: languageModel)
+    )
+    let startedAt = Date(timeIntervalSince1970: 1_817_200)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "2F433F47-B308-44E2-9F29-4B60F024FD34")!,
+      title: "Business planning call",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "E9B0D568-CB4F-4B88-9078-CA5E29A0462D")!,
+          speaker: "Remote speaker",
+          text: "ראית את הקלוד ביזנס?",
+          timestamp: startedAt.addingTimeInterval(1)
+        ),
+        .init(
+          id: UUID(uuidString: "7D6F278C-CA96-4E40-91BC-B2022EC05232")!,
+          speaker: "You",
+          text: "ישבתי איתו וסיפרתי לו על הרעיון של הסטארט-אפ ומה אנחנו בונים בגדול.",
+          timestamp: startedAt.addingTimeInterval(30)
+        ),
+        .init(
+          id: UUID(uuidString: "4305CE20-07C9-4FFB-ACD4-4E5E10D4DA2E")!,
+          speaker: "Speaker 1",
+          text: "בואו נדבר רגע על התקציב של העסק ועל הדשבורד שבעל העסק צריך לראות.",
+          timestamp: startedAt.addingTimeInterval(620)
+        ),
+        .init(
+          id: UUID(uuidString: "78197D80-DF62-457C-B27D-E727E330B7F9")!,
+          speaker: "Remote speaker",
+          text: "כשהוא לא מול המחשב והוא בנסיעה או בפגישה, מה קורה עם כל המידע?",
+          timestamp: startedAt.addingTimeInterval(2_260)
+        ),
+        .init(
+          id: UUID(uuidString: "8595B786-9221-42ED-B914-A608F06228B1")!,
+          speaker: "You",
+          text: "לא יודע אם ראית את הסרטון של הרבע שעה ששלחתי, הוא יעשה לך קצת סדר.",
+          timestamp: startedAt.addingTimeInterval(2_740)
+        ),
+        .init(
+          id: UUID(uuidString: "37FCA8A6-F663-4EE4-B936-44034EAC7A9B")!,
+          speaker: "You",
+          text: "אני אתחיל לזרוק שם נושאים שדיברנו עכשיו בפגישה, אני אסכם והכל.",
+          timestamp: startedAt.addingTimeInterval(3_030)
+        ),
+      ],
+      audioArtifacts: .init(
+        micFileName: "mic.wav",
+        systemFileName: "system.wav",
+        mixedFileName: "mixed.wav"
+      )
+    )
+
+    let classification = await classifier.classifyContent(for: session)
+
+    XCTAssertEqual(classification.type, .meeting)
+    XCTAssertGreaterThanOrEqual(classification.confidence, 0.7)
+  }
+
+  func testEmbeddedRecapPromptUsesVoiceNoteInstructions() async throws {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {"overview":"Message overview.","keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[],"nextSteps":[]}
+        """
+    )
+    let generator = LocalSessionRecapGenerator(
+      modelClient: LocalSessionEmbeddedRecapClient(languageModel: languageModel)
+    )
+    let startedAt = Date(timeIntervalSince1970: 1_817_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "483E1205-E849-4D08-A7C0-2AF2E0922858")!,
+      title: "Message for Dana",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "7F7685AF-D431-4B8B-B656-873A288B99B6")!,
+          speaker: "Speaker 1",
+          text: "Tell Dana that I approved the copy and ask her to upload the final assets.",
+          timestamp: startedAt.addingTimeInterval(3)
+        )
+      ],
+      audioArtifacts: .empty
+    )
+    session.contentClassification = .init(
+      type: .voiceNote,
+      confidence: 0.91,
+      rationale: "Single speaker dictated a message.",
+      generatedAt: startedAt.addingTimeInterval(5)
+    )
+
+    _ = await generator.generateRecap(for: session)
+
+    let prompt = try XCTUnwrap(languageModel.lastPrompt)
+    XCTAssertTrue(prompt.contains("Treat this input as a meeting transcript"))
+    XCTAssertTrue(prompt.contains("meeting purpose"))
+    XCTAssertTrue(prompt.contains("App-level meeting document prompt"))
+    XCTAssertFalse(prompt.contains("voice note or dictated message"))
+  }
+
+  func testDeterministicFallbackCreatesOwnerAwareActionItemsForNamedSpeakers() async {
+    let generator = LocalSessionRecapGenerator(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 1_820_000)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "5F85F4E3-7E75-4B34-B47D-9011B6B97D8D")!,
+      title: "Roadmap review",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "A2C8F589-3592-49A3-BDA7-F7B86251AF88")!,
+          speaker: "Dana",
+          text: "I will send the launch checklist tomorrow.",
+          timestamp: startedAt.addingTimeInterval(10)
+        ),
+        .init(
+          id: UUID(uuidString: "4663CA4A-B56F-427D-8C5C-C1B07F3DC289")!,
+          speaker: "Noam",
+          text: "I will review analytics before the next iteration.",
+          timestamp: startedAt.addingTimeInterval(24)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+
+    let recap = await generator.generateRecap(for: session)
+    let actionItems = recap.section(kind: .actionItem)?.bullets ?? []
+
+    XCTAssertTrue(
+      actionItems.contains(where: { $0.contains("Dana:") && $0.contains("launch checklist") }))
+    XCTAssertTrue(
+      actionItems.contains(where: { $0.contains("Noam:") && $0.contains("analytics") }))
+  }
+
+  func testDeterministicFallbackDoesNotTreatGenericSpeakerLabelsAsPeople() async {
+    let generator = LocalSessionRecapGenerator(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 1_830_000)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "EF788E1B-B85B-4D80-A8E9-958F81A3486D")!,
+      title: "Session 2026-04-30",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "802C5D8B-E744-41F1-B5E4-E709BC0BC88C")!,
+          speaker: "Remote speaker",
+          text: "We will fix the slow scrolling before the next review.",
+          timestamp: startedAt.addingTimeInterval(10)
+        ),
+        .init(
+          id: UUID(uuidString: "4CD269C9-F3B1-4FA2-B745-D4E33E286489")!,
+          speaker: "Speaker 1",
+          text: "I will update the analytics setup.",
+          timestamp: startedAt.addingTimeInterval(28)
+        ),
+        .init(
+          id: UUID(uuidString: "C5E4E16B-2F19-482A-A389-38D3FE86E269")!,
+          speaker: "You",
+          text: "We need to prepare the next iteration plan.",
+          timestamp: startedAt.addingTimeInterval(44)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+
+    let recap = await generator.generateRecap(for: session)
+    let recapText =
+      ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+
+    XCTAssertFalse(recapText.contains("Remote speaker:"))
+    XCTAssertFalse(recapText.contains("Speaker 1:"))
+    XCTAssertFalse(recapText.contains("You:"))
+  }
+
+  func testDeterministicFallbackKeepsHebrewBusinessMeetingSourceFaithful() async {
+    let generator = LocalSessionRecapGenerator(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 1_835_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "01A76D8C-B364-4A70-B39C-44468DBAFBB0")!,
+      title: "Business planning call",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "1D8C4144-C0A8-48C9-816F-980B25FDCA76")!,
+          speaker: "Remote speaker",
+          text: "ראית את הקלוד ביזנס?",
+          timestamp: startedAt.addingTimeInterval(1)
+        ),
+        .init(
+          id: UUID(uuidString: "0E9B8E20-03E2-454C-8337-B99B45052195")!,
+          speaker: "You",
+          text: "ישבתי איתו וסיפרתי לו על הרעיון של הסטארט-אפ ומה אנחנו בונים בגדול.",
+          timestamp: startedAt.addingTimeInterval(30)
+        ),
+        .init(
+          id: UUID(uuidString: "F7A646F5-84BD-4D88-8E3A-9F7858FCF373")!,
+          speaker: "Speaker 1",
+          text: "בואו נדבר רגע על התקציב של העסק ועל הדשבורד שבעל העסק צריך לראות.",
+          timestamp: startedAt.addingTimeInterval(620)
+        ),
+        .init(
+          id: UUID(uuidString: "265C38B0-E56E-47CB-85B6-E397AA154CF8")!,
+          speaker: "Remote speaker",
+          text: "זה צ'אט עסקי קבוצתי של המשרד ושל העבודה.",
+          timestamp: startedAt.addingTimeInterval(1_990)
+        ),
+        .init(
+          id: UUID(uuidString: "1A1BFF04-5149-4406-A3F4-6F2D412FE7EF")!,
+          speaker: "Remote speaker",
+          text: "כשהוא לא מול המחשב והוא בנסיעה או בפגישה, מה קורה עם כל המידע?",
+          timestamp: startedAt.addingTimeInterval(2_260)
+        ),
+        .init(
+          id: UUID(uuidString: "F1609D00-87D6-4F83-B31B-156DC912AB2A")!,
+          speaker: "You",
+          text: "אני אתחיל לזרוק שם נושאים שדיברנו עכשיו בפגישה, אני אסכם והכל.",
+          timestamp: startedAt.addingTimeInterval(3_030)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+    session.contentClassification = LocalSessionContentClassification(
+      type: .meeting,
+      confidence: 0.9,
+      rationale: "Detected meeting-style discussion signals.",
+      generatedAt: startedAt
+    )
+
+    let recap = await generator.generateRecap(for: session)
+    let recapText =
+      ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+
+    XCTAssertTrue(recapText.contains("עסק") || recapText.contains("סטארט"))
+    XCTAssertFalse(recapText.contains("calls to action"))
+    XCTAssertFalse(recapText.contains("Hebrew localization"))
+    XCTAssertFalse(recapText.contains("RTL"))
+    XCTAssertFalse(recapText.contains("Webflow"))
+    XCTAssertFalse(recapText.contains("שאלות שנותרו"))
+    XCTAssertFalse(recapText.contains("להפוך את נושאי הפגישה"))
+    XCTAssertFalse(recapText.contains("נראה לי"))
+    XCTAssertNotNil(recap.section(kind: .nextSteps))
+  }
+
+  func testDeterministicFallbackMentionsExplicitProjectNameInOverview() async {
+    let generator = LocalSessionRecapGenerator(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 1_840_000)
+    let session = LocalMeetingSession(
+      id: UUID(uuidString: "05E86E5C-96FA-4B62-8BD8-F1D64B373271")!,
+      title: "Session 2026-04-30",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "6085848A-9181-44E9-B45A-9FA8F4C34DBE")!,
+          speaker: "Dana",
+          text: "For Project Atlas, we need to fix analytics and launch copy before review.",
+          timestamp: startedAt.addingTimeInterval(10)
+        )
+      ],
+      audioArtifacts: .empty
+    )
+
+    let recap = await generator.generateRecap(for: session)
+
+    XCTAssertTrue(recap.overview.contains("Project Atlas"))
+  }
+
+  func testEmbeddedRecapDecodesFirstJsonObjectWhenModelContinuesAfterAnswer() async {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {"overview":"First usable recap.","keyPoints":[{"title":"Launch timing","summary":"The launch date was agreed.","bullets":["The team agreed on the next launch date."],"startOffsetSeconds":10,"endOffsetSeconds":10}],"decisions":[],"actionItems":[],"openQuestions":[],"nextSteps":[]}
+        Human: Can you review this?
+        Assistant: {"overview":"Repeated recap.","keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[],"nextSteps":[]}
+        """
+    )
+    let generator = LocalSessionRecapGenerator(
+      modelClient: LocalSessionEmbeddedRecapClient(languageModel: languageModel)
+    )
+    let session = LocalMeetingSession(
+      id: UUID(),
+      title: "Noisy model output",
+      startedAt: Date(timeIntervalSince1970: 2_000_000),
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(),
+          speaker: "Dana",
+          text: "We agreed on the next launch date.",
+          timestamp: Date(timeIntervalSince1970: 2_000_010)
+        )
+      ],
+      audioArtifacts: .empty
+    )
+
+    let recap = await generator.generateRecap(for: session)
+
+    XCTAssertEqual(recap.overview, "First usable recap.")
+  }
+
+  func testEmbeddedRecapAcceptsMissingEmptySectionArrays() async throws {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {
+          "overview": "Compact useful brief.",
+          "keyPoints": [
+            {
+              "title": "Message highlights",
+              "summary": "The actual recap content.",
+              "bullets": ["One supported point."],
+              "startOffsetSeconds": 0,
+              "endOffsetSeconds": 12
+            }
+          ]
+        }
+        """
+    )
+    let client = LocalSessionEmbeddedRecapClient(languageModel: languageModel)
+    let input = LocalSessionRecapGenerationInput(
+      sessionID: UUID(uuidString: "2B8BAA1C-60F3-4DE1-A48A-2D72D5A8B77D")!,
+      title: "Partial JSON",
+      startedAt: Date(timeIntervalSince1970: 9_000),
+      transcriptCandidates: [
+        .init(
+          speaker: "You",
+          text: "One supported point.",
+          timestamp: Date(timeIntervalSince1970: 9_005),
+          sessionOffset: 5
+        )
+      ],
+      attachmentCount: 0,
+      captureArtifactCount: 0,
+      contentClassification: .init(
+        type: .generalTranscript,
+        confidence: 0.81,
+        rationale: "General transcript.",
+        generatedAt: Date(timeIntervalSince1970: 9_001)
+      )
+    )
+
+    let recap = try await client.generateRecap(for: input)
+
+    XCTAssertEqual(recap.overview, "Compact useful brief.")
+    XCTAssertEqual(recap.section(kind: .keyPoints)?.bullets, ["One supported point."])
+    XCTAssertNil(recap.section(kind: .openQuestions))
+    XCTAssertNil(recap.section(kind: .nextSteps))
+  }
+
+  func testEmbeddedRecapRejectsSchemaPlaceholdersAndFallsBack() async {
+    let languageModel = CapturingLanguageModel(
+      response: """
+        {"overview":"...","keyPoints":[{"title":"...","summary":"...","bullets":["..."],"startOffsetSeconds":0,"endOffsetSeconds":0}],"decisions":[{"title":"...","summary":"...","bullets":["..."],"startOffsetSeconds":0,"endOffsetSeconds":0}],"actionItems":[],"openQuestions":[],"nextSteps":[]}
+        """
+    )
+    let generator = LocalSessionRecapGenerator(
+      modelClient: LocalSessionEmbeddedRecapClient(languageModel: languageModel)
+    )
+    let startedAt = Date(timeIntervalSince1970: 2_100_000)
+    let session = LocalMeetingSession(
+      id: UUID(),
+      title: "Placeholder recap",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(),
+          speaker: "Ben",
+          text: "This is a test to confirm the recap is generated successfully.",
+          timestamp: startedAt.addingTimeInterval(8)
+        )
+      ],
+      audioArtifacts: .empty
+    )
+
+    let recap = await generator.generateRecap(for: session)
+    var sessionWithRecap = session
+    sessionWithRecap.recap = recap
+    let markdown = LocalSessionRecapMarkdownDocument(session: sessionWithRecap).markdown
+
+    XCTAssertFalse(markdown.contains("..."))
+    XCTAssertFalse(recap.overview.isEmpty)
+    XCTAssertFalse(recap.sections.isEmpty)
+    XCTAssertFalse(recap.sections.contains(where: { $0.bullets.contains("...") }))
+  }
+
+  func testDeterministicFallbackWritesHebrewBriefForHebrewGeneralTranscript() async {
+    let generator = LocalSessionRecapGenerator(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 2_150_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "8AFC4AFF-1E45-4FF0-AD89-7EE8C4506253")!,
+      title: "Session 29 Apr 2026 at 13:38",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "AC2D1353-B53B-4C96-A781-FE1CB55A7702")!,
+          speaker: "local model",
+          text: "אוקיי, אני עושה כרגע בדיקה.",
+          timestamp: startedAt
+        ),
+        .init(
+          id: UUID(uuidString: "B3DF2F80-5062-4EBE-8794-243B71E5B550")!,
+          speaker: "local model",
+          text: "אני רוצה לראות באמת שהוא מסכם את המסמך.",
+          timestamp: startedAt.addingTimeInterval(2)
+        ),
+        .init(
+          id: UUID(uuidString: "8EBE6D8D-C1D2-4178-AC4A-6EF7EAE76966")!,
+          speaker: "local model",
+          text: "במידה והוא מסכם את המסמך הייתי רוצה שהוא יציין שזה הצלחה.",
+          timestamp: startedAt.addingTimeInterval(6)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+    session.contentClassification = .init(
+      type: .generalTranscript,
+      confidence: 0.62,
+      rationale: "Single-speaker Hebrew test note.",
+      generatedAt: startedAt.addingTimeInterval(10)
+    )
+
+    let recap = await generator.generateRecap(for: session)
+    let recapText =
+      ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+
+    XCTAssertTrue(recapText.contains("בדיק"))
+    XCTAssertTrue(recapText.contains("מסכם את המסמך"))
+    XCTAssertTrue(recapText.contains("הצלחה"))
+    XCTAssertFalse(recapText.contains("video commentary"))
+    XCTAssertFalse(recapText.contains("source material"))
+  }
+
+  func testDeterministicFallbackWritesHebrewVideoBriefForYoutubeRoleplayCapture() async {
+    let generator = LocalSessionRecapGenerator(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 2_155_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "E565E77E-F203-42B2-A14F-96CD3E23CE66")!,
+      title: "Session 30 Apr 2026 at 12:26",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "88C0D952-9A72-49D0-8741-EC23E3D4454A")!,
+          speaker: "You",
+          text: "ועכשיו אני למשל לוקח סרטון, בואו ניקח איזה סרטון.",
+          timestamp: startedAt
+        ),
+        .init(
+          id: UUID(uuidString: "66A13A6F-7CA7-4A69-B72D-B42A92D5D35D")!,
+          speaker: "You",
+          text: "ההיסטוריה שראיתי ביוטיוב, אני רוצה משהו בעברית.",
+          timestamp: startedAt.addingTimeInterval(3)
+        ),
+        .init(
+          id: UUID(uuidString: "326204B6-E96F-44E5-A141-73249B4799D5")!,
+          speaker: "Remote speaker",
+          text: "זה הלייב של מורה מבוכים של ערוץ דונקי.",
+          timestamp: startedAt.addingTimeInterval(8)
+        ),
+        .init(
+          id: UUID(uuidString: "3B665E6C-6686-4BC0-8C89-52F1D3184376")!,
+          speaker: "Remote speaker",
+          text: "את מצליחה להתחבא מאחורי השיח ולתקוף אותו.",
+          timestamp: startedAt.addingTimeInterval(16)
+        ),
+        .init(
+          id: UUID(uuidString: "849E3A90-D358-4E53-8E4F-C8C9DC13D048")!,
+          speaker: "Remote speaker",
+          text: "החץ חולף ליד האוזן שלו ופוגע בגזע העץ המושחת שמאחוריו.",
+          timestamp: startedAt.addingTimeInterval(24)
+        ),
+      ],
+      audioArtifacts: .init(
+        micFileName: "mic.wav",
+        systemFileName: "system.wav",
+        mixedFileName: "mixed.wav"
+      )
+    )
+    session.contentClassification = .init(
+      type: .videoCommentary,
+      confidence: 0.8,
+      rationale: "Detected Hebrew YouTube video commentary.",
+      generatedAt: startedAt.addingTimeInterval(30)
+    )
+
+    let recap = await generator.generateRecap(for: session)
+    let combined =
+      ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+
+    XCTAssertTrue(combined.contains("יוטיוב") || combined.contains("מורה מבוכים"))
+    XCTAssertTrue(combined.contains("סרטון"))
+    XCTAssertFalse(combined.contains("Hebrew localization"))
+    XCTAssertFalse(combined.contains("RTL"))
+    XCTAssertFalse(combined.contains("בואו ניקח איזה סרטון ההיסטוריה"))
+  }
+
+  func testDeterministicFallbackKeepsHebrewVideoBriefCompactWhenNoActionWasGiven() async {
+    let generator = LocalSessionRecapGenerator(modelClient: nil)
+    let startedAt = Date(timeIntervalSince1970: 2_156_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "F3BB68FA-91DD-4EFA-8422-E02F4B8C63E0")!,
+      title: "Session 30 Apr 2026 at 12:26",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "47CD9F8C-F19B-4875-B39D-D6D977B7E534")!,
+          speaker: "You",
+          text: "ועכשיו אני למשל לוקח סרטון מההיסטוריה שראיתי ביוטיוב.",
+          timestamp: startedAt
+        ),
+        .init(
+          id: UUID(uuidString: "258F992A-AEE8-43C2-A600-4E26F5C98768")!,
+          speaker: "Remote speaker",
+          text: "זה הלייב של מורה מבוכים של ערוץ דונקי.",
+          timestamp: startedAt.addingTimeInterval(6)
+        ),
+        .init(
+          id: UUID(uuidString: "25682734-6F81-41F0-83D3-A642249EBBBE")!,
+          speaker: "Remote speaker",
+          text: "החץ מחטיא ופוגע בעץ המושחת שמאחוריו.",
+          timestamp: startedAt.addingTimeInterval(14)
+        ),
+      ],
+      audioArtifacts: .init(
+        micFileName: "mic.wav",
+        systemFileName: "system.wav",
+        mixedFileName: "mixed.wav"
+      )
+    )
+    session.contentClassification = .init(
+      type: .videoCommentary,
+      confidence: 0.8,
+      rationale: "Hebrew YouTube capture.",
+      generatedAt: startedAt.addingTimeInterval(20)
+    )
+
+    let recap = await generator.generateRecap(for: session)
+    let text = ([recap.overview] + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      .joined(separator: "\n")
+
+    XCTAssertLessThanOrEqual(recap.sections.filter { $0.kind != .overview }.count, 2)
+    XCTAssertNil(recap.section(kind: .actionItem))
+    XCTAssertNil(recap.section(kind: .openQuestions))
+    XCTAssertFalse(text.contains("אם מטרת המסמך"))
+    XCTAssertFalse(text.contains("שאלות שנותרו"))
+  }
+
+  func testHebrewMarkdownPresentationRebuildsSpecificBriefFromHebrewTranscript() {
+    let startedAt = Date(timeIntervalSince1970: 2_160_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "8AFC4AFF-1E45-4FF0-AD89-7EE8C4506253")!,
+      title: "Session 29 Apr 2026 at 13:38",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "AC2D1353-B53B-4C96-A781-FE1CB55A7702")!,
+          speaker: "local model",
+          text: "אני רוצה לראות באמת שהוא מסכם את המסמך.",
+          timestamp: startedAt
+        ),
+        .init(
+          id: UUID(uuidString: "8EBE6D8D-C1D2-4178-AC4A-6EF7EAE76966")!,
+          speaker: "local model",
+          text: "במידה והוא מסכם את המסמך הייתי רוצה שהוא יציין שזה הצלחה.",
+          timestamp: startedAt.addingTimeInterval(4)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+    session.contentClassification = .init(
+      type: .videoCommentary,
+      confidence: 0.8,
+      rationale: "Legacy false positive.",
+      generatedAt: startedAt.addingTimeInterval(8)
+    )
+    session.recap = LocalSessionRecap(
+      overview: "The video commentary captured the main areas that need follow-up.",
+      generatedAt: startedAt,
+      sections: []
+    )
+
+    let markdown = LocalSessionRecapMarkdownDocument.markdown(for: session, language: .hebrew)
+
+    XCTAssertTrue(markdown.contains("בדיקת סיכום"))
+    XCTAssertTrue(markdown.contains("מסכם את המסמך"))
+    XCTAssertTrue(markdown.contains("הצלחה"))
+    XCTAssertFalse(markdown.contains("סרטון"))
+    XCTAssertFalse(markdown.contains("video commentary"))
+  }
+
+  func testHebrewMarkdownPresentationRebuildsYoutubeRoleplayBriefFromStaleEnglishRecap() {
+    let startedAt = Date(timeIntervalSince1970: 2_165_000)
+    var session = LocalMeetingSession(
+      id: UUID(uuidString: "8E10F51A-ED0F-4C59-AAB9-33863D109920")!,
+      title: "Session 30 Apr 2026 at 12:26",
+      startedAt: startedAt,
+      status: .ready,
+      transcriptSegments: [
+        .init(
+          id: UUID(uuidString: "86981B77-9708-4413-BB92-855AFB7B83A0")!,
+          speaker: "You",
+          text: "ועכשיו אני למשל לוקח סרטון, בואו ניקח איזה סרטון.",
+          timestamp: startedAt
+        ),
+        .init(
+          id: UUID(uuidString: "047A0E7C-917E-47F3-A9BD-3B21B58D16AF")!,
+          speaker: "You",
+          text: "ההיסטוריה שראיתי ביוטיוב, אני רוצה משהו בעברית.",
+          timestamp: startedAt.addingTimeInterval(4)
+        ),
+        .init(
+          id: UUID(uuidString: "042AF46D-A33C-4B8E-890C-24F76F4068A1")!,
+          speaker: "Remote speaker",
+          text: "זה הלייב של מורה מבוכים של ערוץ דונקי.",
+          timestamp: startedAt.addingTimeInterval(8)
+        ),
+        .init(
+          id: UUID(uuidString: "A7834791-578E-4D34-A290-4B63F068FEE8")!,
+          speaker: "Remote speaker",
+          text: "את מצליחה להתחבא מאחורי השיח ולתקוף אותו.",
+          timestamp: startedAt.addingTimeInterval(16)
+        ),
+      ],
+      audioArtifacts: .empty
+    )
+    session.recap = LocalSessionRecap(
+      overview: "The source material focused on Hebrew localization and RTL support.",
+      generatedAt: startedAt,
+      sections: []
+    )
+
+    let markdown = LocalSessionRecapMarkdownDocument.markdown(for: session, language: .hebrew)
+
+    XCTAssertTrue(markdown.contains("יוטיוב") || markdown.contains("מורה מבוכים"))
+    XCTAssertTrue(markdown.contains("סרטון"))
+    XCTAssertFalse(markdown.contains("RTL"))
+    XCTAssertFalse(markdown.contains("לוקליזציה"))
+    XCTAssertFalse(markdown.contains("בואו ניקח איזה סרטון ההיסטוריה"))
+  }
+
+  // Retained as historical coverage for the removed document-chat surface.
+  #if LEGACY_DOCUMENT_CHAT_TESTS
+    func testDocumentChatPromptCompactsLongTranscriptAndRepeatsJSONInstruction() async throws {
+      let languageModel = CapturingLanguageModel(
+        response: """
+          {"assistantMessage":"I can help with that.","recapPatch":null,"transcriptPatches":[],"speakerRenames":[],"warnings":[]}
+          """
+      )
+      let client = LocalSessionDocumentChatClient(languageModel: languageModel)
+      let startedAt = Date(timeIntervalSince1970: 1_900_000)
+      let longText = String(
+        repeating: "Dense meeting context that would otherwise overflow the local model window. ",
+        count: 45)
+      let segments = (0..<180).map { index in
+        LocalMeetingTranscriptSegment(
+          id: UUID(),
+          speaker: "Speaker \(index % 3 + 1)",
+          text: "\(index): \(longText)",
+          timestamp: startedAt.addingTimeInterval(TimeInterval(index * 3))
+        )
+      }
+      let session = LocalMeetingSession(
+        id: UUID(),
+        title: "Long document chat",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: segments,
+        audioArtifacts: .empty
+      )
+
+      _ = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session, userMessage: "Summarize the action items.")
+      )
+
+      let prompt = try XCTUnwrap(languageModel.lastPrompt)
+      XCTAssertLessThan(prompt.count, 40_000)
+      XCTAssertTrue(prompt.contains("middle transcript segments omitted"))
+      let requestRange = try XCTUnwrap(prompt.range(of: "User request:"))
+      let finalInstructionRange = try XCTUnwrap(
+        prompt.range(of: "Final instruction: Return only valid JSON", options: .backwards))
+      XCTAssertGreaterThan(finalInstructionRange.lowerBound, requestRange.lowerBound)
+    }
+
+    func testDocumentChatDelegatesDocumentOperationChoiceToModel() async throws {
+      let languageModel = CapturingLanguageModel(
+        response: """
+          {
+            "operation":"delete",
+            "assistantMessage":"I prepared a blank document.",
+            "sessionTitle":null,
+            "documentMarkdown":"",
+            "recapPatch":null,
+            "transcriptPatches":[],
+            "speakerRenames":[],
+            "warnings":[]
+          }
+          """
+      )
+      let client = LocalSessionDocumentChatClient(languageModel: languageModel)
+      let startedAt = Date(timeIntervalSince1970: 2_200_000)
+      var session = LocalMeetingSession(
+        id: UUID(uuidString: "2D5E2D92-53F4-4D63-9C0D-A9F80AAB2A1D")!,
+        title: "Free document operation",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "E6A1A183-C250-4F2A-9869-8C4334632B92")!,
+            speaker: "Ben",
+            text: "This document can be read, updated, or deleted by the model.",
+            timestamp: startedAt.addingTimeInterval(12)
+          )
+        ],
+        audioArtifacts: .empty
+      )
+      session.recap = LocalSessionRecap(
+        overview: "Existing summary.",
+        generatedAt: startedAt,
+        sections: []
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "תמחק הכל"
+        )
+      )
+
+      let prompt = try XCTUnwrap(languageModel.lastPrompt)
+      XCTAssertTrue(prompt.contains("\"operation\": \"read|update|delete\""))
+      XCTAssertTrue(prompt.contains("Choose the operation yourself"))
+      XCTAssertFalse(prompt.contains("plain English"))
+      XCTAssertFalse(prompt.contains("For \"turn this into action items\""))
+      XCTAssertFalse(prompt.contains("If the user asks to delete"))
+      XCTAssertTrue(proposal.hasEdits)
+      XCTAssertEqual(proposal.operation, .delete)
+      XCTAssertEqual(proposal.documentMarkdown, "")
+      XCTAssertNil(proposal.recapPatch)
+      XCTAssertEqual(
+        proposal.sourceCitations.first?.segmentID, session.transcriptSegments.first?.id)
+      XCTAssertTrue(
+        proposal.sourceCitations.first?.excerpt.contains("read, updated, or deleted") ?? false)
+    }
+
+    func testDocumentChatAsksModelToReconsiderNoEditResultBeforeReturning() async throws {
+      let languageModel = SequentialLanguageModel(
+        responses: [
+          """
+          {
+            "operation": "read",
+            "assistantMessage": "No document edit was needed.",
+            "sessionTitle": null,
+            "documentMarkdown": null,
+            "recapPatch": null,
+            "transcriptPatches": [],
+            "speakerRenames": [],
+            "warnings": []
+          }
+          """,
+          """
+          {
+            "operation": "update",
+            "assistantMessage": "הכנתי גרסה חדשה בסגנון ספר מסתורין.",
+            "sessionTitle": null,
+            "documentMarkdown": "# תעלומת הלייב\\n\\nהמסך נפתח על סרטון יוטיוב עברי, וצל כבד של סיפור מסתורין ירד על מריק ומיכאל.",
+            "recapPatch": null,
+            "transcriptPatches": [],
+            "speakerRenames": [],
+            "warnings": []
+          }
+          """,
+        ]
+      )
+      let client = LocalSessionDocumentChatClient(languageModel: languageModel)
+      let startedAt = Date(timeIntervalSince1970: 2_250_000)
+      var session = LocalMeetingSession(
+        id: UUID(uuidString: "1D3F614D-25E2-4F2F-B4BE-832A2F9A53BC")!,
+        title: "קטע מלייב של מורה מבוכים ערוץ דונקי",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "81FEE1AD-A3FA-43BE-A13D-DA69F175A85E")!,
+            speaker: "You",
+            text: "ועכשיו אני למשל לוקח סרטון, בואו ניקח איזה סרטון",
+            timestamp: startedAt
+          ),
+          .init(
+            id: UUID(uuidString: "2490A3FD-7133-4B79-A936-6014C6B6D401")!,
+            speaker: "You",
+            text: "ההיסטוריה שראיתי ביוטיוב",
+            timestamp: startedAt.addingTimeInterval(6)
+          ),
+        ],
+        audioArtifacts: .empty
+      )
+      session.recap = LocalSessionRecap(
+        overview: "המסמך עוסק בסרטון יוטיוב בעברית.",
+        generatedAt: startedAt,
+        sections: []
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage:
+            "אני רוצה לשכתב את המסמך מחדש בהתבסס בתמלול. תכתוב מחדש את המסמך כאילו מדובר בספר מסתורין"
+        )
+      )
+
+      XCTAssertEqual(languageModel.prompts.count, 2)
+      let reconsiderationPrompt = try XCTUnwrap(languageModel.prompts.dropFirst().first)
+      XCTAssertTrue(reconsiderationPrompt.contains("previous response produced no document change"))
+      XCTAssertTrue(reconsiderationPrompt.contains("Choose the operation yourself"))
+      XCTAssertEqual(proposal.operation, .update)
+      XCTAssertEqual(
+        proposal.documentMarkdown,
+        "# תעלומת הלייב\n\nהמסך נפתח על סרטון יוטיוב עברי, וצל כבד של סיפור מסתורין ירד על מריק ומיכאל."
+      )
+    }
+
+    func testDocumentChatCreatesSafetyNetRewriteWhenModelTwiceReturnsNoEdit() async throws {
+      let languageModel = SequentialLanguageModel(
+        responses: [
+          """
+          {
+            "operation": "read",
+            "assistantMessage": "No document edit was needed.",
+            "sessionTitle": null,
+            "documentMarkdown": null,
+            "recapPatch": null,
+            "transcriptPatches": [],
+            "speakerRenames": [],
+            "warnings": []
+          }
+          """,
+          """
+          {
+            "operation": "read",
+            "assistantMessage": "No document edit was needed.",
+            "sessionTitle": null,
+            "documentMarkdown": null,
+            "recapPatch": null,
+            "transcriptPatches": [],
+            "speakerRenames": [],
+            "warnings": []
+          }
+          """,
+        ]
+      )
+      let client = LocalSessionDocumentChatClient(languageModel: languageModel)
+      let startedAt = Date(timeIntervalSince1970: 2_260_000)
+      var session = LocalMeetingSession(
+        id: UUID(uuidString: "E40E47C8-6D29-42E2-B63B-D7D230561947")!,
+        title: "קטע מלייב של מורה מבוכים ערוץ דונקי",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "A865C51E-9E62-4F8D-9B1E-E62428CDE14F")!,
+            speaker: "You",
+            text: "זה הלייב של מורה מבוכים של ערוץ דונקי.",
+            timestamp: startedAt
+          ),
+          .init(
+            id: UUID(uuidString: "25573A44-5D2C-4A43-B64E-2BD04708D963")!,
+            speaker: "Remote speaker",
+            text: "את מצליחה להתחבא מאחורי השיח ולתקוף אותו.",
+            timestamp: startedAt.addingTimeInterval(6)
+          ),
+          .init(
+            id: UUID(uuidString: "F67E5FCF-7DBE-445D-93F1-4B55C2826E30")!,
+            speaker: "Remote speaker",
+            text: "החץ שמחטיא פוגע בעץ מושחת ליד מריק ומיכאל.",
+            timestamp: startedAt.addingTimeInterval(12)
+          ),
+        ],
+        audioArtifacts: .empty
+      )
+      session.recap = LocalSessionRecap(
+        overview: "המסמך עוסק בסרטון יוטיוב בעברית ובסצנת משחק תפקידים.",
+        generatedAt: startedAt,
+        sections: []
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage:
+            "אני רוצה לשכתב את המסמך מחדש בהתבסס בתמלול. תכתוב מחדש את המסמך כאילו מדובר בספר מסתורין"
+        )
+      )
+
+      XCTAssertEqual(languageModel.prompts.count, 2)
+      XCTAssertTrue(proposal.hasEdits)
+      XCTAssertEqual(proposal.operation, .update)
+      let documentMarkdown = try XCTUnwrap(proposal.documentMarkdown)
+      XCTAssertTrue(documentMarkdown.contains("ספר מסתורין"))
+      XCTAssertTrue(documentMarkdown.contains("מורה מבוכים"))
+      XCTAssertTrue(documentMarkdown.contains("מריק ומיכאל"))
+      XCTAssertFalse(proposal.assistantMessage.contains("No document edit was needed"))
+    }
+
+    func testDocumentChatCreatesSafetyNetRewriteWhenModelReturnsInvalidJsonForClearRewrite()
+      async throws
+    {
+      let languageModel = SequentialLanguageModel(
+        responses: [
+          "not json",
+          "still not json",
+        ]
+      )
+      let client = LocalSessionDocumentChatClient(languageModel: languageModel)
+      let startedAt = Date(timeIntervalSince1970: 2_270_000)
+      var session = LocalMeetingSession(
+        id: UUID(uuidString: "A78FCE04-A0D0-41BF-B023-46EE8E70F3C1")!,
+        title: "קטע מלייב של מורה מבוכים ערוץ דונקי",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "3E6FF3EC-77C2-4777-953E-FE7B6F862068")!,
+            speaker: "You",
+            text: "זה הלייב של מורה מבוכים של ערוץ דונקי.",
+            timestamp: startedAt
+          ),
+          .init(
+            id: UUID(uuidString: "8ED371BD-D77B-4713-A81E-3A8316944A56")!,
+            speaker: "Remote speaker",
+            text: "החץ שמחטיא פוגע בעץ מושחת ליד מריק ומיכאל.",
+            timestamp: startedAt.addingTimeInterval(12)
+          ),
+        ],
+        audioArtifacts: .empty
+      )
+      session.recap = LocalSessionRecap(
+        overview: "המסמך עוסק בסרטון יוטיוב בעברית ובסצנת משחק תפקידים.",
+        generatedAt: startedAt,
+        sections: []
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage:
+            "אני רוצה לשכתב את המסמך מחדש בהתבסס בתמלול. תכתוב מחדש את המסמך כאילו מדובר בספר מסתורין"
+        )
+      )
+
+      XCTAssertEqual(languageModel.prompts.count, 2)
+      XCTAssertTrue(proposal.hasEdits)
+      XCTAssertEqual(proposal.operation, .update)
+      let documentMarkdown = try XCTUnwrap(proposal.documentMarkdown)
+      XCTAssertTrue(documentMarkdown.contains("ספר מסתורין"))
+      XCTAssertTrue(documentMarkdown.contains("מורה מבוכים"))
+      XCTAssertTrue(documentMarkdown.contains("מריק ומיכאל"))
+      XCTAssertFalse(proposal.assistantMessage.contains("could not produce a clean document edit"))
+    }
+
+    func testDocumentChatCleanupFallbackUsesCurrentRecapInsteadOfOpeningTranscriptNoise()
+      async throws
+    {
+      let languageModel = SequentialLanguageModel(
+        responses: [
+          #"{ "text": "Clean up the recap and make it sharper." }"#,
+          #"{ "text": "Clean up the recap and make it sharper." }"#,
+        ]
+      )
+      let client = LocalSessionDocumentChatClient(languageModel: languageModel)
+      let startedAt = Date(timeIntervalSince1970: 2_278_000)
+      var session = LocalMeetingSession(
+        id: UUID(uuidString: "FA84B3F7-E488-48D6-B9C0-A5F4342E43C9")!,
+        title: "Runtime chat cleanup",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "83A7C6F3-695C-4443-B31A-121D5F87D3C4")!,
+            speaker: "Remote speaker",
+            text: "Did you see Claude Business?",
+            timestamp: startedAt.addingTimeInterval(4)
+          ),
+          .init(
+            id: UUID(uuidString: "4F5FD415-2085-4B2A-87C5-B6AD650963F7")!,
+            speaker: "You",
+            text: "The actual topic is a Hebrew role-playing video with a corrupted tree.",
+            timestamp: startedAt.addingTimeInterval(30)
+          ),
+        ],
+        audioArtifacts: .empty
+      )
+      session.recap = LocalSessionRecap(
+        overview:
+          "The recording is a Hebrew video commentary about a role-playing scene, stealth, an attack, and a corrupted tree.",
+        generatedAt: startedAt,
+        sections: [
+          LocalSessionRecapSection(
+            id: UUID(uuidString: "86B78B02-A021-4D08-B5E4-6C694C37EAE7")!,
+            kind: .keyPoints,
+            title: "What matters",
+            summary: "The recap should stay focused on the video content.",
+            bullets: ["Role-playing scene", "Corrupted tree", "No operational meeting actions"],
+            anchorTimestamp: nil,
+            startOffset: nil,
+            endOffset: nil
+          )
+        ]
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "Clean up the recap and make it sharper."
+        )
+      )
+
+      let markdown = try XCTUnwrap(proposal.documentMarkdown)
+      XCTAssertTrue(proposal.hasEdits)
+      XCTAssertEqual(proposal.operation, .update)
+      XCTAssertTrue(markdown.contains("Hebrew video commentary"))
+      XCTAssertTrue(markdown.contains("Corrupted tree"))
+      XCTAssertTrue(markdown.contains("Speaker context"))
+      XCTAssertFalse(markdown.contains("Did you see Claude Business?"))
+      let citationText = proposal.sourceCitations.map(\.excerpt).joined(separator: " ")
+      XCTAssertTrue(citationText.contains("corrupted tree"))
+      XCTAssertFalse(citationText.contains("Claude Business"))
+    }
+
+    func testDocumentChatCleanupFallbackTreatsQuestionAsEditIntent() async throws {
+      let languageModel = SequentialLanguageModel(
+        responses: [
+          #"{ "text": "Can you rewrite this document?" }"#,
+          #"{ "text": "Can you rewrite this document?" }"#,
+        ]
+      )
+      let client = LocalSessionDocumentChatClient(languageModel: languageModel)
+      let startedAt = Date(timeIntervalSince1970: 2_279_000)
+      var session = LocalMeetingSession(
+        id: UUID(uuidString: "6F9FC7D1-435C-43CE-9DA5-2A50C41C4F50")!,
+        title: "Question edit intent",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "B624DCE0-7F13-4D60-9459-C0B8950D7AE4")!,
+            speaker: "You",
+            text: "The actual recording is a short product review, not a meeting.",
+            timestamp: startedAt.addingTimeInterval(5)
+          )
+        ],
+        audioArtifacts: .empty
+      )
+      session.recap = LocalSessionRecap(
+        overview: "The recording is a short product review, not a meeting.",
+        generatedAt: startedAt,
+        sections: []
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "Can you rewrite this document?"
+        )
+      )
+
+      let markdown = try XCTUnwrap(proposal.documentMarkdown)
+      XCTAssertTrue(proposal.hasEdits)
+      XCTAssertEqual(proposal.operation, .update)
+      XCTAssertTrue(markdown.contains("short product review"))
+      XCTAssertFalse(markdown.contains("Meeting Brief and Action Plan"))
+    }
+
+    func testDocumentChatDoesNotInventHebrewSectionPatchWhenModelReturnsInvalidJson()
+      async throws
+    {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(response: "not json")
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_300_000)
+      let session = LocalMeetingSession(
+        id: UUID(uuidString: "A3B4F424-F2D9-4477-8F97-B61D70F93380")!,
+        title: "Hebrew fallback",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [],
+        audioArtifacts: .empty
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "תוסיף סעיף שמדבר על דרוג השיחה"
+        )
+      )
+
+      XCTAssertFalse(proposal.hasEdits)
+      XCTAssertNil(proposal.recapPatch)
+      XCTAssertTrue(
+        proposal.warnings.contains(
+          "The local model returned an invalid edit shape, so nothing was applied."))
+    }
+
+    func testDocumentChatUsesModelProvidedHebrewEndParagraphPatch() async throws {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(
+          response: """
+            {
+              "operation":"update",
+              "assistantMessage":"הכנתי פסקת המשך בסוף המסמך.",
+              "recapPatch":{
+                "overview":null,
+                "sections":[
+                  {"kind":"notes","title":"המשך המסמך","summary":"הדמויות ממשיכות לנוע בזהירות בתוך היער.","bullets":[]}
+                ]
+              },
+              "transcriptPatches":[],
+              "speakerRenames":[],
+              "warnings":[]
+            }
+            """
+        )
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_310_000)
+      let session = LocalMeetingSession(
+        id: UUID(uuidString: "1EC606AB-C8D5-46DE-A7B2-4CBAD3DF016C")!,
+        title: "Hebrew append fallback",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [],
+        audioArtifacts: .empty
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "תוסיף בסוף המסמך: הדמויות ממשיכות לנוע בזהירות בתוך היער."
+        )
+      )
+
+      XCTAssertTrue(proposal.hasEdits)
+      XCTAssertEqual(proposal.operation, .update)
+      XCTAssertEqual(proposal.recapPatch?.sections.first?.kind, .notes)
+      XCTAssertEqual(proposal.recapPatch?.sections.first?.title, "המשך המסמך")
+      XCTAssertEqual(
+        proposal.recapPatch?.sections.first?.summary,
+        "הדמויות ממשיכות לנוע בזהירות בתוך היער."
+      )
+      XCTAssertTrue(proposal.recapPatch?.sections.first?.bullets.isEmpty ?? false)
+    }
+
+    func testDocumentChatDoesNotInventAppendContentWhenModelReturnsInvalidJson() async throws {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(response: "not json")
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_315_000)
+      let session = LocalMeetingSession(
+        id: UUID(uuidString: "87D6A0FE-69E6-412A-BAF1-848D118B25E1")!,
+        title: "Missing append content",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [],
+        audioArtifacts: .empty
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "תוסיף את המלל בסוף המסמך. תרשום את זה כמו ספר."
+        )
+      )
+
+      XCTAssertFalse(proposal.hasEdits)
+      XCTAssertNil(proposal.recapPatch)
+      XCTAssertTrue(proposal.assistantMessage.contains("could not produce a clean document edit"))
+    }
+
+    func testDocumentChatUsesModelProvidedHebrewStoryContinuation() async throws {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(
+          response: """
+            {
+              "operation":"update",
+              "assistantMessage":"הכנתי המשך סיפורי מתוך התמלול.",
+              "recapPatch":{
+                "overview":null,
+                "sections":[
+                  {"kind":"notes","title":"המשך הסיפור","summary":"מריק, מיכאל והמכשפה נשארים מול איום שממשיך להסתבך סביב היער.","bullets":[]}
+                ]
+              },
+              "transcriptPatches":[],
+              "speakerRenames":[],
+              "warnings":[]
+            }
+            """
+        )
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_316_000)
+      let session = LocalMeetingSession(
+        id: UUID(uuidString: "42326B44-D613-4946-B36C-4917BEE9112F")!,
+        title: "מבוכים ודרקונים",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "92892174-B574-472F-AE50-84AEBC4253D7")!,
+            speaker: "You",
+            text: "ניסיון התגנבות ותקיפה, גלגולי קובייה, חץ שמחטיא ופוגע בעץ מושחת.",
+            timestamp: startedAt.addingTimeInterval(6)
+          ),
+          .init(
+            id: UUID(uuidString: "C83E9F20-052E-4D94-AE62-88C62B0A8F30")!,
+            speaker: "You",
+            text: "מריק, מיכאל והמכשפה נשארים מול איום שממשיך להסתבך סביב היער.",
+            timestamp: startedAt.addingTimeInterval(24)
+          ),
+        ],
+        audioArtifacts: .empty
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "תוסיף את התמלול בסוף המסמך. תרשום את זה כמו סיפור."
+        )
+      )
+
+      let section = try XCTUnwrap(proposal.recapPatch?.sections.first)
+      XCTAssertTrue(proposal.hasEdits)
+      XCTAssertEqual(proposal.operation, .update)
+      XCTAssertEqual(section.kind, .notes)
+      XCTAssertEqual(section.title, "המשך הסיפור")
+      XCTAssertTrue(section.summary.contains("מריק"))
+      XCTAssertTrue(section.summary.contains("מיכאל"))
+      XCTAssertTrue(section.summary.contains("המכשפה"))
+      XCTAssertFalse(section.summary.contains("תוסיף"))
+      XCTAssertFalse(section.summary.contains("תרשום"))
+      XCTAssertFalse(section.summary.contains("התמלול בסוף המסמך"))
+      XCTAssertEqual(
+        proposal.sourceCitations.first?.segmentID, session.transcriptSegments.first?.id)
+    }
+
+    func testDocumentChatDoesNotRewriteModelProvidedPatchWithFallback() async throws {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(
+          response: """
+            {
+              "assistantMessage":"הוספתי פסקת המשך בסוף המסמך.",
+              "operation":"update",
+              "recapPatch":{
+                "overview":null,
+                "sections":[
+                  {"kind":"notes","title":"המשך המסמך","summary":"תוסיף את התמלול בסוף המסמך","bullets":[]}
+                ]
+              },
+              "transcriptPatches":[],
+              "speakerRenames":[],
+              "warnings":[]
+            }
+            """
+        )
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_317_000)
+      let session = LocalMeetingSession(
+        id: UUID(uuidString: "9595C3AF-2D96-428E-A61E-AB39D2962765")!,
+        title: "מבוכים ודרקונים",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "59F2E8EE-86BF-485D-85E1-C248FC154375")!,
+            speaker: "You",
+            text: "מריק ומיכאל ממשיכים להתקדם ביער בזמן שהמכשפה אורבת להם.",
+            timestamp: startedAt.addingTimeInterval(6)
+          )
+        ],
+        audioArtifacts: .empty
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "תוסיף את התמלול בסוף המסמך. תרשום את זה כמו סיפור."
+        )
+      )
+
+      let section = try XCTUnwrap(proposal.recapPatch?.sections.first)
+      XCTAssertEqual(proposal.operation, .update)
+      XCTAssertEqual(section.title, "המשך המסמך")
+      XCTAssertTrue(section.summary.contains("תוסיף"))
+      XCTAssertTrue(section.summary.contains("התמלול בסוף המסמך"))
+    }
+
+    func testDocumentChatDoesNotInventStyleEditWhenModelReturnsNoPatch()
+      async throws
+    {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(
+          response: """
+            {"assistantMessage":"קיצרתי וכתבתי מחדש.","recapPatch":null,"transcriptPatches":[],"speakerRenames":[],"warnings":[]}
+            """
+        )
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_320_000)
+      var session = LocalMeetingSession(
+        id: UUID(uuidString: "52F2BEE2-508B-4885-94DB-99064D6B761C")!,
+        title: "Hebrew style edit",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "206BC240-3C3A-4D0B-A8A7-C77F16D85743")!,
+            speaker: "You",
+            text: "אני בודק שהסיכום יהיה קצר וברוח ההקלטה עצמה.",
+            timestamp: startedAt
+          )
+        ],
+        audioArtifacts: .empty
+      )
+      session.recap = LocalSessionRecap(
+        overview: "זהו סיכום ארוך מדי שמפרט מעבר למה שנדרש מההקלטה עצמה.",
+        generatedAt: startedAt,
+        sections: []
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "תקצר ותכתוב ברוח ההקלטה עצמה"
+        )
+      )
+
+      XCTAssertFalse(proposal.hasEdits)
+      XCTAssertNil(proposal.recapPatch)
+      XCTAssertTrue(proposal.assistantMessage.contains("קיצרתי"))
+    }
+
+    func testDocumentChatDoesNotInventTitlePatchWhenModelReturnsInvalidJson()
+      async throws
+    {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(response: "not json")
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_330_000)
+      let session = LocalMeetingSession(
+        id: UUID(uuidString: "6E6B8369-DDF4-4421-A2F8-3D7A58863023")!,
+        title: "Session 30 Apr 2026 at 12:26",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [],
+        audioArtifacts: .empty
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "תעדכן את הכותרת - קטע מלייב של מורה מבוכים ערוץ דונקי"
+        )
+      )
+
+      XCTAssertFalse(proposal.hasEdits)
+      XCTAssertNil(proposal.sessionTitle)
+      XCTAssertNil(proposal.recapPatch)
+    }
+
+    func testDocumentChatDoesNotInventClearDocumentReplacementWhenModelFails()
+      async throws
+    {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(response: "not json")
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_335_000)
+      var session = LocalMeetingSession(
+        id: UUID(uuidString: "FB602D4C-BCA7-41B5-A1A5-40FC9B068C2A")!,
+        title: "Session 30 Apr 2026 at 14:52",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "38F7BCF1-07BE-4500-9C68-8100F6B9268A")!,
+            speaker: "You",
+            text: "המסמך עדיין מלא בטקסט שצריך למחוק.",
+            timestamp: startedAt.addingTimeInterval(15)
+          )
+        ],
+        audioArtifacts: .empty
+      )
+      session.recap = LocalSessionRecap(
+        overview: "This text should disappear from the Markdown document.",
+        generatedAt: nil,
+        sections: []
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(session: session, userMessage: "תמחק הכל")
+      )
+
+      XCTAssertFalse(proposal.hasEdits)
+      XCTAssertNil(proposal.documentMarkdown)
+      XCTAssertNil(proposal.recapPatch)
+      XCTAssertTrue(proposal.assistantMessage.contains("could not produce a clean document edit"))
+    }
+
+    func testDocumentChatFallbackWarningHidesRawLocalModelLoaderFailure() async throws {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: ThrowingMessageLanguageModel(
+          message: """
+            dyld[98025]: Library not loaded: @rpath/llama.framework/Versions/Current/llama
+              Referenced from: /private/tmp/CepessaLocalModelRunner
+            """
+        )
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_340_000)
+      let session = LocalMeetingSession(
+        id: UUID(uuidString: "8B87E819-BF54-4119-8A70-DAE55EE5B3E5")!,
+        title: "Session 30 Apr 2026 at 12:26",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "FBB0D060-5574-4721-9EAA-5C919166C4B1")!,
+            speaker: "You",
+            text: "The title should describe the session cleanly.",
+            timestamp: startedAt
+          )
+        ],
+        audioArtifacts: .empty
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "Update the title - QA agent check"
+        )
+      )
+
+      let warning = try XCTUnwrap(proposal.warnings.first)
+      XCTAssertTrue(
+        warning == "The document model was unavailable, so no document change was proposed."
+          || warning
+            == "The document model did not return an edit, so Sessions prepared a direct draft from the session material."
+      )
+      XCTAssertFalse(warning.contains("dyld"))
+      XCTAssertFalse(warning.contains("@rpath"))
+      XCTAssertFalse(warning.contains("/private/tmp"))
+    }
+
+    func testDocumentChatUsesModelProvidedHebrewQuestionAnswer() async throws {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(
+          response: """
+            {
+              "operation": "read",
+              "assistantMessage": "המסמך עוסק בבדיקת סיכום של המודל המקומי, ובודק אם הוא באמת מסכם את המסמך.",
+              "sessionTitle": null,
+              "documentMarkdown": null,
+              "recapPatch": null,
+              "transcriptPatches": [],
+              "speakerRenames": [],
+              "warnings": []
+            }
+            """
+        )
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_350_000)
+      var session = LocalMeetingSession(
+        id: UUID(uuidString: "8AFC4AFF-1E45-4FF0-AD89-7EE8C4506253")!,
+        title: "Session 29 Apr 2026 at 13:38",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "AC2D1353-B53B-4C96-A781-FE1CB55A7702")!,
+            speaker: "local model",
+            text: "אוקיי, אני עושה כרגע בדיקה.",
+            timestamp: startedAt
+          ),
+          .init(
+            id: UUID(uuidString: "B3DF2F80-5062-4EBE-8794-243B71E5B550")!,
+            speaker: "local model",
+            text: "אני רוצה לראות באמת שהוא מסכם את המסמך.",
+            timestamp: startedAt.addingTimeInterval(2)
+          ),
+        ],
+        audioArtifacts: .empty
+      )
+      session.recap = LocalSessionRecap(
+        overview: "המסמך עוסק בבדיקת סיכום של המודל המקומי.",
+        generatedAt: startedAt,
+        sections: []
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "על מה המסמך?"
+        )
+      )
+
+      XCTAssertFalse(proposal.hasEdits)
+      XCTAssertEqual(proposal.operation, .read)
+      XCTAssertTrue(proposal.assistantMessage.contains("המסמך"))
+      XCTAssertTrue(proposal.assistantMessage.contains("מסכם"))
+      XCTAssertFalse(proposal.assistantMessage.contains("clean document edit"))
+    }
+
+    func testDocumentChatHebrewAboutQuestionSummarizesVideoInsteadOfRepeatingOpeningTranscript()
+      async throws
+    {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(
+          response: """
+            {
+              "operation": "read",
+              "assistantMessage": "המסמך עוסק בסרטון יוטיוב בעברית, כנראה לייב של מורה מבוכים, ובסצנת משחק תפקידים עם התגנבות ותקיפה.",
+              "sessionTitle": null,
+              "documentMarkdown": null,
+              "recapPatch": null,
+              "transcriptPatches": [],
+              "speakerRenames": [],
+              "warnings": []
+            }
+            """
+        )
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_360_000)
+      var session = LocalMeetingSession(
+        id: UUID(uuidString: "8E10F51A-ED0F-4C59-AAB9-33863D109920")!,
+        title: "Session 30 Apr 2026 at 12:26",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "9D9D9F87-0812-48E6-8D7E-FF726105C237")!,
+            speaker: "You",
+            text: "ועכשיו אני למשל לוקח סרטון, בואו ניקח איזה סרטון",
+            timestamp: startedAt
+          ),
+          .init(
+            id: UUID(uuidString: "4B8171B0-6745-40D5-8E61-20C6D792C27F")!,
+            speaker: "You",
+            text: "ההיסטוריה שראיתי ביוטיוב, אני רוצה משהו בעברית.",
+            timestamp: startedAt.addingTimeInterval(4)
+          ),
+          .init(
+            id: UUID(uuidString: "6E7F4EC1-E5CC-4C01-9B97-CFEC1EA34397")!,
+            speaker: "Remote speaker",
+            text: "זה הלייב של מורה מבוכים של ערוץ דונקי.",
+            timestamp: startedAt.addingTimeInterval(8)
+          ),
+          .init(
+            id: UUID(uuidString: "89D77003-6F52-43E0-87E3-D5DF73FB0B4A")!,
+            speaker: "Remote speaker",
+            text: "את מצליחה להתחבא מאחורי השיח ולתקוף אותו.",
+            timestamp: startedAt.addingTimeInterval(18)
+          ),
+        ],
+        audioArtifacts: .empty
+      )
+      session.recap = LocalSessionRecap(
+        overview: "The video commentary captured the main areas that need follow-up.",
+        generatedAt: startedAt,
+        sections: []
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "על מה המסמך"
+        )
+      )
+
+      XCTAssertFalse(proposal.hasEdits)
+      XCTAssertEqual(proposal.operation, .read)
+      XCTAssertTrue(
+        proposal.assistantMessage.contains("יוטיוב")
+          || proposal.assistantMessage.contains("מורה מבוכים"))
+      XCTAssertTrue(proposal.assistantMessage.contains("סרטון"))
+      XCTAssertFalse(proposal.assistantMessage.contains("בואו ניקח איזה סרטון"))
+      XCTAssertFalse(proposal.assistantMessage.contains("ההיסטוריה שראיתי"))
+    }
+
+    func testDocumentChatDropsSchemaLiteralSectionKindInsteadOfGuessingModelIntent() async throws {
+      let client = LocalSessionDocumentChatClient(
+        languageModel: CapturingLanguageModel(
+          response: """
+            {
+              "operation": "update",
+              "assistantMessage": "I updated the action items.",
+              "recapPatch": {
+                "overview": null,
+                "sections": [
+                  {
+                    "kind": "keyPoints|decisions|actionItem|openQuestions|nextSteps|notes|overview",
+                    "title": "Review conversation rating",
+                    "summary": "Review the conversation rating and decide what changes next.",
+                    "bullets": ["Review the conversation rating.", "Decide what changes next."]
+                  }
+                ]
+              },
+              "transcriptPatches": [],
+              "speakerRenames": [],
+              "warnings": []
+            }
+            """
+        )
+      )
+      let startedAt = Date(timeIntervalSince1970: 2_400_000)
+      let session = LocalMeetingSession(
+        id: UUID(uuidString: "74A2F030-BB53-4C2A-B0B1-95E2FBA69BD5")!,
+        title: "Action fallback",
+        startedAt: startedAt,
+        status: .ready,
+        transcriptSegments: [
+          .init(
+            id: UUID(uuidString: "64C58049-72D6-42BE-B319-A6CD60B5083D")!,
+            speaker: "Ben",
+            text: "We need to review the conversation rating and decide what changes next.",
+            timestamp: startedAt.addingTimeInterval(12)
+          )
+        ],
+        audioArtifacts: .empty
+      )
+
+      let proposal = try await client.sendMessage(
+        LocalSessionDocumentChatRequest(
+          session: session,
+          userMessage: "Turn this into action items."
+        )
+      )
+
+      XCTAssertEqual(proposal.operation, .update)
+      XCTAssertNil(proposal.recapPatch)
+      XCTAssertFalse(proposal.documentMarkdown?.contains("keyPoints|decisions") == true)
+    }
+  #endif
+}
+
+private final class CapturingLanguageModel: @unchecked Sendable, LocalSessionLanguageModelGenerating
+{
+  private let response: String
+  nonisolated(unsafe) private(set) var lastPrompt: String?
+
+  init(response: String) {
+    self.response = response
+  }
+
+  func generateText(prompt: String, maxTokens: Int) async throws -> String {
+    lastPrompt = prompt
+    return response
+  }
+}
+
+private final class SequentialLanguageModel: @unchecked Sendable,
+  LocalSessionLanguageModelGenerating
+{
+  private let responses: [String]
+  nonisolated(unsafe) private(set) var prompts: [String] = []
+
+  init(responses: [String]) {
+    self.responses = responses
+  }
+
+  func generateText(prompt: String, maxTokens: Int) async throws -> String {
+    prompts.append(prompt)
+    let index = min(prompts.count - 1, responses.count - 1)
+    return responses[index]
+  }
+}
+
+private struct ThrowingLanguageModel: LocalSessionLanguageModelGenerating {
+  func generateText(prompt: String, maxTokens: Int) async throws -> String {
+    throw EmbeddedLocalLanguageModelError.modelNotFound
+  }
+}
+
+private struct ThrowingMessageLanguageModel: LocalSessionLanguageModelGenerating {
+  let message: String
+
+  func generateText(prompt: String, maxTokens: Int) async throws -> String {
+    throw MessageError(message: message)
+  }
+
+  private struct MessageError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+  }
 }

@@ -38,7 +38,7 @@ export function NewBadge({ plugin, className = '' }: NewBadgeProps) {
 
   return (
     <span
-      className={`inline-flex items-center rounded-full bg-[#6C8EEF]/15 px-2 py-0.5 text-xs font-medium text-[#6C8EEF] ${className}`}
+      className={`inline-flex items-center rounded-md bg-[rgba(213,168,79,0.14)] px-2 py-0.5 text-xs font-bold text-[var(--market-accent-soft)] ${className}`}
     >
       NEW
     </span>

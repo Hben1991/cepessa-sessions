@@ -154,6 +154,56 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
     );
   }
 
+  String _homeGreeting() {
+    final hour = DateTime.now().hour;
+    if (hour < 12) return 'Good morning';
+    if (hour < 17) return 'Good afternoon';
+    if (hour < 21) return 'Good evening';
+    return 'Good night';
+  }
+
+  Widget _buildHomeGreeting() {
+    final name = SharedPreferencesUtil().givenName.trim();
+    final text = name.isEmpty ? _homeGreeting() : '${_homeGreeting()}, $name';
+
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 18, 24, 20),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final fontSize = (constraints.maxWidth * 0.118).clamp(38.0, 54.0).toDouble();
+            return ShaderMask(
+              blendMode: BlendMode.srcIn,
+              shaderCallback: (bounds) {
+                return const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFFFFFFFF), Color(0xFFEAE4DA), Color(0x99FFFFFF)],
+                  stops: [0.05, 0.58, 1],
+                ).createShader(bounds);
+              },
+              child: Text(
+                text,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontFamily: 'New York',
+                  fontFamilyFallback: const ['SF Pro Display', 'Georgia'],
+                  fontSize: fontSize,
+                  fontStyle: FontStyle.italic,
+                  fontWeight: FontWeight.w300,
+                  height: 0.94,
+                  letterSpacing: -1.4,
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     Logger.debug('building conversations page');
@@ -178,7 +228,9 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
             controller: _scrollController,
             physics: const AlwaysScrollableScrollPhysics(),
             slivers: [
-              // Header widgets (unchanged)
+              _buildHomeGreeting(),
+
+              // Header widgets
               const SliverToBoxAdapter(child: SpeechProfileCardWidget()),
               const SliverToBoxAdapter(child: UpdateFirmwareCardWidget()),
               const SliverToBoxAdapter(child: ActiveCallBanner()),

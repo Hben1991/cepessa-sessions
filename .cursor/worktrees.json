@@ -1,5 +1,5 @@
 {
-  "_comment": "Worktree setup configuration for Omi parallel agents",
+  "_comment": "Worktree setup configuration for Cepessa Sessions parallel agents",
   "_comment2": "See https://cursor.com/docs/configuration/worktrees for documentation.",
   "_comment3": "ROOT_WORKTREE_PATH points to the root worktree directory",
   "setup-worktree": [

@@ -5,7 +5,7 @@
 version: 2
 name: dashboard
 description: Dashboard flow — verify productivity widgets load, create/update/delete goals, toggle task completion, view embedded conversations
-app: com.omi.computer-macos
+app: me.cepessa.sessions.local
 covers:
   - desktop/Desktop/Sources/MainWindow/Pages/DashboardPage.swift
   - desktop/Desktop/Sources/MainWindow/Components/GoalsWidget.swift

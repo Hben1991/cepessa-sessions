@@ -22,7 +22,7 @@ export function CompactPluginCard({ plugin, index }: CompactPluginCardProps) {
   return (
     <Link
       href={`/apps/${plugin.id}`}
-      className="group flex items-start gap-2.5 rounded-lg p-2 text-left transition-colors duration-300 hover:bg-[#1A1F2E]/50"
+      className="market-card-hover group flex items-start gap-3 rounded-[1.25rem] border border-transparent p-2.5 text-left hover:bg-[rgba(255,248,231,0.045)]"
       data-plugin-card
       data-plugin-id={plugin.id}
       data-search-content={`${plugin.name} ${plugin.author} ${plugin.description}`}
@@ -30,7 +30,7 @@ export function CompactPluginCard({ plugin, index }: CompactPluginCardProps) {
       data-capabilities={Array.from(plugin.capabilities).join(' ')}
     >
       {/* Index number */}
-      <span className="flex w-4 shrink-0 items-center text-sm font-medium text-gray-400">
+      <span className="flex w-5 shrink-0 items-center font-mono text-xs font-semibold tabular-nums text-[var(--market-accent-soft)]">
         {index}
       </span>
 
@@ -38,7 +38,7 @@ export function CompactPluginCard({ plugin, index }: CompactPluginCardProps) {
       <Image
         src={plugin.image || 'https://via.placeholder.com/40'}
         alt={plugin.name}
-        className="h-11 w-11 shrink-0 rounded-lg object-cover sm:h-14 sm:w-14"
+        className="h-11 w-11 shrink-0 rounded-[1rem] object-cover saturate-[0.86] sm:h-14 sm:w-14"
         width={56}
         height={56}
       />
@@ -47,7 +47,7 @@ export function CompactPluginCard({ plugin, index }: CompactPluginCardProps) {
       <div className="min-w-0 flex-1 space-y-0.5">
         {/* Title and NEW badge */}
         <div className="flex items-center gap-2">
-          <h3 className="flex-1 truncate font-medium text-white transition-colors group-hover:text-[#6C8EEF]">
+          <h3 className="flex-1 truncate font-semibold tracking-[-0.02em] text-[var(--market-ink)] transition-colors group-hover:text-[var(--market-accent-soft)]">
             {plugin.name}
           </h3>
           <NewBadge plugin={plugin} />
@@ -55,8 +55,10 @@ export function CompactPluginCard({ plugin, index }: CompactPluginCardProps) {
 
         {/* Author and Stats Row */}
         <div className="flex items-center justify-between gap-2">
-          <span className="truncate text-xs text-gray-400">by {plugin.author}</span>
-          <div className="flex shrink-0 items-center gap-2.5 text-xs text-gray-400">
+          <span className="truncate text-xs text-[var(--market-muted)]">
+            by {plugin.author}
+          </span>
+          <div className="flex shrink-0 items-center gap-2.5 font-mono text-[0.68rem] text-[var(--market-muted)]">
             <div className="flex items-center">
               <Star className="mr-1 h-3.5 w-3.5" />
               <span>{plugin.rating_avg?.toFixed(1)}</span>
@@ -69,7 +71,7 @@ export function CompactPluginCard({ plugin, index }: CompactPluginCardProps) {
         </div>
 
         {/* Description */}
-        <p className="line-clamp-1 text-xs text-gray-400 transition-colors group-hover:text-gray-300 sm:text-sm">
+        <p className="line-clamp-1 text-xs text-[var(--market-muted)] transition-colors group-hover:text-[#d8d0c1] sm:text-sm">
           {plugin.description}
         </p>
       </div>

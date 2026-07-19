@@ -1,7 +1,7 @@
 version: 2
 name: screen-recording-permission
 description: Screen Recording permission flow — verify Rewind permission state, grant flow, toggle monitoring, and Settings integration
-app: com.omi.computer-macos
+app: me.cepessa.sessions.local
 covers:
   - desktop/Desktop/Sources/Rewind/UI/RewindPage.swift
   - desktop/Desktop/Sources/ScreenCaptureService.swift
@@ -26,7 +26,7 @@ steps:
 
   - id: S3
     name: Interact with Grant Permission button
-    do: "If the 'Grant Permission' button is visible, click it. This should open System Settings to the Screen Recording privacy pane. Verify the system preferences window opens (or note if it does). After 3 seconds, return focus to the Omi app and re-snapshot to check if permission state changed."
+    do: "If the 'Grant Permission' button is visible, click it. This should open System Settings to the Screen Recording privacy pane. Verify the system preferences window opens (or note if it does). After 3 seconds, return focus to the Cepessa Sessions app and re-snapshot to check if permission state changed."
     expect:
       interactive_count: { min: 1 }
 
