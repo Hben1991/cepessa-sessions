@@ -70,8 +70,7 @@ final class LocalMeetingRecorder: ObservableObject {
   nonisolated(unsafe) private var micWriter: LocalMeetingWaveFileWriter?
   nonisolated(unsafe) private var systemWriter: LocalMeetingWaveFileWriter?
   nonisolated(unsafe) private var mixedWriter: LocalMeetingWaveFileWriter?
-  nonisolated(unsafe) private var pendingMicPCM = Data()
-  nonisolated(unsafe) private var pendingSystemPCM = Data()
+  nonisolated(unsafe) private var synchronizedPCM = LocalMeetingSynchronizedPCMBuffer()
   nonisolated(unsafe) private var mixMode: MixMode = .synchronizedSources
   nonisolated(unsafe) private var mixModeBeforeMute: MixMode?
   nonisolated(unsafe) private var isCaptureGateOpen = false
@@ -126,8 +125,7 @@ final class LocalMeetingRecorder: ObservableObject {
     }
 
     currentSession = session
-    pendingMicPCM = Data()
-    pendingSystemPCM = Data()
+    synchronizedPCM.reset()
     mixMode = .synchronizedSources
     mixModeBeforeMute = nil
     isCaptureGateOpen = false
@@ -253,8 +251,7 @@ final class LocalMeetingRecorder: ObservableObject {
     ioQueue.sync {
       flushPendingMixedAudio()
       closeWriters()
-      pendingMicPCM = Data()
-      pendingSystemPCM = Data()
+      synchronizedPCM.reset()
     }
 
     session.status = .transcribing
@@ -298,8 +295,9 @@ final class LocalMeetingRecorder: ObservableObject {
       case .systemOnly:
         break
       case .synchronizedSources:
-        self.pendingMicPCM.append(data)
-        self.drainMixedAudioIfPossible()
+        self.synchronizedPCM.appendMic(data) { mixed in
+          try? self.mixedWriter?.append(pcm16Data: mixed)
+        }
       }
     }
   }
@@ -323,61 +321,29 @@ final class LocalMeetingRecorder: ObservableObject {
       case .synchronizedSources:
         break
       }
-      self.pendingSystemPCM.append(data)
-      self.drainMixedAudioIfPossible()
+      self.synchronizedPCM.appendSystem(data) { mixed in
+        try? self.mixedWriter?.append(pcm16Data: mixed)
+      }
     }
-  }
-
-  nonisolated private func drainMixedAudioIfPossible() {
-    let bytesToProcess = min(pendingMicPCM.count, pendingSystemPCM.count)
-    guard bytesToProcess >= 2 else { return }
-
-    let evenByteCount = (bytesToProcess / 2) * 2
-    let micChunk = pendingMicPCM.prefix(evenByteCount)
-    let systemChunk = pendingSystemPCM.prefix(evenByteCount)
-    pendingMicPCM.removeFirst(evenByteCount)
-    pendingSystemPCM.removeFirst(evenByteCount)
-
-    let mixed = LocalMeetingAudioMixer.mixMono(
-      micPCM16: Data(micChunk), systemPCM16: Data(systemChunk))
-    try? mixedWriter?.append(pcm16Data: mixed)
   }
 
   nonisolated private func flushPendingMixedAudio() {
     guard mixMode == .synchronizedSources else {
-      pendingMicPCM = Data()
-      pendingSystemPCM = Data()
+      synchronizedPCM.reset()
       return
     }
-
-    let bytesToProcess = max(pendingMicPCM.count, pendingSystemPCM.count)
-    guard bytesToProcess >= 2 else { return }
-
-    let evenByteCount = (bytesToProcess / 2) * 2
-    let micChunk = paddedChunk(from: pendingMicPCM, targetByteCount: evenByteCount)
-    let systemChunk = paddedChunk(from: pendingSystemPCM, targetByteCount: evenByteCount)
-    let mixed = LocalMeetingAudioMixer.mixMono(micPCM16: micChunk, systemPCM16: systemChunk)
-    try? mixedWriter?.append(pcm16Data: mixed)
-  }
-
-  nonisolated private func paddedChunk(from data: Data, targetByteCount: Int) -> Data {
-    if data.count >= targetByteCount {
-      return Data(data.prefix(targetByteCount))
+    synchronizedPCM.flush { mixed in
+      try? mixedWriter?.append(pcm16Data: mixed)
     }
-
-    return data + Data(repeating: 0, count: targetByteCount - data.count)
   }
 
   private func switchToMicrophoneOnlyMode(warningMessage: String) {
     ioQueue.sync {
       if mixMode == .microphoneOnly { return }
 
-      if !pendingMicPCM.isEmpty {
-        try? mixedWriter?.append(pcm16Data: pendingMicPCM)
+      synchronizedPCM.flush { mixed in
+        try? mixedWriter?.append(pcm16Data: mixed)
       }
-
-      pendingMicPCM = Data()
-      pendingSystemPCM = Data()
       mixMode = .microphoneOnly
     }
 
@@ -395,12 +361,8 @@ final class LocalMeetingRecorder: ObservableObject {
         mixModeBeforeMute = mixMode
         if mixMode == .synchronizedSources {
           flushPendingMixedAudio()
-        } else if mixMode == .microphoneOnly, !pendingMicPCM.isEmpty {
-          try? mixedWriter?.append(pcm16Data: pendingMicPCM)
         }
-
-        pendingMicPCM = Data()
-        pendingSystemPCM = Data()
+        synchronizedPCM.reset()
         mixMode = .systemOnly
       } else {
         mixMode = mixModeBeforeMute ?? .synchronizedSources

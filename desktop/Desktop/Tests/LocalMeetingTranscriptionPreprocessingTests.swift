@@ -110,6 +110,138 @@ final class LocalMeetingTranscriptionPreprocessingTests: XCTestCase {
     XCTAssertEqual(LocalMeetingAudioMixer.systemGain(for: Array(repeating: 0, count: 320)), 1)
   }
 
+  func testTranscriptMixerPreservesNormalTwoSidedPCM() {
+    let mic = pcm16Data([1_000, -1_000, 30_000])
+    let system = pcm16Data([2_000, -2_000, 10_000])
+
+    let mixed = pcm16Samples(
+      LocalMeetingAudioMixer.mixMono(micPCM16: mic, systemPCM16: system))
+
+    XCTAssertEqual(mixed, [3_000, -3_000, Int16.max])
+  }
+
+  func testSynchronizedPCMBufferPairsNormalAlternatingSourcesWithoutRetainingAudio() {
+    var buffer = LocalMeetingSynchronizedPCMBuffer(maximumSkewByteCount: 16)
+    var output: [Data] = []
+
+    buffer.appendMic(pcm16Data([1_000, -1_000])) { output.append($0) }
+    buffer.appendSystem(pcm16Data([2_000, -2_000])) { output.append($0) }
+
+    XCTAssertEqual(output.count, 1)
+    XCTAssertEqual(pcm16Samples(output[0]), [3_000, -3_000])
+    XCTAssertEqual(buffer.bufferedByteCount, 0)
+  }
+
+  func testSynchronizedPCMBufferWaitsForDelayedSourceInsideSkewWindow() {
+    var buffer = LocalMeetingSynchronizedPCMBuffer(maximumSkewByteCount: 8)
+    var output: [Data] = []
+    let mic = pcm16Data([1_000, 2_000, 3_000, 4_000])
+    let system = pcm16Data([2_000, 2_000, 2_000, 2_000])
+
+    buffer.appendMic(mic) { output.append($0) }
+    XCTAssertTrue(output.isEmpty)
+    XCTAssertEqual(buffer.bufferedByteCount, 8)
+
+    buffer.appendSystem(system) { output.append($0) }
+
+    XCTAssertEqual(output.count, 1)
+    XCTAssertEqual(pcm16Samples(output[0]), [3_000, 4_000, 5_000, 6_000])
+    XCTAssertEqual(buffer.bufferedByteCount, 0)
+  }
+
+  func testSynchronizedPCMBufferWaitsForDelayedMicInsideSkewWindow() {
+    var buffer = LocalMeetingSynchronizedPCMBuffer(maximumSkewByteCount: 8)
+    var output: [Data] = []
+
+    buffer.appendSystem(pcm16Data([10_000, 11_000, 12_000, 13_000])) {
+      output.append($0)
+    }
+    XCTAssertTrue(output.isEmpty)
+
+    buffer.appendMic(pcm16Data([1_000, 2_000, 3_000, 4_000])) { output.append($0) }
+
+    XCTAssertEqual(output.count, 1)
+    XCTAssertEqual(pcm16Samples(output[0]), [11_000, 13_000, 15_000, 17_000])
+    XCTAssertEqual(buffer.bufferedByteCount, 0)
+  }
+
+  func testSynchronizedPCMBufferRealignsWhenSystemResumesBeyondSkewWindow() {
+    var buffer = LocalMeetingSynchronizedPCMBuffer(maximumSkewByteCount: 8)
+    var output: [Data] = []
+
+    buffer.appendMic(pcm16Data([1_000, 2_000, 3_000, 4_000, 5_000, 6_000])) {
+      output.append($0)
+    }
+    buffer.appendSystem(pcm16Data([10_000, 12_000])) { output.append($0) }
+    buffer.appendMic(pcm16Data([1_000, 2_000])) { output.append($0) }
+
+    XCTAssertEqual(output.count, 3)
+    XCTAssertEqual(pcm16Samples(output[0]), [1_000, 2_000])
+    XCTAssertEqual(pcm16Samples(output[1]), [3_000, 4_000, 5_000, 6_000])
+    XCTAssertEqual(pcm16Samples(output[2]), [11_000, 14_000])
+    XCTAssertEqual(buffer.bufferedByteCount, 0)
+  }
+
+  func testSynchronizedPCMBufferRealignsWhenMicResumesBeyondSkewWindow() {
+    var buffer = LocalMeetingSynchronizedPCMBuffer(maximumSkewByteCount: 8)
+    var output: [Data] = []
+
+    buffer.appendSystem(pcm16Data([10_000, 11_000, 12_000, 13_000, 14_000, 15_000])) {
+      output.append($0)
+    }
+    buffer.appendMic(pcm16Data([1_000, 2_000])) { output.append($0) }
+    buffer.appendSystem(pcm16Data([20_000, 21_000])) { output.append($0) }
+
+    XCTAssertEqual(output.count, 3)
+    XCTAssertEqual(pcm16Samples(output[0]), [10_000, 11_000])
+    XCTAssertEqual(pcm16Samples(output[1]), [12_000, 13_000, 14_000, 15_000])
+    XCTAssertEqual(pcm16Samples(output[2]), [21_000, 23_000])
+    XCTAssertEqual(buffer.bufferedByteCount, 0)
+  }
+
+  func testSynchronizedPCMBufferBoundsOneHourOfMicOnlyAudio() {
+    var buffer = LocalMeetingSynchronizedPCMBuffer()
+    let oneSecond = Data(
+      repeating: 0,
+      count: LocalMeetingSynchronizedPCMBuffer.bytesPerSecond
+    )
+    var emittedByteCount = 0
+
+    for _ in 0..<3_600 {
+      buffer.appendMic(oneSecond) { emittedByteCount += $0.count }
+    }
+
+    XCTAssertEqual(
+      buffer.pendingMicPCM.count,
+      LocalMeetingSynchronizedPCMBuffer.defaultMaximumSkewByteCount
+    )
+    XCTAssertTrue(buffer.pendingSystemPCM.isEmpty)
+    XCTAssertEqual(
+      emittedByteCount + buffer.bufferedByteCount,
+      oneSecond.count * 3_600
+    )
+  }
+
+  func testSynchronizedPCMBufferBoundsOneHourOfSystemOnlyAudio() {
+    var buffer = LocalMeetingSynchronizedPCMBuffer()
+    let oneSecond = pcm16Data(Array(repeating: 2_000, count: 16_000))
+    var emittedByteCount = 0
+
+    for _ in 0..<3_600 {
+      buffer.appendSystem(oneSecond) { emittedByteCount += $0.count }
+    }
+
+    XCTAssertEqual(
+      buffer.pendingSystemPCM.count,
+      LocalMeetingSynchronizedPCMBuffer.defaultMaximumSkewByteCount
+    )
+    XCTAssertTrue(buffer.pendingMicPCM.isEmpty)
+    XCTAssertEqual(
+      emittedByteCount + buffer.bufferedByteCount,
+      oneSecond.count * 3_600
+    )
+  }
+
   func testMetalResourceLocatorPrefersDirectoryContainingRequiredShaderFiles() throws {
     let rootDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -284,6 +416,16 @@ final class LocalMeetingTranscriptionPreprocessingTests: XCTestCase {
 
   private func seconds(for sampleOffset: Int) -> Double {
     Double(sampleOffset) / Double(LocalMeetingSpeechRegionDetector.sampleRate)
+  }
+
+  private func pcm16Data(_ samples: [Int16]) -> Data {
+    samples.withUnsafeBufferPointer { Data(buffer: $0) }
+  }
+
+  private func pcm16Samples(_ data: Data) -> [Int16] {
+    data.withUnsafeBytes { rawBuffer in
+      rawBuffer.bindMemory(to: Int16.self).map(Int16.init(littleEndian:))
+    }
   }
 
   private func sampleOffset(_ seconds: Double) -> Int {
