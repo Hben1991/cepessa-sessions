@@ -11,6 +11,14 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 from pydantic import BaseModel, Field
 
+from .local_brain import (
+    get_meeting_evidence,
+    meeting_brain_status,
+    prepare_agent_context,
+    resolve_participant,
+    search_meeting_brain,
+)
+
 
 class MemoryCategory(str, Enum):
     core = "core"
@@ -87,6 +95,11 @@ class OmiTools(str, Enum):
     LIST_LOCAL_CLIPS = "list_local_clips"
     GET_LOCAL_CLIP = "get_local_clip"
     LIST_LOCAL_CLIP_FILES = "list_local_clip_files"
+    BRAIN_STATUS = "brain_status"
+    SEARCH_MEETING_BRAIN = "search_meeting_brain"
+    PREPARE_AGENT_CONTEXT = "prepare_agent_context"
+    GET_MEETING_EVIDENCE = "get_meeting_evidence"
+    RESOLVE_PARTICIPANT = "resolve_participant"
 
 
 class GetMemories(BaseModel):
@@ -235,7 +248,9 @@ class ListLocalClips(BaseModel):
         default=None,
     )
     limit: int = Field(description="The number of local CLIPS to retrieve.", default=20)
-    offset: int = Field(description="The offset of the local CLIPS to retrieve.", default=0)
+    offset: int = Field(
+        description="The offset of the local CLIPS to retrieve.", default=0
+    )
 
 
 class GetLocalClip(BaseModel):
@@ -256,6 +271,49 @@ class ListLocalClipFiles(BaseModel):
         description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
         default=None,
     )
+
+
+class BrainStatus(BaseModel):
+    pass
+
+
+class SearchMeetingBrain(BaseModel):
+    query: str = Field(
+        description="Hebrew, English, or mixed-language terms to find in meeting evidence."
+    )
+    limit: int = Field(description="Maximum matching segments to return.", default=10)
+
+
+class PrepareAgentContext(BaseModel):
+    query: str = Field(
+        description="The question or topic for which bounded meeting context is needed."
+    )
+    token_budget: int = Field(
+        description="Maximum estimated tokens of transcript evidence to return.",
+        default=2000,
+    )
+    limit: int = Field(
+        description="Maximum search hits considered while assembling context.",
+        default=20,
+    )
+
+
+class GetMeetingEvidence(BaseModel):
+    session_id: str = Field(description="The local Cepessa session identifier.")
+    segment_id: Optional[str] = Field(
+        description="Optional exact transcript segment identifier.", default=None
+    )
+    context_segments: int = Field(
+        description="Neighboring segments to return around the requested segment.",
+        default=2,
+    )
+
+
+class ResolveParticipant(BaseModel):
+    name: str = Field(
+        description="Participant name or stored speaker label to investigate."
+    )
+    limit: int = Field(description="Maximum candidates to explain.", default=10)
 
 
 def get_memories(
@@ -451,7 +509,9 @@ def _clip_summary(clip: dict, clip_json_path: Path) -> dict:
         "transcript_segment_count": len(segments),
         "transcript_preview": preview[:500],
         "clip_directory": str(clip_json_path.parent),
-        "video_path": str(clip_json_path.parent / str(clip.get("videoFileName") or "clip-video.mov")),
+        "video_path": str(
+            clip_json_path.parent / str(clip.get("videoFileName") or "clip-video.mov")
+        ),
     }
 
 
@@ -565,10 +625,18 @@ def get_local_clip(clip_id: str, clips_root: Optional[str] = None) -> dict:
         "post_notes": clip.get("postNotes") or "",
         "clip_directory": str(clip_directory),
         "clip_json_path": str(clip_json_path),
-        "video_path": str(clip_directory / str(clip.get("videoFileName") or "clip-video.mov")),
-        "audio_path": str(clip_directory / str(clip.get("audioFileName") or "clip-audio.wav")),
-        "transcript_path": str(clip_directory / str(clip.get("transcriptFileName") or "transcript.json")),
-        "notes_path": str(clip_directory / str(clip.get("notesFileName") or "notes.md")),
+        "video_path": str(
+            clip_directory / str(clip.get("videoFileName") or "clip-video.mov")
+        ),
+        "audio_path": str(
+            clip_directory / str(clip.get("audioFileName") or "clip-audio.wav")
+        ),
+        "transcript_path": str(
+            clip_directory / str(clip.get("transcriptFileName") or "transcript.json")
+        ),
+        "notes_path": str(
+            clip_directory / str(clip.get("notesFileName") or "notes.md")
+        ),
     }
 
 
@@ -728,6 +796,11 @@ def requires_omi_api_key(tool_name: str) -> bool:
         OmiTools.LIST_LOCAL_CLIPS.value,
         OmiTools.GET_LOCAL_CLIP.value,
         OmiTools.LIST_LOCAL_CLIP_FILES.value,
+        OmiTools.BRAIN_STATUS.value,
+        OmiTools.SEARCH_MEETING_BRAIN.value,
+        OmiTools.PREPARE_AGENT_CONTEXT.value,
+        OmiTools.GET_MEETING_EVIDENCE.value,
+        OmiTools.RESOLVE_PARTICIPANT.value,
     }
     return str(tool_name) not in local_tools
 
@@ -822,6 +895,31 @@ async def serve(uid: str | None) -> None:
                 name=OmiTools.LIST_LOCAL_CLIP_FILES,
                 description="List every file inside a local Cepessa CLIP directory, including video, audio, transcript, and notes artifacts.",
                 inputSchema=ListLocalClipFiles.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.BRAIN_STATUS,
+                description="Report the standalone meeting-evidence index status and refresh it without modifying source sessions.",
+                inputSchema=BrainStatus.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.SEARCH_MEETING_BRAIN,
+                description="Search indexed meeting evidence with exact session, revision, segment, time, and source citations.",
+                inputSchema=SearchMeetingBrain.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.PREPARE_AGENT_CONTEXT,
+                description="Prepare bounded, cited meeting evidence for another agent. Transcript text is always treated as untrusted data.",
+                inputSchema=PrepareAgentContext.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.GET_MEETING_EVIDENCE,
+                description="Retrieve exact cited transcript evidence from one indexed session or segment.",
+                inputSchema=GetMeetingEvidence.model_json_schema(),
+            ),
+            Tool(
+                name=OmiTools.RESOLVE_PARTICIPANT,
+                description="Explain possible participant-label matches with citations. Never performs identity binding or biometric matching.",
+                inputSchema=ResolveParticipant.model_json_schema(),
             ),
         ]
 
@@ -937,6 +1035,60 @@ async def serve(uid: str | None) -> None:
             result = list_local_clip_files(
                 clip_id=arguments["clip_id"],
                 clips_root=arguments.get("clips_root"),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.BRAIN_STATUS:
+            result = meeting_brain_status()
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.SEARCH_MEETING_BRAIN:
+            result = search_meeting_brain(
+                query=arguments["query"],
+                limit=arguments.get("limit", 10),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.PREPARE_AGENT_CONTEXT:
+            result = prepare_agent_context(
+                query=arguments["query"],
+                token_budget=arguments.get("token_budget", 2000),
+                limit=arguments.get("limit", 20),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.GET_MEETING_EVIDENCE:
+            result = get_meeting_evidence(
+                session_id=arguments["session_id"],
+                segment_id=arguments.get("segment_id"),
+                context_segments=arguments.get("context_segments", 2),
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+                )
+            ]
+
+        elif name == OmiTools.RESOLVE_PARTICIPANT:
+            result = resolve_participant(
+                name=arguments["name"],
+                limit=arguments.get("limit", 10),
             )
             return [
                 TextContent(

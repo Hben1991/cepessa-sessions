@@ -1,102 +1,121 @@
 import AppKit
 import SwiftUI
 
-/// Shared adaptive palette for the native macOS app.
-/// Prefer system colors so the UI follows macOS contrast, vibrancy, and appearance settings.
+/// Shared palette for the native macOS app.
+///
+/// Every token resolves to a semantic AppKit color so the UI follows the
+/// system appearance (light/dark), Increase Contrast, and vibrancy for free.
+/// Hardcoded hex values are reserved for the two places where a fixed hue is
+/// the meaning itself: the recording ring and the capture-warning glyph, and
+/// even those use the system's accessible `systemRed` / `systemOrange`.
 enum CepessaColors {
-  // MARK: - Apple Native Neutral Palette
-  static let paper = Color(hex: 0xFFFFFF)
-  static let paperDeep = Color(hex: 0xFAFAFC)
-  static let paperRaised = Color(hex: 0xFFFFFF)
-  static let ink = Color(hex: 0x1D1D1F)
-  static let graphite = Color(hex: 0xF7F8FA)
-  static let graphiteRaised = Color(hex: 0xFFFFFF)
-  static let graphiteLine = Color(hex: 0xE8EBF0)
-  static let copper = Color(hex: 0x6E6E73)
-  static let copperDeep = Color(hex: 0x3A3A3C)
-  static let moss = Color(hex: 0x34C759)
-  static let mossDeep = Color(hex: 0x248A3D)
-  static let signalRed = Color(hex: 0xE5484D)
-  static let agedLine = Color(hex: 0xE8EBF0)
-  static let warmShadow = Color(hex: 0x667085)
-  static let ambientGlass = Color(hex: 0xFFFFFF)
-  static let parchmentTint = Color(hex: 0xFFFFFF)
+  // MARK: - Surfaces
 
-  static let capture = copper
-  static let captureDeep = copperDeep
-  static let processing = capture
-  static let ready = moss
-  static let lifted = paperRaised
-  static let hairline = agedLine
+  /// The window background. Opaque; never blurred.
+  static let backgroundPrimary = Color(nsColor: .windowBackgroundColor)
+  /// Grouped/secondary surface behind lists and sidebars.
+  static let backgroundSecondary = Color(nsColor: .underPageBackgroundColor)
+  static let backgroundTertiary = Color(nsColor: .controlBackgroundColor)
+  static let backgroundQuaternary = Color(nsColor: .separatorColor)
+  /// Raised control surface (fields, rows, buttons).
+  static let backgroundRaised = Color(nsColor: .controlBackgroundColor)
+  /// Opaque reading surface for long-form transcript text.
+  static let readingSurface = Color(nsColor: .textBackgroundColor)
 
-  // MARK: - Background Colors
-  static let backgroundPrimary = paper
-  static let backgroundSecondary = paperDeep
-  static let backgroundTertiary = paperDeep
-  static let backgroundQuaternary = graphiteLine
-  static let backgroundRaised = paperRaised
+  static let border = Color(nsColor: .separatorColor)
+  static let hairline = Color(nsColor: .separatorColor)
 
-  // MARK: - Border Colors
-  static let border = agedLine
+  // MARK: - Text
 
-  // MARK: - Accent System
-  static let accentPrimary = processing
-  static let accentSecondary = copper.opacity(0.78)
-  static let accent = capture
-  static let accentLight = copper.opacity(0.18)
+  static let textPrimary = Color(nsColor: .labelColor)
+  static let textSecondary = Color(nsColor: .secondaryLabelColor)
+  static let textTertiary = Color(nsColor: .tertiaryLabelColor)
+  static let textQuaternary = Color(nsColor: .quaternaryLabelColor)
 
-  // Legacy API aliases. These resolve to the neutral spatial palette above.
+  // MARK: - Accent
+
+  /// The single restrained accent. Follows the user's system accent colour.
+  static let accent = Color(nsColor: .controlAccentColor)
+  static let accentPrimary = accent
+  static let accentSecondary = Color(nsColor: .secondaryLabelColor)
+  static let accentLight = Color(nsColor: .controlAccentColor).opacity(0.14)
+
+  static let capture = accent
+  static let captureDeep = Color(nsColor: .labelColor)
+  static let processing = accent
+  static let ready = Color(nsColor: .systemGreen)
+  static let lifted = backgroundRaised
+
+  // MARK: - Status
+
+  /// Recording. Red is the platform's meaning for "capture is live" — it is
+  /// deliberately not used as a success colour anywhere else.
+  static let signalRed = Color(nsColor: .systemRed)
+  static let warning = Color(nsColor: .systemOrange)
+  static let error = Color(nsColor: .systemRed)
+  static let success = Color(nsColor: .systemGreen)
+  static let info = Color(nsColor: .systemBlue)
+
+  // MARK: - Speaker attribution (transcript)
+
+  /// Neutral-first speaker ramp; the accent only appears for the last slot so
+  /// a transcript never turns into a colour chart.
+  static let speakerColors: [Color] = [
+    Color(nsColor: .labelColor),
+    Color(nsColor: .secondaryLabelColor),
+    Color(nsColor: .systemBlue),
+    Color(nsColor: .systemTeal),
+    Color(nsColor: .systemIndigo),
+    Color(nsColor: .controlAccentColor),
+  ]
+
+  // MARK: - Legacy aliases
+  //
+  // Kept so the unreachable legacy workspace/recap source keeps compiling.
+  // They all resolve to the semantic tokens above.
+
+  static let paper = backgroundPrimary
+  static let paperDeep = backgroundSecondary
+  static let paperRaised = backgroundRaised
+  static let ink = textPrimary
+  static let graphite = backgroundSecondary
+  static let graphiteRaised = backgroundRaised
+  static let graphiteLine = border
+  static let copper = accent
+  static let copperDeep = captureDeep
+  static let moss = success
+  static let mossDeep = success
+  static let agedLine = border
+  static let warmShadow = Color(nsColor: .shadowColor)
+  static let ambientGlass = backgroundRaised
+  static let parchmentTint = backgroundPrimary
+  static let amber = warning
+  static let userBubble = accent
+
   static let purplePrimary = accentPrimary
   static let purpleSecondary = accentSecondary
   static let purpleAccent = accent
   static let purpleLight = accentLight
 
-  // MARK: - Text Colors
-  static let textPrimary = ink
-  static let textSecondary = Color(hex: 0x636366)
-  static let textTertiary = Color(hex: 0x8E8E93)
-  static let textQuaternary = Color(hex: 0xC7C7CC)
+  static let windowButtonClose = Color(nsColor: .systemRed)
+  static let windowButtonMinimize = Color(nsColor: .systemYellow)
+  static let windowButtonMaximize = Color(nsColor: .systemGreen)
 
-  // MARK: - Status Colors
-  static let success = ready
-  static let warning = Color(hex: 0xFF9F0A)
-  static let error = signalRed
-  static let info = Color(hex: 0x007AFF)
-  static let amber = copper
-
-  // MARK: - Mac Window Button Colors
-  static let windowButtonClose = Color(hex: 0xFF5F57)
-  static let windowButtonMinimize = Color(hex: 0xFFBD2E)
-  static let windowButtonMaximize = Color(hex: 0x28CA42)
-
-  // MARK: - Speaker Colors (for transcript bubbles)
-  static let speakerColors: [Color] = [
-    Color(hex: 0x3A3A3C),
-    Color(hex: 0x48484A),
-    Color(hex: 0x636366),
-    Color(hex: 0x6E6E73),
-    Color(hex: 0x8E8E93),
-    Color(hex: 0x007AFF),
-  ]
-
-  /// User bubble color: richer than the page chrome, softer than a flat primary fill.
-  static let userBubble = copper
-
-  // MARK: - Gradients
   static let purpleGradient = LinearGradient(
-    colors: [Color(hex: 0x8E8E93), accent],
+    colors: [accentSecondary, accent],
     startPoint: .topLeading,
     endPoint: .bottomTrailing
   )
 
   static let purpleLightGradient = LinearGradient(
-    colors: [Color(hex: 0xFFFFFF), Color(hex: 0xF2F2F7)],
+    colors: [backgroundRaised, backgroundSecondary],
     startPoint: .topLeading,
     endPoint: .bottomTrailing
   )
 }
 
 // MARK: - Color Extension for Hex
+
 extension Color {
   init(hex: UInt, alpha: Double = 1.0) {
     self.init(

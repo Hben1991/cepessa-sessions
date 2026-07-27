@@ -13,8 +13,7 @@ struct CepessaSessionsApp: App {
     Settings {
       CepessaSessionsSettingsPage()
         .withFontScaling()
-        .tint(CepessaColors.capture)
-        .frame(minWidth: 560, minHeight: 480)
+        .frame(minWidth: 520, minHeight: 440)
     }
   }
 }
@@ -37,8 +36,16 @@ private final class CepessaSessionsAppDelegate: NSObject, NSApplicationDelegate 
   /// path is printed at launch; writing the file toggles recording.
   private func installDebugHooks() {
     #if DEBUG
-      let marker = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("debug-toggle-recording")
+      let configuredMarker = ProcessInfo.processInfo.environment[
+        "CEPESSA_SESSIONS_DEBUG_TOGGLE_MARKER"
+      ]?.trimmingCharacters(in: .whitespacesAndNewlines)
+      let marker =
+        if let configuredMarker, !configuredMarker.isEmpty {
+          URL(fileURLWithPath: configuredMarker)
+        } else {
+          URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("debug-toggle-recording")
+        }
       NSLog("[cepessa-debug] toggle recording by touching: \(marker.path)")
 
       debugHookTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
@@ -87,6 +94,7 @@ final class CepessaSessionsWindowController: NSObject, NSWindowDelegate {
       state.destination = destination
     }
     ensureWindow()
+    refreshWindowChrome()
     NSApp.activate(ignoringOtherApps: true)
     window?.makeKeyAndOrderFront(nil)
   }
@@ -97,11 +105,7 @@ final class CepessaSessionsWindowController: NSObject, NSWindowDelegate {
   }
 
   func openSettings() {
-    NSApp.activate(ignoringOtherApps: true)
-    let opened = NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-    if !opened {
-      EnvironmentValues().openSettings()
-    }
+    CepessaSessionsSettingsWindowController.shared.show()
   }
 
   func importAudio() {
@@ -123,16 +127,18 @@ final class CepessaSessionsWindowController: NSObject, NSWindowDelegate {
   private func ensureWindow() {
     guard window == nil else { return }
 
+    // Standard titled window: system title bar, traffic lights, toolbar and
+    // resizing behave exactly as macOS users expect, and the window follows
+    // the system appearance instead of being pinned to light.
     let window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
-      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+      contentRect: NSRect(x: 0, y: 0, width: 1080, height: 760),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
       backing: .buffered,
       defer: false
     )
     window.title = "Cepessa Sessions"
-    window.appearance = NSAppearance(named: .aqua)
-    window.titlebarAppearsTransparent = true
-    window.titleVisibility = .hidden
+    window.titlebarAppearsTransparent = false
+    window.titleVisibility = .visible
     window.isReleasedWhenClosed = false
     window.minSize = NSSize(width: 720, height: 520)
     window.center()
@@ -141,12 +147,55 @@ final class CepessaSessionsWindowController: NSObject, NSWindowDelegate {
 
     let root = CepessaSessionsWindowRootView(state: state)
       .withFontScaling()
-      .tint(CepessaColors.capture)
     window.contentView = NSHostingView(rootView: root)
 
     readingToolbar = CepessaSessionReadingToolbar(
       model: CepessaSessionsStore.shared.model, window: window)
 
+    self.window = window
+    refreshWindowChrome()
+  }
+
+  private func refreshWindowChrome() {
+    let showsSessions = state.destination == .sessions
+    window?.title = showsSessions ? "Cepessa Sessions" : "Cepessa Clips"
+    readingToolbar?.setVisible(showsSessions)
+  }
+}
+
+@MainActor
+final class CepessaSessionsSettingsWindowController: NSObject, NSWindowDelegate {
+  static let shared = CepessaSessionsSettingsWindowController()
+
+  private var window: NSWindow?
+
+  func show() {
+    ensureWindow()
+    NSApp.activate(ignoringOtherApps: true)
+    window?.makeKeyAndOrderFront(nil)
+  }
+
+  private func ensureWindow() {
+    guard window == nil else { return }
+
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 560, height: 560),
+      styleMask: [.titled, .closable, .miniaturizable],
+      backing: .buffered,
+      defer: false
+    )
+    window.title = "Sessions Settings"
+    window.titlebarAppearsTransparent = false
+    window.isReleasedWhenClosed = false
+    window.minSize = NSSize(width: 520, height: 440)
+    window.center()
+    window.setFrameAutosaveName("CepessaSessionsSettingsWindow")
+    window.delegate = self
+    window.contentView = NSHostingView(
+      rootView: CepessaSessionsSettingsPage()
+        .withFontScaling()
+        .frame(minWidth: 520, minHeight: 440)
+    )
     self.window = window
   }
 }
@@ -161,7 +210,6 @@ private struct CepessaSessionsWindowRootView: View {
         CepessaSessionReadingView()
       case .clips:
         LocalClipsPage()
-          .ignoresSafeArea()
       }
     }
     .background(CepessaColors.backgroundPrimary)

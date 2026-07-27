@@ -2,6 +2,33 @@ import Combine
 import Foundation
 import SwiftUI
 
+enum LocalSessionStorageRoot {
+  static var productionBaseDirectory: URL {
+    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("Cepessa", isDirectory: true)
+  }
+
+  static var defaultBaseDirectory: URL {
+    #if DEBUG
+      if let testRoot = ProcessInfo.processInfo.environment["CEPESSA_SESSIONS_TEST_ROOT"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+        !testRoot.isEmpty
+      {
+        return URL(fileURLWithPath: testRoot, isDirectory: true)
+      }
+
+      if ProcessInfo.processInfo.processName == "xctest" {
+        return FileManager.default.temporaryDirectory.appendingPathComponent(
+          "CepessaSessionsTests-\(ProcessInfo.processInfo.processIdentifier)",
+          isDirectory: true
+        )
+      }
+    #endif
+
+    return productionBaseDirectory
+  }
+}
+
 @MainActor
 final class LocalSessionAppModel: ObservableObject {
   @Published var sessions: [LocalSession] {
@@ -27,11 +54,13 @@ final class LocalSessionAppModel: ObservableObject {
   @Published private(set) var processingProgress: Double?
   @Published private(set) var processingSnapshots: [LocalSessionProcessingSnapshot] = []
   @Published private(set) var retranscribableSessionIDs: Set<LocalSession.ID> = []
+  let speakerModelProvisioner: LocalSessionSpeakerModelProvisioner
 
   private let fileLayout: LocalSessionFileLayout
   private let store: LocalSessionStore?
   private let recorder: LocalMeetingRecorder
   private let transcriptionService: any LocalSessionTranscribing
+  private let evidenceTranscriptionCoordinator: LocalSessionEvidenceTranscriptionCoordinator
   private let audioImportService: any LocalSessionAudioImporting
   private let fileManager: FileManager
   private var activeImportSessionIDs: Set<LocalSession.ID> = []
@@ -45,6 +74,7 @@ final class LocalSessionAppModel: ObservableObject {
     fileLayout: LocalSessionFileLayout? = nil,
     transcriptionService: any LocalSessionTranscribing = LocalMeetingTranscriptionService(),
     audioImportService: any LocalSessionAudioImporting = LocalSessionAudioImportService(),
+    speakerModelProvisioner: LocalSessionSpeakerModelProvisioner? = nil,
     fileManager: FileManager = .default
   ) {
     let resolvedFileLayout =
@@ -53,8 +83,24 @@ final class LocalSessionAppModel: ObservableObject {
     self.sessions = sessions
     self.fileLayout = resolvedFileLayout
     self.store = resolvedStore
+    let resolvedSpeakerModelProvisioner =
+      speakerModelProvisioner
+      ?? LocalSessionSpeakerModelProvisioner(
+        fileLayout: resolvedFileLayout,
+        fileManager: fileManager
+      )
+    self.speakerModelProvisioner = resolvedSpeakerModelProvisioner
     self.recorder = LocalMeetingRecorder(fileLayout: resolvedFileLayout)
     self.transcriptionService = transcriptionService
+    self.evidenceTranscriptionCoordinator = LocalSessionEvidenceTranscriptionCoordinator(
+      transcriptionService: transcriptionService,
+      diarizer: LocalSessionSpeakerKitDiarizer(
+        modelFolderURL: resolvedSpeakerModelProvisioner.activeRoot,
+        fileManager: fileManager
+      ),
+      fileLayout: resolvedFileLayout,
+      fileManager: fileManager
+    )
     self.audioImportService = audioImportService
     self.fileManager = fileManager
     self.selectedSessionID = nil
@@ -106,7 +152,6 @@ final class LocalSessionAppModel: ObservableObject {
     let storedSessions = store.loadSessions()
     let normalizedSessions = storedSessions.map(normalizedStoredSession(_:))
     refreshRetranscriptionAvailabilityCache(for: normalizedSessions)
-    sessions = normalizedSessions
 
     for (storedSession, normalizedSession) in zip(storedSessions, normalizedSessions)
     where storedSession != normalizedSession {
@@ -117,6 +162,11 @@ final class LocalSessionAppModel: ObservableObject {
           "Failed to recover an interrupted session. \(error.localizedDescription)"
       }
     }
+    let annotationStore = LocalSessionSpeakerAnnotationStore(
+      fileLayout: fileLayout,
+      fileManager: fileManager
+    )
+    sessions = normalizedSessions.map(annotationStore.applyingAnnotations(to:))
 
     if selectedSessionID == nil {
       selectedSessionID = sessions.first?.id
@@ -125,24 +175,104 @@ final class LocalSessionAppModel: ObservableObject {
   }
 
   @discardableResult
-  func upsertSession(_ session: LocalSession) -> LocalSession {
-    let mergedSession = mergedSession(from: session)
+  func renameSpeaker(
+    speakerID: String,
+    to displayName: String,
+    in sessionID: LocalSession.ID? = nil
+  ) -> Bool {
+    let resolvedSessionID = sessionID ?? selectedSessionID
+    guard let resolvedSessionID,
+      let index = sessions.firstIndex(where: { $0.id == resolvedSessionID }),
+      let contentHash = sessions[index].transcriptionEvidence?.contentHash
+    else {
+      return false
+    }
+    do {
+      let annotationStore = LocalSessionSpeakerAnnotationStore(
+        fileLayout: fileLayout,
+        fileManager: fileManager
+      )
+      try annotationStore.appendRename(
+        sessionID: resolvedSessionID,
+        evidenceContentHash: contentHash,
+        speakerID: speakerID,
+        displayName: displayName
+      )
+      sessions[index] = annotationStore.applyingAnnotations(to: sessions[index])
+      return true
+    } catch {
+      recorderErrorMessage = "Failed to save the speaker name. \(error.localizedDescription)"
+      return false
+    }
+  }
 
-    if let existingIndex = sessions.firstIndex(where: { $0.id == mergedSession.id }) {
-      sessions[existingIndex] = mergedSession
+  @discardableResult
+  func undoLatestSpeakerRename(
+    speakerID: String,
+    in sessionID: LocalSession.ID? = nil
+  ) -> Bool {
+    let resolvedSessionID = sessionID ?? selectedSessionID
+    guard let resolvedSessionID,
+      let index = sessions.firstIndex(where: { $0.id == resolvedSessionID }),
+      let contentHash = sessions[index].transcriptionEvidence?.contentHash
+    else {
+      return false
+    }
+    let annotationStore = LocalSessionSpeakerAnnotationStore(
+      fileLayout: fileLayout,
+      fileManager: fileManager
+    )
+    do {
+      guard
+        try annotationStore.appendUndo(
+          sessionID: resolvedSessionID,
+          evidenceContentHash: contentHash,
+          speakerID: speakerID
+        ) != nil
+      else {
+        return false
+      }
+      guard let rawSession = store?.loadSessions().first(where: { $0.id == resolvedSessionID })
+      else { return false }
+      sessions[index] = annotationStore.applyingAnnotations(
+        to: normalizedStoredSession(rawSession)
+      )
+      return true
+    } catch {
+      recorderErrorMessage = "Failed to undo the speaker name. \(error.localizedDescription)"
+      return false
+    }
+  }
+
+  @discardableResult
+  func upsertSession(_ session: LocalSession) -> LocalSession {
+    let annotationStore = LocalSessionSpeakerAnnotationStore(
+      fileLayout: fileLayout,
+      fileManager: fileManager
+    )
+    let mergedSession = mergedSession(from: session)
+    let persistedBase = store?.loadSessions().first { $0.id == mergedSession.id }
+    let persistedSession = annotationStore.removingAnnotationProjection(
+      from: mergedSession,
+      persistedBase: persistedBase
+    )
+    let displayedSession = annotationStore.applyingAnnotations(to: persistedSession)
+
+    if let existingIndex = sessions.firstIndex(where: { $0.id == displayedSession.id }) {
+      sessions[existingIndex] = displayedSession
     } else {
-      sessions.append(mergedSession)
+      sessions.append(displayedSession)
     }
 
     sessions.sort { $0.startedAt > $1.startedAt }
 
     do {
-      try store?.save(mergedSession)
+      try store?.save(persistedSession)
     } catch {
       recorderErrorMessage = "Failed to save this session locally. \(error.localizedDescription)"
     }
 
-    return mergedSession
+    return displayedSession
   }
 
   func selectSession(id: LocalSession.ID) {
@@ -158,7 +288,8 @@ final class LocalSessionAppModel: ObservableObject {
   @discardableResult
   func updateSessionTitle(_ title: String, for sessionID: LocalSession.ID? = nil) -> Bool {
     let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let currentSession = sessions.first(where: { $0.id == (sessionID ?? selectedSessionID) }) else {
+    guard let currentSession = sessions.first(where: { $0.id == (sessionID ?? selectedSessionID) })
+    else {
       return false
     }
     guard currentSession.title != trimmedTitle else { return true }
@@ -183,6 +314,20 @@ final class LocalSessionAppModel: ObservableObject {
   }
 
   func toggleRecording() {
+    #if DEBUG
+      if ProcessInfo.processInfo.environment["CEPESSA_SESSIONS_DEBUG_PRESENTATION_ONLY"] == "1" {
+        isRecording.toggle()
+        isMicrophoneCaptureActive = isRecording
+        isSystemAudioCaptureActive = isRecording
+        isMicrophoneMuted = false
+        micLevel = isRecording ? 0.24 : 0
+        systemLevel = isRecording ? 0.36 : 0
+        recordingDurationText = isRecording ? "00:42" : "00:00"
+        recorderErrorMessage = nil
+        return
+      }
+    #endif
+
     if isRecording {
       Task { await stopRecording() }
     } else {
@@ -519,22 +664,49 @@ final class LocalSessionAppModel: ObservableObject {
     )
 
     do {
-      let result = try await transcriptionService.transcribe(
-        wavURL: resolvedAudioURL,
-        modelURL: transcriptionPlan.modelURL,
-        language: transcriptionPlan.language,
-        prompt: transcriptionPlan.prompt,
-        translateToEnglish: false,
-        onProgress: { [weak self] update in
-          guard let self else { return }
-          await self.applyTranscriptionProgress(update, for: sessionID)
-        }
+      let microphoneURL =
+        audioURL == nil
+        ? sourceAudioURL(
+          fileName: session.audioArtifacts.micTranscriptFileName,
+          sessionID: sessionID,
+          defaultFileName: "mic-transcript.wav"
+        )
+        : nil
+      let systemURL =
+        audioURL == nil
+        ? sourceAudioURL(
+          fileName: session.audioArtifacts.systemFileName,
+          sessionID: sessionID,
+          defaultFileName: "system.wav"
+        )
+        : nil
+      let priorEvidence = session.transcriptionEvidence
+      let result = try await evidenceTranscriptionCoordinator.transcribe(
+        .init(
+          session: session,
+          plan: transcriptionPlan,
+          microphoneURL: microphoneURL,
+          systemURL: systemURL,
+          mixedURL: resolvedAudioURL,
+          revision: (priorEvidence?.revision ?? 0) + 1,
+          parentContentHash: priorEvidence?.contentHash,
+          onProgress: { [weak self] update in
+            guard let self else { return }
+            await self.applyTranscriptionProgress(update, for: sessionID)
+          }
+        )
       )
 
-      updatedSession.status = .ready
-      updatedSession.transcriptSegments = transcriptSegments(from: result, session: session)
+      updatedSession.status = result.envelope.run.disposition == .ready ? .ready : .failed
+      updatedSession.transcriptSegments = result.transcriptSegments
+      updatedSession.transcriptionEvidence = result.summary
       updatedSession.title = inferredSessionTitle(for: updatedSession)
       upsertSession(updatedSession)
+      if result.envelope.run.disposition != .ready {
+        recorderErrorMessage =
+          result.summary.issues.first
+          ?? "The transcript was saved as non-ready because its evidence was incomplete."
+      }
       endTranscription(for: sessionID)
       return
     } catch {
@@ -675,7 +847,8 @@ final class LocalSessionAppModel: ObservableObject {
           ) ?? "Speaker 1",
           text: segment.text,
           timestamp: session.startedAt.addingTimeInterval(segment.startTime),
-          endTimestamp: session.startedAt.addingTimeInterval(max(segment.endTime, segment.startTime))
+          endTimestamp: session.startedAt.addingTimeInterval(
+            max(segment.endTime, segment.startTime))
         )
       }.removingRepeatedShortGlitches()
     }
@@ -769,8 +942,7 @@ final class LocalSessionAppModel: ObservableObject {
   }
 
   private static var defaultBaseDirectory: URL {
-    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-      .appendingPathComponent("Cepessa", isDirectory: true)
+    LocalSessionStorageRoot.defaultBaseDirectory
   }
 
   private func normalizedImportedTitle(_ title: String?, sourceURL: URL) -> String {
@@ -793,13 +965,15 @@ final class LocalSessionAppModel: ObservableObject {
     let transcript = session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !transcript.isEmpty else { return session.title }
 
-    let candidates = transcript
+    let candidates =
+      transcript
       .components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
       .filter { $0.count >= 12 }
 
     let source = candidates.first ?? transcript
-    let compact = source
+    let compact =
+      source
       .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
       .trimmingCharacters(in: .whitespacesAndNewlines)
       .truncated(maxLength: 64)
@@ -851,6 +1025,8 @@ final class LocalSessionAppModel: ObservableObject {
     mergedSession.audioArtifacts = LocalSessionAudioArtifacts(
       micFileName: incomingSession.audioArtifacts.micFileName
         ?? existingSession.audioArtifacts.micFileName,
+      micTranscriptFileName: incomingSession.audioArtifacts.micTranscriptFileName
+        ?? existingSession.audioArtifacts.micTranscriptFileName,
       systemFileName: incomingSession.audioArtifacts.systemFileName
         ?? existingSession.audioArtifacts.systemFileName,
       mixedFileName: incomingSession.audioArtifacts.mixedFileName
@@ -858,6 +1034,8 @@ final class LocalSessionAppModel: ObservableObject {
     )
     mergedSession.contentClassification =
       incomingSession.contentClassification ?? existingSession.contentClassification
+    mergedSession.transcriptionEvidence =
+      incomingSession.transcriptionEvidence ?? existingSession.transcriptionEvidence
     mergedSession.documentChat =
       incomingSession.documentChat == .empty
       ? existingSession.documentChat : incomingSession.documentChat
@@ -955,9 +1133,11 @@ final class LocalSessionAppModel: ObservableObject {
       normalizedSession.transcriptSegments.removingRepeatedShortGlitches()
     if normalizedSession.recap.isStaleHebrewTranscriptCopyFallback(
       forTranscript: normalizedSession.transcriptText
-    ) || normalizedSession.recap.isGenericHebrewTranscriptPlaceholderFallback(
-      forTranscript: normalizedSession.transcriptText
-    ) || normalizedSession.recap.isSchemaPlaceholderFallback() {
+    )
+      || normalizedSession.recap.isGenericHebrewTranscriptPlaceholderFallback(
+        forTranscript: normalizedSession.transcriptText
+      ) || normalizedSession.recap.isSchemaPlaceholderFallback()
+    {
       normalizedSession.recap = .empty
     }
     if normalizedSession.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1253,8 +1433,8 @@ private enum LocalSessionPCM16WaveError: Error {
   case unsupportedFormat
 }
 
-private extension Array where Element == LocalSessionTranscriptSegment {
-  func removingRepeatedShortGlitches() -> [LocalSessionTranscriptSegment] {
+extension Array where Element == LocalSessionTranscriptSegment {
+  fileprivate func removingRepeatedShortGlitches() -> [LocalSessionTranscriptSegment] {
     var cleaned: [LocalSessionTranscriptSegment] = []
     var activeKey: String?
     var activeStart: Date?
@@ -1286,14 +1466,15 @@ private extension Array where Element == LocalSessionTranscriptSegment {
   }
 }
 
-private extension String {
-  var shortTranscriptGlitchKey: String? {
+extension String {
+  fileprivate var shortTranscriptGlitchKey: String? {
     let normalized = trimmingCharacters(in: .whitespacesAndNewlines)
       .replacingOccurrences(of: "\u{200f}", with: "")
       .replacingOccurrences(of: "\u{200e}", with: "")
       .replacingOccurrences(of: "\n", with: " ")
       .lowercased()
-    let collapsed = normalized
+    let collapsed =
+      normalized
       .split(whereSeparator: { $0.isWhitespace })
       .joined(separator: " ")
     guard !collapsed.isEmpty else { return nil }
@@ -1306,12 +1487,13 @@ private extension String {
   }
 }
 
-private extension LocalSessionDocumentEditProposal {
-  var isStaleAppendInstructionEcho: Bool {
-    let generatedText = [
-      sessionTitle,
-      recapPatch?.overview,
-    ].compactMap { $0 }
+extension LocalSessionDocumentEditProposal {
+  fileprivate var isStaleAppendInstructionEcho: Bool {
+    let generatedText =
+      [
+        sessionTitle,
+        recapPatch?.overview,
+      ].compactMap { $0 }
       + (recapPatch?.sections ?? []).flatMap { section in
         [section.title, section.summary] + section.bullets
       }
@@ -1320,8 +1502,8 @@ private extension LocalSessionDocumentEditProposal {
   }
 }
 
-private extension LocalSessionDocumentChatMessage {
-  var isStaleLocalModelFailureMessage: Bool {
+extension LocalSessionDocumentChatMessage {
+  fileprivate var isStaleLocalModelFailureMessage: Bool {
     guard role == .assistant else { return false }
 
     let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1335,7 +1517,7 @@ private extension LocalSessionDocumentChatMessage {
         && normalized.contains("ההיסטוריה שראיתי ביוטיוב"))
   }
 
-  var isStaleAppendInstructionPreviewMessage: Bool {
+  fileprivate var isStaleAppendInstructionPreviewMessage: Bool {
     guard role == .assistant else { return false }
 
     let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1345,17 +1527,19 @@ private extension LocalSessionDocumentChatMessage {
   }
 }
 
-private extension LocalSessionRecap {
-  mutating func removeStaleAppliedAppendInstructionSections() -> Bool {
+extension LocalSessionRecap {
+  fileprivate mutating func removeStaleAppliedAppendInstructionSections() -> Bool {
     let countBefore = sections.count
     sections.removeAll { $0.looksLikeAppliedAppendInstructionEcho }
     return sections.count != countBefore
   }
 
-  mutating func removeStaleTitleUpdateNote() -> String? {
-    guard let index = sections.firstIndex(where: { section in
-      section.kind == .notes && section.title.contains("כותרת")
-    }) else {
+  fileprivate mutating func removeStaleTitleUpdateNote() -> String? {
+    guard
+      let index = sections.firstIndex(where: { section in
+        section.kind == .notes && section.title.contains("כותרת")
+      })
+    else {
       return nil
     }
 
@@ -1366,15 +1550,17 @@ private extension LocalSessionRecap {
     return title
   }
 
-  mutating func normalizeStaleHebrewVideoTemplateTitles() -> Bool {
+  fileprivate mutating func normalizeStaleHebrewVideoTemplateTitles() -> Bool {
     let corpus =
       ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
       .joined(separator: " ")
       .lowercased()
     guard corpus.containsHebrewScript else { return false }
-    guard ["סרטון", "יוטיוב", "לייב", "ערוץ", "מורה מבוכים"].contains(where: {
-      corpus.contains($0)
-    }) else {
+    guard
+      ["סרטון", "יוטיוב", "לייב", "ערוץ", "מורה מבוכים"].contains(where: {
+        corpus.contains($0)
+      })
+    else {
       return false
     }
 
@@ -1469,7 +1655,7 @@ private extension LocalSessionRecap {
     return changed
   }
 
-  mutating func removeStaleGenericFallback() -> Bool {
+  fileprivate mutating func removeStaleGenericFallback() -> Bool {
     let text =
       ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
       .joined(separator: " ")
@@ -1495,7 +1681,7 @@ private extension LocalSessionRecap {
     return true
   }
 
-  func isUnsupportedWebsiteThemeFallback(forTranscript transcript: String) -> Bool {
+  fileprivate func isUnsupportedWebsiteThemeFallback(forTranscript transcript: String) -> Bool {
     let recapText =
       ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
       .joined(separator: " ")
@@ -1538,7 +1724,10 @@ private extension LocalSessionRecap {
         ["סימולציה", "סימולציות", "ראיון", "ראיונות", "hr", "tech"]
       ),
       (
-        ["visual tone", "visual direction", "lighter visual", "lighter background", "brand direction"],
+        [
+          "visual tone", "visual direction", "lighter visual", "lighter background",
+          "brand direction",
+        ],
         ["עיצוב", "ויזואל", "צבע", "צבעוניות", "רקע", "design", "visual", "brand"]
       ),
     ]
@@ -1549,13 +1738,14 @@ private extension LocalSessionRecap {
     return unsupportedClaimGroupCount >= 2
   }
 
-  func isStaleHebrewTranscriptCopyFallback(forTranscript transcript: String) -> Bool {
+  fileprivate func isStaleHebrewTranscriptCopyFallback(forTranscript transcript: String) -> Bool {
     guard transcript.containsHebrewScript else { return false }
 
     let recapText =
       ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
       .joined(separator: "\n")
-    let normalizedRecap = recapText
+    let normalizedRecap =
+      recapText
       .trimmingCharacters(in: .whitespacesAndNewlines)
       .lowercased()
     guard normalizedRecap.contains("המסמך עוסק ב") else { return false }
@@ -1566,7 +1756,8 @@ private extension LocalSessionRecap {
       return false
     }
 
-    let transcriptSentences = transcript
+    let transcriptSentences =
+      transcript
       .components(separatedBy: .newlines)
       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
       .filter { $0.count >= 12 }
@@ -1578,7 +1769,9 @@ private extension LocalSessionRecap {
     return rawSentenceMatches >= 2
   }
 
-  func isGenericHebrewTranscriptPlaceholderFallback(forTranscript transcript: String) -> Bool {
+  fileprivate func isGenericHebrewTranscriptPlaceholderFallback(forTranscript transcript: String)
+    -> Bool
+  {
     guard transcript.containsHebrewScript else { return false }
 
     let recapText =
@@ -1610,7 +1803,7 @@ private extension LocalSessionRecap {
     return matchedSignals.count >= 4
   }
 
-  func isSchemaPlaceholderFallback() -> Bool {
+  fileprivate func isSchemaPlaceholderFallback() -> Bool {
     let recapText =
       ([overview] + sections.flatMap { [$0.title, $0.summary] + $0.bullets })
       .joined(separator: "\n")
@@ -1628,7 +1821,7 @@ private extension LocalSessionRecap {
     return placeholderSignals.filter { recapText.contains($0) }.count >= 3
   }
 
-  func isStaleHebrewMeetingBoilerplate(forTranscript transcript: String) -> Bool {
+  fileprivate func isStaleHebrewMeetingBoilerplate(forTranscript transcript: String) -> Bool {
     guard transcript.containsHebrewScript else { return false }
 
     let recapText =
@@ -1652,8 +1845,8 @@ private extension LocalSessionRecap {
   }
 }
 
-private extension LocalSessionRecapSection {
-  var looksLikeAppliedAppendInstructionEcho: Bool {
+extension LocalSessionRecapSection {
+  fileprivate var looksLikeAppliedAppendInstructionEcho: Bool {
     guard kind == .notes else { return false }
     guard !title.contains("כותרת") else { return false }
 
@@ -1677,8 +1870,8 @@ private extension LocalSessionRecapSection {
   }
 }
 
-private extension LocalSessionDocumentChat {
-  mutating func localizeSavedEnglishStatusMessagesForHebrew() -> Bool {
+extension LocalSessionDocumentChat {
+  fileprivate mutating func localizeSavedEnglishStatusMessagesForHebrew() -> Bool {
     var changed = false
     for index in messages.indices {
       let text = messages[index].text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1703,20 +1896,20 @@ private extension LocalSessionDocumentChat {
   }
 }
 
-private extension String {
-  func truncated(maxLength: Int) -> String {
+extension String {
+  fileprivate func truncated(maxLength: Int) -> String {
     guard count > maxLength else { return self }
     let endIndex = index(startIndex, offsetBy: max(0, maxLength - 1))
     return String(self[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
   }
 
-  var containsHebrewScript: Bool {
+  fileprivate var containsHebrewScript: Bool {
     unicodeScalars.contains { scalar in
       (0x0590...0x05FF).contains(Int(scalar.value))
     }
   }
 
-  var looksLikeAppendInstructionEcho: Bool {
+  fileprivate var looksLikeAppendInstructionEcho: Bool {
     let normalized = trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     guard !normalized.isEmpty else { return false }
 
@@ -1726,7 +1919,7 @@ private extension String {
     ].contains { normalized.contains($0) }
   }
 
-  var cleanedTitleUpdateRequest: String? {
+  fileprivate var cleanedTitleUpdateRequest: String? {
     var title = trimmingCharacters(in: .whitespacesAndNewlines)
     let removablePhrases = [
       "תעדכן את הכותרת ל", "תעדכן את הכותרת", "עדכן את הכותרת ל",

@@ -29,10 +29,61 @@ struct LocalSessionTranscriptionProgress: Sendable, Equatable {
   let stage: Stage
 }
 
+struct LocalSessionTranscriptionWord: Sendable, Codable, Equatable {
+  let startTime: TimeInterval
+  let endTime: TimeInterval
+  let text: String
+  let confidence: Double?
+  let timestampProvenance: LocalSessionTimestampProvenance
+
+  init(
+    startTime: TimeInterval,
+    endTime: TimeInterval,
+    text: String,
+    confidence: Double? = nil,
+    timestampProvenance: LocalSessionTimestampProvenance = .asr
+  ) {
+    self.startTime = startTime
+    self.endTime = endTime
+    self.text = text
+    self.confidence = confidence
+    self.timestampProvenance = timestampProvenance
+  }
+}
+
 struct LocalSessionTranscriptionSegment: Sendable, Codable, Equatable {
   let startTime: TimeInterval
   let endTime: TimeInterval
   let text: String
+  let words: [LocalSessionTranscriptionWord]
+
+  init(
+    startTime: TimeInterval,
+    endTime: TimeInterval,
+    text: String,
+    words: [LocalSessionTranscriptionWord] = []
+  ) {
+    self.startTime = startTime
+    self.endTime = endTime
+    self.text = text
+    self.words = words
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case startTime
+    case endTime
+    case text
+    case words
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    startTime = try container.decode(TimeInterval.self, forKey: .startTime)
+    endTime = try container.decode(TimeInterval.self, forKey: .endTime)
+    text = try container.decode(String.self, forKey: .text)
+    words =
+      try container.decodeIfPresent([LocalSessionTranscriptionWord].self, forKey: .words) ?? []
+  }
 }
 
 struct LocalSessionTranscriptionResult: Sendable, Codable, Equatable {
@@ -242,6 +293,7 @@ actor LocalSessionWhisperKitTranscriptionService: LocalSessionTranscribing {
     }
 
     var options = decodingOptions(language: language, translateToEnglish: translateToEnglish)
+    options.wordTimestamps = true
     if let promptTokens = promptTokens(for: prompt, using: pipeline) {
       options.promptTokens = promptTokens
       options.usePrefillPrompt = true
@@ -278,7 +330,15 @@ actor LocalSessionWhisperKitTranscriptionService: LocalSessionTranscribing {
         LocalSessionTranscriptionSegment(
           startTime: TimeInterval(segment.start),
           endTime: TimeInterval(segment.end),
-          text: segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+          text: segment.text.trimmingCharacters(in: .whitespacesAndNewlines),
+          words: (segment.words ?? []).map {
+            LocalSessionTranscriptionWord(
+              startTime: TimeInterval($0.start),
+              endTime: TimeInterval($0.end),
+              text: $0.word,
+              confidence: Double($0.probability)
+            )
+          }
         )
       }
       .filter { !$0.text.isEmpty }

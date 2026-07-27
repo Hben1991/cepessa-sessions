@@ -7,9 +7,11 @@ final class CepessaSessionsStore {
   static let shared = CepessaSessionsStore()
 
   let model: LocalMeetingAppModel
+  let clipModel: LocalClipViewModel
 
   private init() {
     self.model = LocalMeetingAppModel()
+    self.clipModel = LocalClipViewModel()
   }
 }
 
@@ -52,40 +54,104 @@ final class CepessaSessionFloatingBarState: ObservableObject {
   @Published var isMicrophoneCaptureActive = false
   @Published var isMicrophoneMuted = false
   @Published var isSystemAudioCaptureActive = false
-  @Published var timerText = "00:00"
-  @Published var micLevel: Double = 0
-  @Published var systemLevel: Double = 0
-  @Published var title = "Start a session to see the live bar."
+  @Published var timerText = "00:00:00"
+  @Published var title = "Session capture idle"
   @Published var statusMessage = "Local capture stays on this Mac."
   @Published var errorMessage: String?
   @Published var noticeMessage: String?
   @Published var noticeStyle: NoticeStyle = .neutral
-  @Published var isDismissedForCurrentRecording = false
-  @Published var barContentWidth: CGFloat =
-    CepessaSessionFloatingBarController.Constants.preferredBarContentWidth
+  @Published var interaction = CepessaSessionFloatingBarInteractionState()
+  /// The lozenge itself. Animated — this is the shape that morphs.
+  @Published var barContentSize = CepessaSessionFloatingBarGeometry.idleSize
+  /// The footprint the panel is currently sized for. Equal to `barContentSize`
+  /// at rest and the union of both footprints while the lozenge is morphing.
+  @Published var panelContentSize = CepessaSessionFloatingBarGeometry.idleSize
+  /// True while the lozenge is changing shape. Only the tray's controls read
+  /// it — the ring stays live throughout, so the indicator can never be left
+  /// unclickable by a transition that failed to end.
+  @Published var isTransitioning = false
   @Published var processingStatusTitle: String?
   @Published var processingStatusDetail: String?
   @Published var processingProgress: Double?
   @Published var processingQueue: [CepessaSessionFloatingProcessingItem] = []
   @Published var attachmentDeck = CepessaSessionFloatingAttachmentDeck.empty
-  @Published var isAttachmentDeckExpanded = true
-  /// Rolling audio-level history driving the live waveform (newest last).
-  @Published var levelHistory: [Double] = []
 
-  var accentColor: Color {
-    if noticeStyle == .error || errorMessage?.isEmpty == false {
-      return CepessaColors.warning
-    }
+  var mode: CepessaSessionFloatingBarMode {
+    if interaction.isTrayOpen { return .tray }
+    if isRecording { return .recording }
+    return isTranscribing ? .processing : .idle
+  }
 
-    if isRecording {
-      return CepessaColors.success
-    }
+  var captureHealth: CepessaSessionCaptureHealth {
+    CepessaSessionCaptureHealth.resolve(
+      microphoneActive: isMicrophoneCaptureActive,
+      microphoneMuted: isMicrophoneMuted,
+      systemAudioActive: isSystemAudioCaptureActive,
+      hasError: errorMessage?.isEmpty == false
+    )
+  }
 
-    if isTranscribing {
-      return CepessaColors.purplePrimary
-    }
+  var ring: CepessaSessionIndicatorRing {
+    CepessaSessionIndicatorRing.resolve(
+      mode: mode,
+      isRecording: isRecording,
+      health: captureHealth,
+      progress: processingProgress
+    )
+  }
 
-    return CepessaColors.textTertiary
+  var compactTimerText: String {
+    CepessaSessionIndicatorTimer.compactText(from: timerText)
+  }
+
+  var showsHours: Bool {
+    CepessaSessionIndicatorTimer.showsHours(timerText)
+  }
+
+  var hasNotice: Bool {
+    noticeMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+  }
+
+  var hasFault: Bool {
+    errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+  }
+
+  /// The single line the open tray reads out next to the ring.
+  var trayStatusText: String {
+    CepessaSessionIndicatorTrayStatus.text(
+      isRecording: isRecording,
+      isTranscribing: isTranscribing,
+      hasFault: hasFault,
+      compactTimerText: compactTimerText,
+      progress: processingProgress,
+      notice: noticeMessage
+    )
+  }
+}
+
+/// The panel's content view.
+///
+/// The panel is deliberately larger than the lozenge — it carries transparent
+/// bleed so the glass rim and shadows are never clipped — which means it must
+/// decide for itself what counts as a click on the indicator. Anything outside
+/// the live lozenge passes straight through to whatever is behind it, and
+/// while the lozenge is morphing the whole surface swallows clicks instead of
+/// forwarding them to a control that is still moving.
+/// A pass-through filter and nothing else.
+///
+/// It answers exactly one question — is this point on the lozenge? — and hands
+/// everything else back to whatever is behind the panel. It deliberately never
+/// returns *itself* for a point on the lozenge: doing so replaces the real
+/// SwiftUI element with an anonymous view, which silently removes the
+/// indicator from accessibility hit-testing. Suppressing clicks during a morph
+/// is SwiftUI's job (see `allowsHitTesting` on the tray), not this view's.
+final class CepessaFloatingPanelContainerView: NSView {
+  var interactiveRect: CGRect = .zero
+
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    let local = superview.map { convert(point, from: $0) } ?? point
+    guard interactiveRect.contains(local) else { return nil }
+    return super.hitTest(point)
   }
 }
 
@@ -94,18 +160,18 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   static let shared = CepessaSessionFloatingBarController()
 
   fileprivate enum Constants {
-    static let preferredBarContentWidth: CGFloat = 860
-    static let minimumBarContentWidth: CGFloat = 620
-    static let maximumBarContentWidth: CGFloat = 920
-    static let idleBarContentWidth: CGFloat = 336
-    static let processingBarContentWidth: CGFloat = 360
-    static let panelHorizontalPadding: CGFloat = 20
-    static let compactBarHeight: CGFloat = 78
-    static let idleBarHeight: CGFloat = 64
-    static let expandedBarHeight: CGFloat = 152
-    static let recordingPillHeight: CGFloat = 58
-    static let idlePillHeight: CGFloat = 48
-    static let positionKey = "CepessaSessionsFloatingBarPosition"
+    /// Transparent room around the lozenge for the glass rim and both shadow
+    /// layers. Anything less and the panel edge cuts them into a square.
+    static let panelBleed = CepessaSessionFloatingBarGeometry.panelBleed
+    /// Stores the *content* origin, so future changes to the bleed never move
+    /// anyone's indicator.
+    static let positionKey = "CepessaSessionsFloatingBarContentOrigin"
+    /// Pre-bleed key: a panel origin, migrated once on first launch.
+    static let legacyPositionKey = "CepessaSessionsFloatingBarPosition"
+    /// Resting distance from the top of the visible screen on first launch.
+    /// One bleed puts the panel flush with the visible frame, which is also
+    /// where clamping would settle anything closer.
+    static let defaultTopInset: CGFloat = panelBleed
     static let attachmentsFolder = "Attachments"
     static let enabledKey = CepessaSessionFloatingBarPreferences.enabledKey
     static let attachmentDeckHiddenKey = "cepessa.sessions.floatingBarAttachmentDeckHidden"
@@ -121,9 +187,21 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   private var liveSessionID: UUID?
   private var applyingLiveSessionSnapshot = false
   private var noticeDismissTask: Task<Void, Never>?
-  private var lastLevelSampleAt: TimeInterval = 0
+  private var escapeMonitor: Any?
+  private var settleTask: DispatchWorkItem?
+  /// True from the moment a morph starts until the panel settles on the new
+  /// footprint.
+  private var isTransitioning = false
+  /// The footprint the in-flight morph is heading for, so a redundant publish
+  /// can be recognised and ignored instead of restarting the animation.
+  private var pendingContentSize: CGSize?
+  /// Invalidates completions and watchdogs belonging to superseded morphs.
+  private var transitionToken = 0
+  /// Set while the controller is resizing the panel itself, so its own frame
+  /// changes cannot re-enter `updateLayout` through the move delegate.
+  private var isApplyingPanelFrame = false
 
-  fileprivate var currentPanel: NSWindow? {
+  var currentPanel: NSWindow? {
     panel
   }
 
@@ -147,12 +225,14 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     liveSessionSnapshot = nil
     liveSessionID = nil
     noticeDismissTask?.cancel()
+    uninstallEscapeMonitor()
     state.noticeMessage = nil
     state.isVisible = false
     panel?.orderOut(nil)
   }
 
   func stopRecording() {
+    guard model?.isRecording == true else { return }
     model?.toggleRecording()
   }
 
@@ -161,9 +241,9 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     model?.toggleRecording()
   }
 
-  /// Re-shows the bar after the user hid it with the close button.
+  /// Re-shows the indicator after the user hid it.
   func showBar() {
-    state.isDismissedForCurrentRecording = false
+    state.interaction.show()
     UserDefaults.standard.set(true, forKey: Constants.enabledKey)
     syncVisibility()
   }
@@ -171,6 +251,14 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   var isBarVisible: Bool {
     state.isVisible
   }
+
+  /// True when the user hid the indicator while capture is still live. The
+  /// status item surfaces the reversible path back.
+  var isHiddenDuringRecording: Bool {
+    state.interaction.isHiddenForCurrentRecording && state.isRecording
+  }
+
+  // MARK: - Menus
 
   func showBarMenu() {
     let menu = NSMenu()
@@ -220,7 +308,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     menu.addItem(.separator())
 
     let hide = NSMenuItem(
-      title: "Hide Floating Bar", action: #selector(hideBarMenuItem), keyEquivalent: "")
+      title: "Hide Recording Indicator", action: #selector(hideBarMenuItem), keyEquivalent: "")
     hide.target = self
     menu.addItem(hide)
 
@@ -228,6 +316,52 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
       title: "Quit Cepessa Sessions", action: #selector(quitMenuItem), keyEquivalent: "")
     quit.target = self
     menu.addItem(quit)
+
+    menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+  }
+
+  /// Right-click on the indicator. Stop stays one deliberate gesture away even
+  /// when the tray is closed.
+  func showIndicatorContextMenu() {
+    let menu = NSMenu()
+
+    if state.isRecording {
+      let stop = NSMenuItem(
+        title: "Stop Recording", action: #selector(stopMenuItem), keyEquivalent: "")
+      stop.target = self
+      menu.addItem(stop)
+
+      let mute = NSMenuItem(
+        title: state.isMicrophoneMuted ? "Unmute Microphone" : "Mute Microphone",
+        action: #selector(toggleMuteMenuItem), keyEquivalent: "")
+      mute.target = self
+      menu.addItem(mute)
+    } else {
+      let record = NSMenuItem(
+        title: "Start Recording", action: #selector(startMenuItem), keyEquivalent: "")
+      record.target = self
+      menu.addItem(record)
+    }
+
+    menu.addItem(.separator())
+
+    let controls = NSMenuItem(
+      title: state.interaction.isTrayOpen ? "Close Controls" : "Show Controls",
+      action: #selector(toggleTrayMenuItem), keyEquivalent: "")
+    controls.target = self
+    menu.addItem(controls)
+
+    let hide = NSMenuItem(
+      title: "Hide Recording Indicator", action: #selector(hideBarMenuItem), keyEquivalent: "")
+    hide.target = self
+    menu.addItem(hide)
+
+    menu.addItem(.separator())
+
+    let more = NSMenuItem(
+      title: "Sessions Menu", action: #selector(sessionsMenuItem), keyEquivalent: "")
+    more.target = self
+    menu.addItem(more)
 
     menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
   }
@@ -257,24 +391,83 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     dismissForCurrentRecording()
   }
 
+  @objc private func stopMenuItem() {
+    stopRecording()
+  }
+
+  @objc private func startMenuItem() {
+    startRecording()
+  }
+
+  @objc private func toggleMuteMenuItem() {
+    toggleMicrophoneMute()
+  }
+
+  @objc private func toggleTrayMenuItem() {
+    toggleControlTray()
+  }
+
+  @objc private func sessionsMenuItem() {
+    showBarMenu()
+  }
+
   @objc private func quitMenuItem() {
     NSApp.terminate(nil)
   }
+
+  // MARK: - Interaction
 
   func toggleMicrophoneMute() {
     model?.toggleMicrophoneMute()
   }
 
   func dismissForCurrentRecording() {
-    state.isDismissedForCurrentRecording = true
+    if state.isRecording {
+      state.interaction.hideForCurrentRecording()
+    } else {
+      UserDefaults.standard.set(false, forKey: Constants.enabledKey)
+    }
+    updateLayout(animated: false)
     syncVisibility()
   }
 
-  func toggleAttachmentDeckVisibility() {
-    let shouldHide = state.isAttachmentDeckExpanded
-    UserDefaults.standard.set(shouldHide, forKey: Constants.attachmentDeckHiddenKey)
-    state.isAttachmentDeckExpanded = !shouldHide
-    updatePanelSize(animated: true)
+  /// Pointer proximity changes opacity only — never geometry.
+  func setHoveringBar(_ isHovering: Bool) {
+    guard state.interaction.isHovered != isHovering else { return }
+    state.interaction.hoverChanged(isHovering)
+  }
+
+  func toggleControlTray() {
+    state.interaction.toggleTray()
+    syncEscapeMonitor()
+    updateLayout(animated: true)
+  }
+
+  func closeControlTray() {
+    guard state.interaction.isTrayOpen else { return }
+    state.interaction.closeTray()
+    syncEscapeMonitor()
+    updateLayout(animated: true)
+  }
+
+  private func syncEscapeMonitor() {
+    if state.interaction.isTrayOpen {
+      guard escapeMonitor == nil else { return }
+      escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        guard event.keyCode == 53 else { return event }
+        Task { @MainActor in self?.closeControlTray() }
+        return nil
+      }
+    } else {
+      uninstallEscapeMonitor()
+    }
+  }
+
+  private func uninstallEscapeMonitor() {
+    if let escapeMonitor {
+      NSEvent.removeMonitor(escapeMonitor)
+    }
+    escapeMonitor = nil
   }
 
   func captureFullScreenshot() {
@@ -347,54 +540,54 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
         if importedCount > 0 {
           self.showNotice(
             importedCount == 1
-              ? "File pinned at \(self.state.timerText)."
-              : "\(importedCount) files pinned at \(self.state.timerText).",
+              ? "File pinned at \(self.state.compactTimerText)."
+              : "\(importedCount) files pinned at \(self.state.compactTimerText).",
             style: .success
           )
-        } else if let lastError {
-          self.state.errorMessage = lastError.localizedDescription
+        } else if lastError != nil {
           self.showNotice("File attachment failed.", style: .error)
         }
       }
     }
   }
 
+  /// Only a *user* drag reaches here as a real move. The controller's own
+  /// resizes also fire this delegate, and letting them re-enter `updateLayout`
+  /// cancelled the settle that was about to run and wrote the animation's
+  /// target straight into state — killing the morph it had just started.
   func windowDidMove(_ notification: Notification) {
-    guard let panel else { return }
-    UserDefaults.standard.set(NSStringFromPoint(panel.frame.origin), forKey: Constants.positionKey)
-    refreshLayoutMetrics()
-    updatePanelSize(animated: false)
+    guard panel != nil, !isApplyingPanelFrame, !isTransitioning else { return }
+    updateLayout(animated: false)
   }
 
   private func bind(to model: LocalMeetingAppModel) {
     cancellables.removeAll()
 
+    // `@Published` re-publishes on every assignment, not only on change, and
+    // these two sinks reset the tray. Without `removeDuplicates` a redundant
+    // `isRecording = false` closed a tray the user had deliberately opened.
     model.$isRecording
+      .removeDuplicates()
       .receive(on: DispatchQueue.main)
       .sink { [weak self] isRecording in
         if isRecording {
-          // Starting a recording always brings the bar back.
-          self?.state.isDismissedForCurrentRecording = false
-          self?.state.levelHistory = []
+          // Every recording starts visible and deliberately at rest.
+          self?.state.interaction.recordingDidStart()
+        } else {
+          self?.state.interaction.recordingDidEnd()
         }
+        self?.syncEscapeMonitor()
         self?.refreshState()
         self?.syncVisibility()
       }
       .store(in: &cancellables)
 
     model.$isTranscribing
+      .removeDuplicates()
       .receive(on: DispatchQueue.main)
       .sink { [weak self] _ in
         self?.refreshState()
         self?.syncVisibility()
-      }
-      .store(in: &cancellables)
-
-    model.$micLevel
-      .receive(on: DispatchQueue.main)
-      .sink { [weak self] value in
-        self?.state.micLevel = value
-        self?.appendLevelSample()
       }
       .store(in: &cancellables)
 
@@ -419,18 +612,17 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
       }
       .store(in: &cancellables)
 
-    model.$systemLevel
-      .receive(on: DispatchQueue.main)
-      .sink { [weak self] value in
-        self?.state.systemLevel = value
-        self?.appendLevelSample()
-      }
-      .store(in: &cancellables)
-
     model.$recordingDurationText
       .receive(on: DispatchQueue.main)
       .sink { [weak self] value in
-        self?.state.timerText = value
+        guard let self else { return }
+        let hoursChanged =
+          CepessaSessionIndicatorTimer.showsHours(self.state.timerText)
+          != CepessaSessionIndicatorTimer.showsHours(value)
+        self.state.timerText = value
+        if hoursChanged {
+          self.updateLayout(animated: true)
+        }
       }
       .store(in: &cancellables)
 
@@ -490,38 +682,31 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     )
     panel.isFloatingPanel = true
     panel.level = .floating
-    // The bar is a light paper surface by design; don't let system dark mode
-    // turn the glass/material dark.
-    panel.appearance = NSAppearance(named: .aqua)
     panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     panel.backgroundColor = .clear
     panel.isOpaque = false
     panel.hasShadow = false
     panel.hidesOnDeactivate = false
-    panel.isMovableByWindowBackground = true
+    panel.isMovableByWindowBackground = false
     panel.delegate = self
 
     let hostingView = NSHostingView(
       rootView: CepessaSessionFloatingBarView(controller: self, state: state))
-    hostingView.translatesAutoresizingMaskIntoConstraints = false
 
-    let container = NSView()
+    let container = CepessaFloatingPanelContainerView()
     container.wantsLayer = true
+    hostingView.frame = container.bounds
+    hostingView.autoresizingMask = [.width, .height]
     container.addSubview(hostingView)
-    NSLayoutConstraint.activate([
-      hostingView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-      hostingView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-      hostingView.topAnchor.constraint(equalTo: container.topAnchor),
-      hostingView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-    ])
 
     panel.contentView = container
     panel.setContentSize(preferredPanelSize)
     refreshLayoutMetrics()
 
-    if let savedOrigin = UserDefaults.standard.string(forKey: Constants.positionKey) {
-      let origin = NSPointFromString(savedOrigin)
-      panel.setFrameOrigin(origin)
+    if let contentOrigin = restoredContentOrigin() {
+      panel.setFrameOrigin(
+        CepessaSessionFloatingBarGeometry.panelOrigin(
+          forContentOrigin: contentOrigin, bleed: Constants.panelBleed))
       clamp(panel: panel)
     } else {
       positionPanel(panel)
@@ -529,37 +714,53 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
 
     self.panel = panel
     self.hostingView = hostingView
+    applyPanelSize()
+  }
+
+  /// The saved resting *content* origin, migrating a pre-bleed panel origin
+  /// once so an existing install does not find its indicator shifted.
+  private func restoredContentOrigin() -> NSPoint? {
+    let defaults = UserDefaults.standard
+
+    if let saved = defaults.string(forKey: Constants.positionKey) {
+      return NSPointFromString(saved)
+    }
+
+    guard let legacy = defaults.string(forKey: Constants.legacyPositionKey) else { return nil }
+    let migrated = CepessaSessionFloatingBarGeometry.migratedContentOrigin(
+      fromLegacyPanelOrigin: NSPointFromString(legacy))
+    defaults.set(NSStringFromPoint(migrated), forKey: Constants.positionKey)
+    return migrated
   }
 
   private func positionPanel(_ panel: NSPanel) {
     guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
     let frame = screen.visibleFrame
-    let origin = NSPoint(
-      x: frame.midX - (preferredPanelSize.width / 2),
-      y: frame.maxY - preferredPanelSize.height - 18
+    let contentSize = state.panelContentSize
+    let contentOrigin = NSPoint(
+      x: frame.midX - (contentSize.width / 2),
+      y: frame.maxY - Constants.defaultTopInset - contentSize.height
     )
-    panel.setFrameOrigin(origin)
+    panel.setFrameOrigin(
+      CepessaSessionFloatingBarGeometry.panelOrigin(
+        forContentOrigin: contentOrigin, bleed: Constants.panelBleed))
+    clamp(panel: panel)
   }
 
   private func refreshState() {
     guard let model else { return }
 
-    refreshLayoutMetrics()
     state.isRecording = model.isRecording
     state.isTranscribing = model.isTranscribing
     state.isMicrophoneCaptureActive = model.isMicrophoneCaptureActive
     state.isMicrophoneMuted = model.isMicrophoneMuted
     state.isSystemAudioCaptureActive = model.isSystemAudioCaptureActive
     state.timerText = model.recordingDurationText
-    state.micLevel = model.micLevel
-    state.systemLevel = model.systemLevel
     state.errorMessage = model.recorderErrorMessage
     state.processingStatusTitle = model.processingStatusTitle
     state.processingStatusDetail = model.processingStatusDetail
     state.processingProgress = model.processingProgress
     state.processingQueue = processingQueueItems(from: model)
-    state.isAttachmentDeckExpanded = !UserDefaults.standard.bool(
-      forKey: Constants.attachmentDeckHiddenKey)
 
     if let session = activeSession() {
       state.title = session.title
@@ -569,11 +770,9 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
         state.statusMessage =
           state.isMicrophoneMuted
           ? "Recording on this Mac. The microphone is muted in the transcript mix."
-          : "Recording on this Mac. Add screenshots or files to pin context to this moment."
+          : "Recording on this Mac."
       case .transcribing:
-        state.statusMessage =
-          model.processingStatusDetail
-          ?? "Finishing the local transcript."
+        state.statusMessage = model.processingStatusDetail ?? "Finishing the local transcript."
       case .ready:
         state.statusMessage = "Session saved locally."
       case .failed:
@@ -581,12 +780,8 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
       }
     } else if model.isTranscribing {
       state.title = model.processingStatusTitle ?? "Processing session"
-      state.statusMessage =
-        model.processingStatusDetail
-        ?? "Finishing the local transcript."
-      if let lastSession = model.sessions.first(where: {
-        $0.status == .transcribing
-      }) {
+      state.statusMessage = model.processingStatusDetail ?? "Finishing the local transcript."
+      if let lastSession = model.sessions.first(where: { $0.status == .transcribing }) {
         state.attachmentDeck = CepessaSessionFloatingAttachmentDeck.build(from: lastSession)
       } else {
         state.attachmentDeck = .empty
@@ -597,31 +792,12 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
       state.attachmentDeck = .empty
     }
 
-    refreshLayoutMetrics()
-    updatePanelSize(animated: true)
-  }
-
-  /// Feeds the scrolling waveform. Samples are throttled to ~20 Hz so the
-  /// wave scrolls at a steady, readable pace regardless of publisher cadence.
-  private func appendLevelSample() {
-    guard state.isRecording else { return }
-    let now = Date().timeIntervalSinceReferenceDate
-    guard now - lastLevelSampleAt >= 0.05 else { return }
-    lastLevelSampleAt = now
-
-    let combined = min(1, max(state.isMicrophoneMuted ? 0 : state.micLevel, state.systemLevel))
-    var history = state.levelHistory
-    history.append(combined)
-    if history.count > 160 {
-      history.removeFirst(history.count - 160)
-    }
-    state.levelHistory = history
+    updateLayout(animated: true)
   }
 
   private func syncVisibility() {
     guard let panel else { return }
-    // The bar is the app: visible whenever enabled, in every state.
-    let shouldShow = isFloatingBarEnabled && !state.isDismissedForCurrentRecording
+    let shouldShow = isFloatingBarEnabled && !state.interaction.isHiddenForCurrentRecording
     state.isVisible = shouldShow
 
     if shouldShow {
@@ -631,6 +807,8 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     } else {
       panel.orderOut(nil)
     }
+
+    CepessaSessionStatusBarController.shared.refreshAccessibilityState()
   }
 
   private var isFloatingBarEnabled: Bool {
@@ -639,61 +817,192 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   }
 
   private var preferredPanelSize: NSSize {
-    let baseHeight: CGFloat
-    if state.isRecording {
-      baseHeight =
-        (state.isAttachmentDeckExpanded && state.attachmentDeck.hasContent)
-        ? Constants.expandedBarHeight
-        : Constants.compactBarHeight
-    } else {
-      baseHeight = Constants.idleBarHeight
-    }
-    return NSSize(
-      width: currentBarContentWidth + Constants.panelHorizontalPadding,
-      height: baseHeight)
+    panelSize(for: state.panelContentSize)
   }
 
-  private var currentBarContentWidth: CGFloat {
-    if !state.isRecording {
-      return state.isTranscribing
-        ? Constants.processingBarContentWidth
-        : Constants.idleBarContentWidth
-    }
+  private func panelSize(for contentSize: CGSize) -> NSSize {
+    let size = CepessaSessionFloatingBarGeometry.panelSize(
+      for: contentSize, bleed: Constants.panelBleed)
+    return NSSize(width: size.width, height: size.height)
+  }
+
+  private var restingContentSize: CGSize {
+    CepessaSessionFloatingBarGeometry.idleSize
+  }
+
+  private var currentBarContentSize: CGSize {
     let availableWidth =
       (panel.flatMap { screen(for: $0.frame) } ?? NSScreen.main ?? NSScreen.screens.first)?
       .visibleFrame.width
-    let screenBoundWidth = max(
-      Constants.minimumBarContentWidth,
-      (availableWidth ?? Constants.preferredBarContentWidth) - 48
+    return CepessaSessionFloatingBarGeometry.contentSize(
+      for: state.mode,
+      showsHours: state.showsHours,
+      isRecording: state.isRecording,
+      hasNotice: state.hasNotice,
+      availableScreenWidth: availableWidth
     )
-    return min(Constants.maximumBarContentWidth, screenBoundWidth)
   }
 
   private func refreshLayoutMetrics() {
-    let width = currentBarContentWidth
-    if state.barContentWidth != width {
-      state.barContentWidth = width
+    let size = currentBarContentSize
+    if state.barContentSize != size {
+      state.barContentSize = size
+    }
+    if state.panelContentSize != size && !isTransitioning {
+      state.panelContentSize = size
     }
   }
 
-  private func updatePanelSize(animated: Bool) {
+  /// Grow the panel, morph the lozenge, settle the panel.
+  ///
+  /// The order is the whole trick. If the panel resized in step with the
+  /// shape, the glass would be clipped for the entire animation; if it never
+  /// resized, the resting dot could not be parked near a screen edge. Taking
+  /// the union up front and giving it back at the end buys both.
+  ///
+  /// The shrink is driven by SwiftUI's own completion callback rather than a
+  /// timer, because a spring settles well after its `response`. Resizing the
+  /// host window out from under an animation that is still running leaves the
+  /// glass mid-flight and is exactly how the collapsed indicator went missing.
+  private func updateLayout(animated: Bool) {
+    let target = currentBarContentSize
+
+    // A redundant publish must not cancel, restart, or short-circuit a morph
+    // that is already on its way to the same footprint.
+    if isTransitioning, target == pendingContentSize { return }
+
+    settleTask?.cancel()
+    settleTask = nil
+
+    let current = state.barContentSize
+    let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+    guard animated, !reduceMotion, target != current else {
+      settleLayout()
+      return
+    }
+
+    transitionToken &+= 1
+    let token = transitionToken
+    pendingContentSize = target
+    isTransitioning = true
+    state.isTransitioning = true
+
+    // Grow first: the panel is never smaller than the shape inside it.
+    state.panelContentSize = CepessaSessionIndicatorTransition.panelContentSize(
+      from: current, to: target)
+    applyPanelSize()
+
+    withAnimation(CepessaChrome.Motion.expand) {
+      state.barContentSize = target
+    } completion: { [weak self] in
+      self?.settleLayout(ifToken: token)
+    }
+
+    // Watchdog. The panel must never be stranded on the union footprint if the
+    // completion is lost — a view torn down mid-animation, or an animation
+    // pre-empted before it ever attached, would otherwise leave the indicator
+    // sized for a tray that is no longer on screen.
+    let settle = DispatchWorkItem { [weak self] in
+      self?.settleLayout(ifToken: token)
+    }
+    settleTask = settle
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + CepessaChrome.Motion.settleTimeout, execute: settle)
+  }
+
+  private func settleLayout(ifToken token: Int) {
+    guard token == transitionToken else { return }
+    settleLayout()
+  }
+
+  /// Lands the panel on the footprint the current state actually wants.
+  ///
+  /// Idempotent and self-invalidating: bumping the token means any completion
+  /// or watchdog still in flight for an earlier morph is ignored, so a
+  /// superseded callback can never resize the panel for a stale state.
+  private func settleLayout() {
+    settleTask?.cancel()
+    settleTask = nil
+    transitionToken &+= 1
+    pendingContentSize = nil
+    isTransitioning = false
+    state.isTransitioning = false
+
+    let target = currentBarContentSize
+    state.barContentSize = target
+    state.panelContentSize = target
+    applyPanelSize()
+
+    // The shape has stopped moving: make sure what is on screen agrees.
+    hostingView?.needsDisplay = true
+    panel?.invalidateShadow()
+  }
+
+  private func applyPanelSize() {
     guard let panel else { return }
     let targetSize = preferredPanelSize
-    guard panel.frame.size != targetSize else { return }
 
-    // Grow/shrink around the center so the bar stays where the user put it,
-    // and clamp the target frame (not the stale pre-animation frame).
+    guard panel.frame.size != targetSize else {
+      updateInteractiveRect()
+      return
+    }
+
+    // Grow/shrink around the horizontal centre and the top edge so the lozenge
+    // stays where the user put it, and clamp the target frame (not the stale
+    // pre-resize one).
     var nextFrame = panel.frame
     nextFrame.origin.x += (panel.frame.width - targetSize.width) / 2
     nextFrame.origin.y -= targetSize.height - panel.frame.height
     nextFrame.size = targetSize
     nextFrame.origin = clampedOrigin(for: nextFrame)
 
-    if animated {
-      panel.animator().setFrame(nextFrame, display: true)
-    } else {
-      panel.setFrame(nextFrame, display: true)
-    }
+    // The panel adopts each footprint atomically; SwiftUI owns the motion.
+    // Animating the NSPanel frame instead can re-enter AppKit's constraint
+    // pass while the hosting view is mid-layout and raise an exception.
+    isApplyingPanelFrame = true
+    panel.setFrame(nextFrame, display: true)
+    isApplyingPanelFrame = false
+    updateInteractiveRect()
+  }
+
+  /// Teaches the panel which part of itself is the indicator.
+  private func updateInteractiveRect() {
+    guard let container = panel?.contentView as? CepessaFloatingPanelContainerView else { return }
+    container.interactiveRect = CepessaSessionIndicatorTransition.interactiveRect(
+      contentSize: state.barContentSize,
+      panelContentSize: state.panelContentSize,
+      panelSize: panelSize(for: state.panelContentSize),
+      isTransitioning: isTransitioning
+    )
+  }
+
+  fileprivate func beginPanelDrag(with event: NSEvent) {
+    guard let panel else { return }
+    panel.performDrag(with: event)
+
+    let contentOrigin = CepessaSessionFloatingBarGeometry.restingContentOrigin(
+      afterDragging: panel.frame,
+      restingContentSize: restingContentSize,
+      bleed: Constants.panelBleed
+    )
+    var restingFrame = NSRect(
+      origin: CepessaSessionFloatingBarGeometry.panelOrigin(
+        forContentOrigin: contentOrigin, bleed: Constants.panelBleed),
+      size: panelSize(for: restingContentSize)
+    )
+    restingFrame.origin = clampedOrigin(for: restingFrame)
+
+    UserDefaults.standard.set(
+      NSStringFromPoint(
+        NSPoint(
+          x: restingFrame.origin.x + Constants.panelBleed,
+          y: restingFrame.origin.y + Constants.panelBleed
+        )
+      ),
+      forKey: Constants.positionKey
+    )
+    updateInteractiveRect()
   }
 
   private func activeSession() -> LocalSession? {
@@ -726,16 +1035,15 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
         title: interactive ? "Region capture" : "Screenshot",
         note: "Captured during the live session."
       )
-      state.errorMessage = nil
       showNotice(
         interactive
-          ? "Region pinned at \(state.timerText)." : "Screenshot pinned at \(state.timerText).",
+          ? "Region pinned at \(state.compactTimerText)."
+          : "Screenshot pinned at \(state.compactTimerText).",
         style: .success
       )
     } catch is CancellationError {
       return
     } catch {
-      state.errorMessage = error.localizedDescription
       showNotice(interactive ? "Region capture failed." : "Screenshot failed.", style: .error)
     }
   }
@@ -755,7 +1063,6 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
       title: fileURL.deletingPathExtension().lastPathComponent,
       note: "Imported during the live session."
     )
-    state.errorMessage = nil
   }
 
   private func attachFile(
@@ -915,8 +1222,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   }
 
   private func defaultBaseDirectory() -> URL {
-    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-      .appendingPathComponent("Cepessa", isDirectory: true)
+    LocalSessionStorageRoot.defaultBaseDirectory
   }
 
   private func processingQueueItems(from model: LocalMeetingAppModel)
@@ -1017,6 +1323,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     noticeDismissTask?.cancel()
     state.noticeMessage = text
     state.noticeStyle = style
+    updateLayout(animated: true)
 
     noticeDismissTask = Task { [weak self] in
       try? await Task.sleep(nanoseconds: 2_400_000_000)
@@ -1025,6 +1332,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
         guard let self else { return }
         self.state.noticeMessage = nil
         self.state.noticeStyle = .neutral
+        self.updateLayout(animated: true)
       }
     }
   }
@@ -1058,882 +1366,605 @@ struct CepessaSessionFloatingProcessingItem: Identifiable, Equatable {
   }
 }
 
+// MARK: - View
+
 private struct CepessaSessionFloatingBarView: View {
+  let controller: CepessaSessionFloatingBarController
+  @ObservedObject var state: CepessaSessionFloatingBarState
+
+  var body: some View {
+    SessionIndicatorLozenge(controller: controller, state: state)
+      // The panel carries transparent bleed around the lozenge; filling it and
+      // centring is what keeps the glass off the window edge.
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .onExitCommand(perform: controller.closeControlTray)
+      .accessibilityIdentifier("cepessa.floatingBar")
+  }
+}
+
+// MARK: The lozenge
+
+/// One object, four states.
+///
+/// The resting dot, the recording lozenge and the open tray are the same view
+/// changing width — never separate subtrees swapping places. The state ring is
+/// the first child in every state, so as the capsule grows the ring rides its
+/// leading edge outward and rides back on the way in; that continuity is the
+/// entire reason the expansion reads as one thing opening rather than two
+/// things cross-fading.
+///
+/// Geometry follows `state.barContentSize`, which only ever changes because
+/// the app's state changed or the user deliberately clicked. Hover reaches the
+/// lighting and nothing else.
+private struct SessionIndicatorLozenge: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   let controller: CepessaSessionFloatingBarController
   @ObservedObject var state: CepessaSessionFloatingBarState
 
+  private var isTray: Bool { state.interaction.isTrayOpen }
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      if state.isRecording && state.attachmentDeck.hasContent {
-        HStack(alignment: .bottom, spacing: 10) {
-          if state.isAttachmentDeckExpanded {
-            SessionFloatingAttachmentDeckView(deck: state.attachmentDeck)
-              .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .bottomLeading)))
-          } else {
-            SessionFloatingCollapsedAttachmentPill(deck: state.attachmentDeck)
-              .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .bottomLeading)))
-          }
+    HStack(spacing: 0) {
+      SessionStateRing(ring: state.ring)
+        .frame(width: CepessaChrome.Control.micro, height: CepessaChrome.Control.micro)
+        .overlay { trayHandle }
 
-          SessionFloatingDeckToggleButton(
-            isExpanded: state.isAttachmentDeckExpanded,
-            action: controller.toggleAttachmentDeckVisibility
-          )
-          .padding(.bottom, 10)
-
-          Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 28)
-        .padding(.bottom, -10)
-        .zIndex(2)
+      if isTray {
+        SessionTrayTail(controller: controller, state: state)
+          .transition(tailTransition)
+          // A collapsing tray must not deliver the release to whichever
+          // control slid under the pointer — Record and Stop above all.
+          .allowsHitTesting(
+            CepessaSessionIndicatorTransition.acceptsClicks(
+              isTransitioning: state.isTransitioning))
+      } else if state.isRecording {
+        SessionRestingTimer(state: state)
+          .transition(tailTransition)
       }
-
-      barPill
     }
+    .padding(.leading, leadingInset)
+    .padding(.trailing, trailingInset)
+    // Leading alignment is what makes the morph continuous. The tray's
+    // contents finish fading out well before the capsule finishes closing, and
+    // a centred row would snap the ring to the middle the instant they leave.
+    // Anchored to the leading edge it simply rides the closing capsule in.
     .frame(
-      width: state.barContentWidth
-        + CepessaSessionFloatingBarController.Constants.panelHorizontalPadding
+      width: state.barContentSize.width,
+      height: state.barContentSize.height,
+      alignment: .leading
     )
-    .padding(.vertical, 8)
-    .background(Color.clear)
-    .animation(barAnimation, value: state.isRecording)
-    .animation(barAnimation, value: state.isTranscribing)
-    .animation(barAnimation, value: state.attachmentDeck)
-    .animation(barAnimation, value: state.isAttachmentDeckExpanded)
-  }
-
-  private var barPill: some View {
-    Group {
-      if state.isRecording {
-        recordingContent
-      } else if state.isTranscribing {
-        processingContent
-      } else {
-        idleContent
-      }
-    }
-    .padding(.horizontal, 10)
-    .frame(
-      width: state.barContentWidth,
-      height: state.isRecording
-        ? CepessaSessionFloatingBarController.Constants.recordingPillHeight
-        : CepessaSessionFloatingBarController.Constants.idlePillHeight
-    )
-    .cepessaFloatingToolbarSurface()
-    .accessibilityElement(children: .contain)
-    .accessibilityLabel("Cepessa Sessions bar")
-    .accessibilityHint("Drag the middle of the bar to move it.")
-  }
-
-  // MARK: Idle — record, quiet waveform, library shortcuts
-
-  private var idleContent: some View {
-    HStack(alignment: .center, spacing: 8) {
-      SessionFloatingRecordButton(action: controller.startRecording)
-
-      ZStack {
-        SessionFloatingDragSpacer()
-
-        SessionFloatingLiveWaveform(
-          levels: [],
-          isRecording: false,
-          accent: CepessaColors.textTertiary
-        )
-        .frame(height: 26)
-        .padding(.horizontal, 12)
-        .allowsHitTesting(false)
-      }
-
-      SessionFloatingToolbarIconButton(
-        icon: "ellipsis",
-        title: "Sessions menu",
-        isDisabled: false,
-        action: controller.showBarMenu
-      )
-    }
-  }
-
-  // MARK: Processing — quiet progress
-
-  private var processingContent: some View {
-    HStack(alignment: .center, spacing: 10) {
-      ProgressView()
-        .controlSize(.small)
-
-      Text(progressText)
-        .scaledFont(size: 12, weight: .medium)
-        .monospacedDigit()
-        .foregroundStyle(CepessaColors.textSecondary)
-        .lineLimit(1)
-
-      SessionFloatingDragSpacer()
-
-      SessionFloatingToolbarIconButton(
-        icon: "ellipsis",
-        title: "Sessions menu",
-        isDisabled: false,
-        action: controller.showBarMenu
-      )
-    }
-  }
-
-  // MARK: Recording — full capture controls
-
-  private var recordingContent: some View {
-    HStack(alignment: .center, spacing: 7) {
-      SessionFloatingToolbarIconButton(
-        icon: state.isMicrophoneMuted ? "mic.slash.fill" : "mic.fill",
-        title: state.isMicrophoneMuted ? "Unmute microphone" : "Mute microphone",
-        isDisabled: !state.isRecording,
-        action: controller.toggleMicrophoneMute
-      )
-
-      toolbarDivider
-
-      SessionFloatingToolbarIconButton(
-        icon: "laptopcomputer",
-        title: "Capture screen",
-        isDisabled: !state.isRecording,
-        action: controller.captureFullScreenshot
-      )
-      SessionFloatingToolbarIconButton(
-        icon: "camera",
-        title: "Capture region",
-        isDisabled: !state.isRecording,
-        action: controller.captureRegionScreenshot
-      )
-      SessionFloatingToolbarIconButton(
-        icon: "paperclip",
-        title: "Attach file",
-        isDisabled: !state.isRecording,
-        action: controller.importDocument
-      )
-
-      SessionFloatingWaveformDragRegion(
-        levels: state.levelHistory,
-        accent: waveformAccent
-      )
-      .frame(maxWidth: .infinity, minHeight: 40, maxHeight: 44)
-
-      SessionFloatingTimerPill(timerText: state.timerText)
-
-      SessionFloatingStopButton(action: controller.stopRecording)
-
-      toolbarDivider
-
-      SessionFloatingToolbarIconButton(
-        icon: "ellipsis",
-        title: "Sessions menu",
-        isDisabled: false,
-        action: controller.showBarMenu
-      )
-    }
-  }
-
-  private var progressText: String {
-    if let progress = state.processingProgress {
-      return "Transcribing \(Int((progress * 100).rounded()))%"
-    }
-    return state.processingStatusTitle ?? "Transcribing"
-  }
-
-  private var toolbarDivider: some View {
-    Rectangle()
-      .fill(Color(nsColor: .separatorColor).opacity(0.65))
-      .frame(width: 1, height: 20)
-      .padding(.horizontal, 2)
-  }
-
-  private var waveformAccent: Color {
-    if let error = state.errorMessage, !error.isEmpty {
-      return CepessaColors.warning
-    }
-    return state.noticeStyle == .error ? CepessaColors.warning : CepessaColors.signalRed
-  }
-
-  private var noticeTextColor: Color {
-    switch state.noticeStyle {
-    case .success:
-      return CepessaColors.success
-    case .warning:
-      return CepessaColors.warning
-    case .error:
-      return CepessaColors.warning
-    case .neutral:
-      return CepessaColors.textTertiary
-    }
-  }
-
-  private var progressButtonTitle: String {
-    guard state.isTranscribing else { return "Processing" }
-    if let progress = state.processingProgress {
-      return "Working \(Int((progress * 100).rounded()))%"
-    }
-    return state.processingStatusTitle ?? "Processing"
-  }
-
-  private var secondaryProcessingItems: [CepessaSessionFloatingProcessingItem] {
-    Array(state.processingQueue.dropFirst().prefix(2))
-  }
-
-  private func meterAccent(isActive: Bool, isRecording: Bool, isTranscribing: Bool) -> Color {
-    if isRecording {
-      return isActive ? CepessaColors.success : CepessaColors.error
-    }
-
-    if isTranscribing {
-      return CepessaColors.purplePrimary
-    }
-
-    return CepessaColors.textTertiary
-  }
-
-  private var barAnimation: Animation? {
-    reduceMotion ? nil : .timingCurve(0.23, 1, 0.32, 1, duration: 0.22)
-  }
-}
-
-private struct SessionFloatingAttachmentDeckView: View {
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-  let deck: CepessaSessionFloatingAttachmentDeck
-
-  private let cardSize = CGSize(width: 128, height: 82)
-
-  var body: some View {
-    ZStack(alignment: .topLeading) {
-      ForEach(Array(layeredPreviews.enumerated()), id: \.element.id) { index, preview in
-        SessionFloatingAttachmentCard(
-          preview: preview,
-          accent: accent(for: preview.kind),
-          timestamp: timestampLabel(for: preview),
-          isPrimary: index == 0
-        )
-        .frame(width: cardSize.width, height: cardSize.height)
-        .rotationEffect(.degrees(rotation(for: index)))
-        .offset(x: xOffset(for: index), y: yOffset(for: index))
-        .zIndex(zIndex(for: index))
-        .shadow(
-          color: Color.black.opacity(index == 0 ? 0.18 : 0.08),
-          radius: index == 0 ? 14 : 8,
-          x: 0,
-          y: index == 0 ? 10 : 5
-        )
-      }
-
-      if deck.overflowCount > 0 {
-        Text("+\(deck.overflowCount)")
-          .scaledFont(size: 10.5, weight: .semibold)
-          .foregroundStyle(CepessaColors.textPrimary)
-          .padding(.horizontal, 8)
-          .padding(.vertical, 4)
-          .background(
-            Capsule()
-              .fill(CepessaColors.backgroundSecondary.opacity(0.96))
-          )
-          .overlay(
-            Capsule()
-              .stroke(Color.white.opacity(0.08), lineWidth: 1)
-          )
-          .offset(x: 122, y: 56)
-          .zIndex(5)
-      }
-    }
-    .frame(width: 250, height: 90, alignment: .topLeading)
-    .animation(
-      reduceMotion ? nil : .timingCurve(0.18, 0.88, 0.28, 1, duration: 0.28), value: deck.previews
-    )
-    .accessibilityElement(children: .contain)
-    .accessibilityLabel("Recent captures")
-  }
-
-  private var layeredPreviews: [CepessaSessionFloatingAttachmentPreview] {
-    if deck.previews.count <= 1 {
-      return deck.previews
-    }
-
-    var arranged: [CepessaSessionFloatingAttachmentPreview] = [deck.previews[0]]
-    if deck.previews.indices.contains(1) {
-      arranged.append(deck.previews[1])
-    }
-    if deck.previews.indices.contains(2) {
-      arranged.append(deck.previews[2])
-    }
-    return arranged
-  }
-
-  private func xOffset(for index: Int) -> CGFloat {
-    switch layeredPreviews.count {
-    case 1:
-      return 0
-    case 2:
-      return index == 0 ? 52 : 0
-    default:
-      switch index {
-      case 0: return 56
-      case 1: return 0
-      default: return 114
-      }
-    }
-  }
-
-  private func yOffset(for index: Int) -> CGFloat {
-    switch layeredPreviews.count {
-    case 1:
-      return 6
-    case 2:
-      return index == 0 ? 0 : 12
-    default:
-      switch index {
-      case 0: return 0
-      case 1: return 10
-      default: return 18
-      }
-    }
-  }
-
-  private func rotation(for index: Int) -> Double {
-    switch layeredPreviews.count {
-    case 1:
-      return 0
-    case 2:
-      return index == 0 ? 2 : -4
-    default:
-      switch index {
-      case 0: return 0
-      case 1: return -4
-      default: return 5
-      }
-    }
-  }
-
-  private func zIndex(for index: Int) -> Double {
-    Double(layeredPreviews.count - index)
-  }
-
-  private func accent(for kind: LocalSessionAttachment.Kind) -> Color {
-    switch kind {
-    case .image, .capture:
-      return CepessaColors.purplePrimary
-    case .file:
-      return CepessaColors.success
-    case .audio:
-      return CepessaColors.warning
-    case .link:
-      return CepessaColors.textSecondary
-    }
-  }
-
-  private func timestampLabel(for preview: CepessaSessionFloatingAttachmentPreview) -> String {
-    let rawOffset = preview.sessionOffset ?? 0
-    let totalSeconds = max(0, Int(rawOffset.rounded()))
-    let minutes = totalSeconds / 60
-    let seconds = totalSeconds % 60
-    return String(format: "%02d:%02d", minutes, seconds)
-  }
-}
-
-private struct SessionFloatingAttachmentCard: View {
-  let preview: CepessaSessionFloatingAttachmentPreview
-  let accent: Color
-  let timestamp: String
-  let isPrimary: Bool
-
-  var body: some View {
-    ZStack(alignment: .bottomLeading) {
-      cardSurface
-
-      LinearGradient(
-        colors: [Color.clear, Color.black.opacity(0.22)],
-        startPoint: .center,
-        endPoint: .bottom
-      )
-      .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-
-      VStack(alignment: .leading, spacing: 4) {
-        HStack(spacing: 6) {
-          AttachmentKindBadge(kind: preview.kind, accent: accent)
-          Spacer(minLength: 8)
-          Text(timestamp)
-            .scaledFont(size: 10, weight: .semibold)
-            .monospacedDigit()
-            .foregroundStyle(Color.white.opacity(0.86))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(Color.black.opacity(0.12))
-            .clipShape(Capsule())
-        }
-
-        Spacer(minLength: 0)
-
-        Text(previewTitle)
-          .scaledFont(size: 11.5, weight: .semibold)
-          .foregroundStyle(Color.white)
-          .lineLimit(2)
-
-        if let subtitle = previewSubtitle {
-          Text(subtitle)
-            .scaledFont(size: 9.5, weight: .medium)
-            .foregroundStyle(Color.white.opacity(0.72))
-            .lineLimit(1)
-        }
-      }
-      .padding(12)
-    }
-    .overlay(
-      RoundedRectangle(cornerRadius: 22, style: .continuous)
-        .stroke(Color.white.opacity(isPrimary ? 0.84 : 0.56), lineWidth: isPrimary ? 3 : 2)
-    )
-    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-  }
-
-  @ViewBuilder
-  private var cardSurface: some View {
-    if let image = previewImage {
-      Image(nsImage: image)
-        .resizable()
-        .scaledToFill()
-    } else {
-      ZStack {
-        LinearGradient(
-          colors: backgroundGradient,
-          startPoint: .topLeading,
-          endPoint: .bottomTrailing
-        )
-
-        VStack(spacing: 10) {
-          Image(systemName: fallbackIcon)
-            .scaledFont(size: 24, weight: .semibold)
-            .foregroundStyle(Color.white.opacity(0.9))
-
-          Text(fallbackLabel)
-            .scaledFont(size: 10, weight: .semibold)
-            .foregroundStyle(Color.white.opacity(0.88))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.white.opacity(0.12))
-            .clipShape(Capsule())
-        }
-      }
-    }
-  }
-
-  private var previewImage: NSImage? {
-    guard let fileURL = preview.fileURL,
-      FileManager.default.fileExists(atPath: fileURL.path)
-    else {
-      return nil
-    }
-
-    if let image = NSImage(contentsOf: fileURL) {
-      return image
-    }
-
-    return nil
-  }
-
-  private var previewTitle: String {
-    preview.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-      ? (preview.fileName ?? "Attachment")
-      : preview.title
-  }
-
-  private var previewSubtitle: String? {
-    switch preview.kind {
-    case .image, .capture:
-      return "Pinned to the session"
-    case .file:
-      return preview.fileName ?? "Document"
-    case .audio:
-      return "Audio artifact"
-    case .link:
-      return "Linked reference"
-    }
-  }
-
-  private var fallbackIcon: String {
-    switch preview.kind {
-    case .image, .capture:
-      return "photo.on.rectangle.angled"
-    case .file:
-      return "doc.text.image"
-    case .audio:
-      return "waveform"
-    case .link:
-      return "link"
-    }
-  }
-
-  private var fallbackLabel: String {
-    switch preview.kind {
-    case .image, .capture:
-      return "Capture"
-    case .file:
-      return "Document"
-    case .audio:
-      return "Audio"
-    case .link:
-      return "Link"
-    }
-  }
-
-  private var backgroundGradient: [Color] {
-    switch preview.kind {
-    case .image, .capture:
-      return [
-        accent.opacity(0.88), CepessaColors.purplePrimary.opacity(0.46),
-        CepessaColors.backgroundRaised,
-      ]
-    case .file:
-      return [
-        CepessaColors.success.opacity(0.72), CepessaColors.backgroundRaised,
-        CepessaColors.backgroundSecondary,
-      ]
-    case .audio:
-      return [
-        CepessaColors.warning.opacity(0.76), CepessaColors.backgroundRaised,
-        CepessaColors.backgroundSecondary,
-      ]
-    case .link:
-      return [
-        CepessaColors.textSecondary.opacity(0.64), CepessaColors.backgroundRaised,
-        CepessaColors.backgroundSecondary,
-      ]
-    }
-  }
-}
-
-private struct AttachmentKindBadge: View {
-  let kind: LocalSessionAttachment.Kind
-  let accent: Color
-
-  var body: some View {
-    HStack(spacing: 5) {
-      Image(systemName: icon)
-        .scaledFont(size: 8.5, weight: .semibold)
-      Text(label)
-        .scaledFont(size: 8.5, weight: .semibold)
-    }
-    .foregroundStyle(Color.white.opacity(0.94))
-    .padding(.horizontal, 7)
-    .padding(.vertical, 4)
-    .background(accent.opacity(0.22))
-    .overlay(
-      Capsule()
-        .stroke(Color.white.opacity(0.14), lineWidth: 1)
-    )
+    // Contents are clipped to the shape so a tray that is still fading out is
+    // absorbed by the collapsing capsule instead of spilling past its edge.
     .clipShape(Capsule())
+    .cepessaGlass(
+      in: Capsule(),
+      interactive: true,
+      elevation: isTray ? .lifted : .resting,
+      isHighlighted: state.interaction.isHovered
+    )
+    .overlay { restingHitArea }
+    .onHover(perform: controller.setHoveringBar)
+    .animation(motion, value: state.barContentSize)
+    .animation(motion, value: isTray)
+    // Hover reaches the lighting only, and settles on its own short curve so
+    // it never borrows the expansion timing.
+    .animation(
+      reduceMotion ? nil : CepessaChrome.Motion.state, value: state.interaction.isHovered
+    )
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel(isTray ? "Recording controls" : "Cepessa Sessions")
+    .accessibilityIdentifier(
+      isTray ? "cepessa.floatingBar.tray" : "cepessa.floatingBar.indicator")
   }
 
-  private var icon: String {
-    switch kind {
-    case .image, .capture:
-      return "camera.fill"
-    case .file:
-      return "paperclip"
-    case .audio:
-      return "waveform"
-    case .link:
-      return "link"
-    }
+  private var motion: Animation? {
+    CepessaChrome.Motion.expand(reduceMotion: reduceMotion)
   }
 
-  private var label: String {
-    switch kind {
-    case .image:
-      return "Screen"
-    case .capture:
-      return "Capture"
-    case .file:
-      return "File"
-    case .audio:
-      return "Audio"
-    case .link:
-      return "Link"
-    }
+  private var tailTransition: AnyTransition {
+    guard !reduceMotion else { return .opacity }
+    return .asymmetric(
+      insertion: .opacity.animation(CepessaChrome.Motion.contentIn),
+      removal: .opacity.animation(CepessaChrome.Motion.contentOut)
+    )
   }
-}
 
-private struct SessionFloatingCollapsedAttachmentPill: View {
-  let deck: CepessaSessionFloatingAttachmentDeck
+  /// The ring keeps its own 22pt frame in every state; only in the tray does
+  /// it also become the close affordance. The idle dot takes no inset at all —
+  /// the ring's frame already carries 5pt of clearance around a 12pt circle.
+  private var leadingInset: CGFloat {
+    if isTray { return 5 }
+    return state.isRecording ? 2 : 0
+  }
 
-  var body: some View {
-    HStack(spacing: 10) {
-      HStack(spacing: -10) {
-        ForEach(Array(deck.previews.prefix(3).enumerated()), id: \.element.id) { _, preview in
-          Circle()
-            .fill(accent(for: preview.kind).opacity(0.85))
-            .frame(width: 18, height: 18)
-            .overlay(
-              Circle()
-                .stroke(Color.white.opacity(0.92), lineWidth: 2)
-            )
+  private var trailingInset: CGFloat {
+    if isTray { return 6 }
+    return state.isRecording ? 6 : 0
+  }
+
+  /// Resting: the whole lozenge is one button — click opens the tray, drag
+  /// moves it, right-click reaches Stop without opening anything.
+  @ViewBuilder
+  private var restingHitArea: some View {
+    if !isTray {
+      SessionIndicatorHitArea(
+        onClick: controller.toggleControlTray,
+        onSecondaryClick: controller.showIndicatorContextMenu,
+        onHover: controller.setHoveringBar,
+        onDrag: controller.beginPanelDrag
+      )
+      .help(restingHelpText)
+      .accessibilityElement(children: .ignore)
+      .accessibilityAddTraits(.isButton)
+      .accessibilityLabel(
+        CepessaSessionIndicatorAccessibility.indicatorLabel(
+          mode: state.mode,
+          isRecording: state.isRecording,
+          health: state.captureHealth,
+          timerText: state.timerText,
+          progress: state.processingProgress
+        )
+      )
+      .accessibilityValue(
+        CepessaSessionIndicatorAccessibility.indicatorValue(
+          isRecording: state.isRecording,
+          timerText: state.timerText,
+          progress: state.processingProgress
+        )
+      )
+      .accessibilityHint(CepessaSessionIndicatorAccessibility.indicatorHint(isTrayOpen: false))
+      // Default activation (VO-Space) opens the tray; the named actions are
+      // the rotor entries beside it.
+      .accessibilityAction { controller.toggleControlTray() }
+      .accessibilityAction(named: "Show Controls", controller.toggleControlTray)
+      .accessibilityAction(named: state.isRecording ? "Stop Recording" : "Start Recording") {
+        if state.isRecording {
+          controller.stopRecording()
+        } else {
+          controller.startRecording()
         }
       }
-      .padding(.leading, 4)
-
-      Text(summaryText)
-        .scaledFont(size: 11, weight: .semibold)
-        .foregroundStyle(CepessaColors.textPrimary)
-    }
-    .padding(.horizontal, 12)
-    .padding(.vertical, 8)
-    .background(
-      Capsule()
-        .fill(CepessaColors.backgroundSecondary)
-        .overlay(
-          Capsule()
-            .stroke(CepessaColors.hairline.opacity(0.5), lineWidth: 1)
-        )
-    )
-    .shadow(color: CepessaColors.warmShadow.opacity(0.08), radius: 8, x: 0, y: 4)
-  }
-
-  private var summaryText: String {
-    let count = deck.previews.count + deck.overflowCount
-    return count == 1 ? "1 capture" : "\(count) captures"
-  }
-
-  private func accent(for kind: LocalSessionAttachment.Kind) -> Color {
-    switch kind {
-    case .image, .capture:
-      return CepessaColors.purplePrimary
-    case .file:
-      return CepessaColors.success
-    case .audio:
-      return CepessaColors.warning
-    case .link:
-      return CepessaColors.textSecondary
+      .accessibilityIdentifier("cepessa.floatingBar.recordingSummary")
     }
   }
-}
 
-private struct SessionFloatingDeckToggleButton: View {
-  let isExpanded: Bool
-  let action: () -> Void
-
-  var body: some View {
-    Button(action: action) {
-      Image(systemName: isExpanded ? "eye.slash" : "eye")
-        .scaledFont(size: 11, weight: .semibold)
-        .foregroundStyle(CepessaColors.textSecondary)
-        .frame(width: 30, height: 30)
-        .background(CepessaColors.backgroundRaised.opacity(0.74))
-        .clipShape(Circle())
-    }
-    .buttonStyle(SessionFloatingPressStyle())
-    .help(isExpanded ? "Hide recent captures" : "Show recent captures")
-  }
-}
-
-/// The one saturated element in the idle bar: a red record capsule.
-private struct SessionFloatingRecordButton: View {
-  @State private var isHovered = false
-
-  let action: () -> Void
-
-  var body: some View {
-    Button(action: action) {
-      HStack(spacing: 7) {
-        Circle()
-          .fill(Color.white)
-          .frame(width: 7, height: 7)
-
-        Text("Record")
-          .scaledFont(size: 12.5, weight: .semibold)
-          .foregroundStyle(Color.white)
-          .lineLimit(1)
-          .fixedSize()
-      }
-      .padding(.horizontal, 14)
-      .frame(height: 34)
-      .background(
-        Capsule().fill(CepessaColors.signalRed.opacity(isHovered ? 1 : 0.92))
+  /// Tray: the ring alone stays draggable and closes the tray, so the controls
+  /// beside it can be clicked without the whole row acting as one button.
+  @ViewBuilder
+  private var trayHandle: some View {
+    if isTray {
+      SessionIndicatorHitArea(
+        onClick: controller.closeControlTray,
+        onSecondaryClick: controller.showIndicatorContextMenu,
+        onHover: controller.setHoveringBar,
+        onDrag: controller.beginPanelDrag
       )
-      .contentShape(Capsule())
+      .help("Close the controls. Drag to move.")
+      .accessibilityElement(children: .ignore)
+      .accessibilityAddTraits(.isButton)
+      .accessibilityLabel("Close recording controls")
+      .accessibilityHint(CepessaSessionIndicatorAccessibility.indicatorHint(isTrayOpen: true))
+      .accessibilityAction { controller.closeControlTray() }
+      .accessibilityAction(named: "Close Controls", controller.closeControlTray)
+      .accessibilityIdentifier("cepessa.floatingBar.minimize")
     }
-    .buttonStyle(CepessaPressStyle(scale: 0.97))
-    .onHover { isHovered = $0 }
-    .help("Start a new recording session")
-    .accessibilityLabel("Start recording")
+  }
+
+  private var restingHelpText: String {
+    state.isRecording
+      ? "Recording \(state.compactTimerText). Click for controls, drag to move."
+      : "Cepessa Sessions. Click for controls, drag to move."
   }
 }
 
-/// Flexible middle region of the compact bar; doubles as the window drag handle.
-private struct SessionFloatingDragSpacer: View {
+/// The advancing timer beside the ring while capture is live and the tray is
+/// closed. Monospaced so the lozenge never reflows on a digit change.
+private struct SessionRestingTimer: View {
+  @ObservedObject var state: CepessaSessionFloatingBarState
+
   var body: some View {
-    SessionFloatingDragHandleView()
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .contentShape(Rectangle())
+    Text(state.compactTimerText)
+      .font(.system(size: 11, weight: .medium, design: .monospaced))
+      .monospacedDigit()
+      .foregroundStyle(CepessaColors.textPrimary)
+      .lineLimit(1)
+      .fixedSize()
+      .padding(.leading, 2)
       .accessibilityHidden(true)
   }
 }
 
-private struct SessionFloatingToolbarIconButton: View {
+/// The single state ring. Shape carries the meaning; colour only confirms it.
+///
+/// At rest this ring *is* the app on screen, sitting on whatever the user
+/// happens to be reading — so the idle stroke is a full secondary label rather
+/// than the tertiary grey it used to be. Tertiary on a white document is a
+/// suggestion; the indicator has to be a statement.
+private struct SessionStateRing: View {
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+
+  let ring: CepessaSessionIndicatorRing
+
+  private let diameter: CGFloat = 12
+  private let lineWidth: CGFloat = 1.6
+
+  var body: some View {
+    ZStack {
+      switch ring {
+      case .idle:
+        Circle()
+          .strokeBorder(idleStroke, lineWidth: lineWidth)
+
+      case .processing(let progress):
+        Circle()
+          .strokeBorder(CepessaColors.textTertiary, lineWidth: lineWidth)
+        Circle()
+          .trim(from: 0, to: progress.map { CGFloat(min(max($0, 0.02), 1)) } ?? 0.28)
+          .stroke(
+            CepessaColors.accent, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+          )
+          .rotationEffect(.degrees(-90))
+          .padding(0.8)
+
+      case .recording:
+        Circle()
+          .strokeBorder(CepessaColors.signalRed, lineWidth: lineWidth)
+        Circle()
+          .fill(CepessaColors.signalRed)
+          .frame(width: diameter * 0.42, height: diameter * 0.42)
+
+      case .recordingMuted:
+        Circle()
+          .strokeBorder(CepessaColors.signalRed, lineWidth: lineWidth)
+        Capsule()
+          .fill(CepessaColors.signalRed)
+          .frame(width: diameter * 0.86, height: 1.6)
+          .rotationEffect(.degrees(-45))
+
+      case .degraded:
+        Circle()
+          .strokeBorder(
+            CepessaColors.warning,
+            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, dash: [2.2, 2.2])
+          )
+
+      case .fault:
+        Image(systemName: "exclamationmark.triangle.fill")
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(CepessaColors.warning)
+      }
+    }
+    .frame(width: diameter, height: diameter)
+    .animation(reduceMotion ? nil : CepessaChrome.Motion.state, value: ring)
+    .accessibilityHidden(true)
+  }
+
+  private var idleStroke: Color {
+    colorSchemeContrast == .increased ? CepessaColors.textPrimary : CepessaColors.textSecondary
+  }
+}
+
+// MARK: Control tray
+
+/// Everything the tray adds to the ring, in three parts with a fixed rhythm:
+/// a hairline that separates state from readout, one line of status text, and
+/// a trailing cluster of equal 22pt circular slots.
+///
+/// The equal slots are the point. The tray used to end with a wide pale
+/// "Record" capsule that outweighed everything beside it, so the row read as
+/// one big button with some decoration around it. Every control now occupies
+/// the same footprint and the transport control — record, then stop — always
+/// sits last, which gives the row a metronome and keeps the primary action in
+/// one place across both states.
+private struct SessionTrayTail: View {
+  let controller: CepessaSessionFloatingBarController
+  @ObservedObject var state: CepessaSessionFloatingBarState
+
+  var body: some View {
+    HStack(spacing: 0) {
+      Rectangle()
+        .fill(CepessaColors.textQuaternary)
+        .frame(width: 1, height: 13)
+        .padding(.horizontal, 7)
+        .accessibilityHidden(true)
+
+      statusText
+
+      Spacer(minLength: CepessaChrome.Space.s)
+
+      HStack(spacing: 2) {
+        if state.isRecording {
+          SessionTrayIconButton(
+            icon: state.isMicrophoneMuted ? "mic.slash" : "mic",
+            title: state.isMicrophoneMuted ? "Unmute microphone" : "Mute microphone",
+            isProminent: state.isMicrophoneMuted,
+            action: controller.toggleMicrophoneMute
+          )
+          .accessibilityIdentifier("cepessa.floatingBar.mute")
+
+          SessionTrayCaptureMenu(controller: controller)
+        }
+
+        SessionTrayIconButton(
+          icon: "eye.slash",
+          title: "Hide the recording indicator",
+          action: controller.dismissForCurrentRecording
+        )
+        .accessibilityIdentifier("cepessa.floatingBar.hide")
+
+        SessionTrayIconButton(
+          icon: "ellipsis",
+          title: "Sessions menu",
+          action: controller.showBarMenu
+        )
+
+        SessionTrayTransportButton(
+          isRecording: state.isRecording,
+          action: state.isRecording ? controller.stopRecording : controller.startRecording
+        )
+      }
+    }
+  }
+
+  private var statusText: some View {
+    HStack(spacing: 4) {
+      // Only a notice that reports a problem earns a glyph. A confirmation
+      // reads fine on its own, and the state ring already carries the state.
+      if let symbol = problemSymbol {
+        Image(systemName: symbol)
+          .font(.system(size: 10, weight: .semibold))
+          .foregroundStyle(CepessaColors.warning)
+          .accessibilityHidden(true)
+      }
+
+      Text(state.trayStatusText)
+        .font(.system(size: 11, weight: .medium, design: usesMonospace ? .monospaced : .default))
+        .monospacedDigit()
+        .foregroundStyle(tint)
+        .lineLimit(1)
+        .truncationMode(.tail)
+    }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(accessibilityText)
+    .accessibilityIdentifier("cepessa.floatingBar.status")
+  }
+
+  private var problemSymbol: String? {
+    if state.hasNotice {
+      switch state.noticeStyle {
+      case .warning, .error: return "exclamationmark.triangle.fill"
+      case .neutral, .success: return nil
+      }
+    }
+    return state.hasFault && !state.isRecording ? "exclamationmark.triangle.fill" : nil
+  }
+
+  private var usesMonospace: Bool {
+    CepessaSessionIndicatorTrayStatus.usesMonospacedDigits(
+      isRecording: state.isRecording, hasNotice: state.hasNotice)
+  }
+
+  private var tint: Color {
+    if state.hasNotice || state.isRecording { return CepessaColors.textPrimary }
+    return state.hasFault ? CepessaColors.textPrimary : CepessaColors.textSecondary
+  }
+
+  /// VoiceOver gets the sentence; the capsule gets the short form.
+  private var accessibilityText: String {
+    if let notice = state.noticeMessage { return notice }
+    if state.isRecording {
+      return "Recording duration "
+        + CepessaSessionIndicatorAccessibility.compactSpokenTimer(state.timerText)
+    }
+    if state.hasFault, let error = state.errorMessage { return error }
+    return state.trayStatusText
+  }
+}
+
+private struct SessionTrayIconButton: View {
   @State private var isHovered = false
 
   let icon: String
   let title: String
-  let isDisabled: Bool
+  var isProminent = false
   let action: () -> Void
 
   var body: some View {
     Button(action: action) {
       Image(systemName: icon)
-        .scaledFont(size: 12.5, weight: .medium)
-        .frame(width: 34, height: 34)
+        .font(.system(size: 11, weight: .medium))
+        .frame(width: CepessaChrome.Control.micro, height: CepessaChrome.Control.micro)
+        .foregroundStyle(tint)
+        .background(
+          Circle().fill(
+            isHovered ? CepessaColors.textPrimary.opacity(0.1) : Color.clear)
+        )
         .contentShape(Circle())
-        .background {
-          Circle()
-            .fill(
-              CepessaColors.backgroundSecondary.opacity(
-                isDisabled ? 0.4 : (isHovered ? 1 : 0.8)))
-        }
     }
-    .buttonStyle(CepessaPressStyle(scale: 0.96))
-    .disabled(isDisabled)
+    .buttonStyle(CepessaPressStyle(scale: 0.94))
     .onHover { isHovered = $0 }
-    .foregroundColor(
-      isDisabled ? CepessaColors.textTertiary.opacity(0.38) : CepessaColors.textSecondary
-    )
     .help(title)
     .accessibilityLabel(title)
   }
-}
 
-private struct SessionFloatingTimerPill: View {
-  let timerText: String
-
-  var body: some View {
-    Text(timerText)
-      .scaledFont(size: 23, weight: .regular, design: .monospaced)
-      .monospacedDigit()
-      .foregroundStyle(CepessaColors.textPrimary.opacity(0.82))
-      .frame(minWidth: 118, minHeight: 40)
-      .padding(.horizontal, 4)
-      .cepessaFloatingToolbarPillSurface()
-      .accessibilityLabel("Recording duration \(timerText)")
+  private var tint: Color {
+    isProminent ? CepessaColors.warning : CepessaColors.textSecondary
   }
 }
 
-private struct SessionFloatingStopButton: View {
+/// The transport control: start when nothing is running, stop when capture is
+/// live. Same slot, same size, same place — only the fill and the glyph change,
+/// so the one saturated element in the indicator never moves.
+private struct SessionTrayTransportButton: View {
+  @State private var isHovered = false
+
+  let isRecording: Bool
   let action: () -> Void
 
   var body: some View {
     Button(action: action) {
-      Label("Stop", systemImage: "stop.fill")
-        .scaledFont(size: 12, weight: .semibold)
-        .foregroundColor(.white)
-        .padding(.horizontal, 13)
-        .frame(height: 40)
-        .background(Capsule().fill(CepessaColors.signalRed))
-        .contentShape(Capsule())
-    }
-    .buttonStyle(CepessaPressStyle(scale: 0.96, pressedBrightness: -0.04))
-    .help("Stop the current recording session")
-    .accessibilityLabel("Stop recording")
-  }
-}
-
-private struct SessionFloatingWaveformDragRegion: View {
-  let levels: [Double]
-  let accent: Color
-
-  var body: some View {
-    ZStack {
-      SessionFloatingDragHandleView()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-      SessionFloatingLiveWaveform(
-        levels: levels,
-        isRecording: true,
-        accent: accent
-      )
-      .allowsHitTesting(false)
-    }
-    .contentShape(Rectangle())
-    .accessibilityLabel("Move floating recording bar")
-    .accessibilityHint("Drag to reposition the recording controls.")
-  }
-}
-
-/// Voice-Memos-style scrolling waveform. While recording, each new audio
-/// sample pushes in from the right and the history scrolls left, so the wave
-/// genuinely moves with the sound. Idle shows a quiet static ripple.
-private struct SessionFloatingLiveWaveform: View {
-  let levels: [Double]
-  let isRecording: Bool
-  let accent: Color
-
-  var body: some View {
-    // Audio levels already arrive at a throttled 15 Hz. Drawing from state changes keeps the
-    // live waveform responsive while avoiding a permanent 30 FPS display timer when the app
-    // is idle (the floating bar is normally visible all day).
-    Canvas { context, size in
-      let barWidth: CGFloat = 3
-      let gap: CGFloat = 3.2
-      let step = barWidth + gap
-      let count = max(8, Int(size.width / step))
-      let inset = (size.width - (CGFloat(count) * step) + gap) / 2
-      let midY = size.height / 2
-      let maxHalf = max(4, midY - 3)
-
-      for index in 0..<count {
-        let norm = Double(index) / Double(max(count - 1, 1))
-        let x = inset + CGFloat(index) * step
-        let half: CGFloat
-        let opacity: Double
+      ZStack {
+        Circle().fill(fill)
 
         if isRecording {
-          let sampleIndex = levels.count - count + index
-          let level = sampleIndex >= 0 && sampleIndex < levels.count ? levels[sampleIndex] : 0
-          let shaped = pow(min(max(level, 0), 1), 0.7)
-          half = min(1.6 + maxHalf * CGFloat(shaped), maxHalf + 1.6)
-          opacity = 0.28 + 0.72 * norm
+          // White on `systemRed` is the platform's own stop-button pairing and
+          // is the only fixed foreground left in the app; the fill beneath it
+          // is a fixed hue in both appearances, so a semantic label colour
+          // here would invert into red-on-red in dark mode.
+          Image(systemName: "stop.fill")
+            .font(.system(size: 8.5, weight: .bold))
+            .foregroundStyle(Color.white)
         } else {
-          let envelope = sin(.pi * norm)
-          let ripple = 0.5 + 0.22 * sin(norm * 6.2)
-          half = 1.4 + CGFloat(ripple * envelope) * 6
-          opacity = 0.40 + 0.30 * envelope
+          Circle()
+            .fill(CepessaColors.signalRed)
+            .frame(width: 8, height: 8)
         }
+      }
+      .frame(width: CepessaChrome.Control.micro, height: CepessaChrome.Control.micro)
+      .contentShape(Circle())
+    }
+    .buttonStyle(CepessaPressStyle(scale: 0.92, pressedBrightness: -0.05))
+    .onHover { isHovered = $0 }
+    .help(isRecording ? "Stop recording" : "Start a new recording session")
+    .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
+    .accessibilityHint(
+      isRecording
+        ? "Ends capture and begins final transcription."
+        : "Begins a new local recording session."
+    )
+    .accessibilityIdentifier(
+      isRecording ? "cepessa.floatingBar.stop" : "cepessa.floatingBar.record")
+  }
 
-        let rect = CGRect(x: x, y: midY - half, width: barWidth, height: half * 2)
-        context.fill(
-          Path(roundedRect: rect, cornerRadius: barWidth / 2),
-          with: .color(accent.opacity(opacity))
-        )
+  private var fill: Color {
+    if isRecording { return CepessaColors.signalRed }
+    return CepessaColors.signalRed.opacity(isHovered ? 0.26 : 0.16)
+  }
+}
+
+/// Capture and attachment live one deliberate step deeper: never at rest, and
+/// never as four separate buttons in the tray.
+private struct SessionTrayCaptureMenu: View {
+  let controller: CepessaSessionFloatingBarController
+
+  var body: some View {
+    Menu {
+      Button("Capture Screen", action: controller.captureFullScreenshot)
+      Button("Capture Region", action: controller.captureRegionScreenshot)
+      Button("Attach File…", action: controller.importDocument)
+    } label: {
+      Image(systemName: "camera")
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(CepessaColors.textSecondary)
+    }
+    .menuStyle(.borderlessButton)
+    .menuIndicator(.hidden)
+    .frame(width: CepessaChrome.Control.micro, height: CepessaChrome.Control.micro)
+    .help("Pin a screenshot or file to this moment")
+    .accessibilityLabel("Capture or attach")
+    .accessibilityIdentifier("cepessa.floatingBar.capture")
+  }
+}
+
+// MARK: Hit testing
+
+/// A 22pt target has to serve click, right-click and drag without any of them
+/// stealing the others. AppKit resolves the ambiguity by distance: past a few
+/// points of movement the gesture becomes a window drag, otherwise it is a
+/// click on mouse-up.
+private struct SessionIndicatorHitArea: NSViewRepresentable {
+  let onClick: () -> Void
+  let onSecondaryClick: () -> Void
+  let onHover: (Bool) -> Void
+  let onDrag: (NSEvent) -> Void
+
+  func makeNSView(context: Context) -> SessionIndicatorHitNSView {
+    let view = SessionIndicatorHitNSView()
+    view.configure(
+      onClick: onClick, onSecondaryClick: onSecondaryClick, onHover: onHover, onDrag: onDrag)
+    return view
+  }
+
+  func updateNSView(_ nsView: SessionIndicatorHitNSView, context: Context) {
+    nsView.configure(
+      onClick: onClick, onSecondaryClick: onSecondaryClick, onHover: onHover, onDrag: onDrag)
+  }
+}
+
+final class SessionIndicatorHitNSView: NSView {
+  private var onClick: () -> Void = {}
+  private var onSecondaryClick: () -> Void = {}
+  private var onHover: (Bool) -> Void = { _ in }
+  private var onDrag: (NSEvent) -> Void = { _ in }
+  private var trackingArea: NSTrackingArea?
+
+  private let dragThreshold: CGFloat = 3
+
+  func configure(
+    onClick: @escaping () -> Void,
+    onSecondaryClick: @escaping () -> Void,
+    onHover: @escaping (Bool) -> Void,
+    onDrag: @escaping (NSEvent) -> Void
+  ) {
+    self.onClick = onClick
+    self.onSecondaryClick = onSecondaryClick
+    self.onHover = onHover
+    self.onDrag = onDrag
+  }
+
+  override var isOpaque: Bool { false }
+
+  /// The SwiftUI indicator above this view carries the accessibility element;
+  /// the bare hit target must not appear as a second, unlabelled one.
+  override func accessibilityIsIgnored() -> Bool { true }
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    if let trackingArea {
+      removeTrackingArea(trackingArea)
+    }
+    let area = NSTrackingArea(
+      rect: bounds,
+      options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+      owner: self
+    )
+    addTrackingArea(area)
+    trackingArea = area
+  }
+
+  override func mouseEntered(with event: NSEvent) {
+    onHover(true)
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    onHover(false)
+  }
+
+  override func mouseDown(with event: NSEvent) {
+    let origin = event.locationInWindow
+
+    while let next = window?.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+      switch next.type {
+      case .leftMouseDragged:
+        let delta = hypot(
+          next.locationInWindow.x - origin.x, next.locationInWindow.y - origin.y)
+        if delta > dragThreshold {
+          onDrag(event)
+          return
+        }
+      case .leftMouseUp:
+        onClick()
+        return
+      default:
+        return
       }
     }
   }
-}
 
-private struct SessionFloatingPressStyle: ButtonStyle {
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-  func makeBody(configuration: Configuration) -> some View {
-    configuration.label
-      .scaleEffect(configuration.isPressed ? 0.97 : 1)
-      .animation(
-        reduceMotion ? nil : .timingCurve(0.23, 1, 0.32, 1, duration: 0.14),
-        value: configuration.isPressed
-      )
-  }
-}
-
-private struct SessionFloatingDragHandleView: NSViewRepresentable {
-  func makeNSView(context: Context) -> NSView {
-    SessionFloatingDragNSView()
-  }
-
-  func updateNSView(_ nsView: NSView, context: Context) {}
-}
-
-private final class SessionFloatingDragNSView: NSView {
-  override var isOpaque: Bool { false }
-
-  override func mouseDown(with event: NSEvent) {
-    window?.performDrag(with: event)
+  override func rightMouseDown(with event: NSEvent) {
+    onSecondaryClick()
   }
 
   override func resetCursorRects() {

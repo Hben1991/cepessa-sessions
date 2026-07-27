@@ -123,6 +123,40 @@ A Model Context Protocol server for Omi interaction and automation. This server 
      - `clips_root` (string, optional): Override local CLIPS root
    - Returns: Local paths, relative paths, sizes, and extensions for the CLIP agent packet
 
+17. `brain_status`
+   - Refresh and report the rebuildable local meeting-evidence index
+   - Returns: Index schema, session/segment counts, incremental refresh counts, and safety flags
+
+18. `search_meeting_brain`
+   - Search Hebrew, English, or mixed meeting evidence
+   - Inputs:
+     - `query` (string): Terms to find in transcript evidence
+     - `limit` (number, optional): Maximum matching segments (default: 10)
+   - Returns: Exact cited segments. Every citation includes logical source reference, session, revision, segment, time, and source kind.
+
+19. `prepare_agent_context`
+   - Build a bounded context packet for another agent
+   - Inputs:
+     - `query` (string): Question or topic
+     - `token_budget` (number, optional): Maximum estimated evidence tokens (default: 2000)
+     - `limit` (number, optional): Maximum search hits considered (default: 20)
+   - Returns: Cited transcript segments and an explicit instruction-injection policy
+
+20. `get_meeting_evidence`
+   - Retrieve cited evidence from an exact session or transcript segment
+   - Inputs:
+     - `session_id` (string): Local Cepessa Session ID
+     - `segment_id` (string, optional): Exact segment ID
+     - `context_segments` (number, optional): Neighboring segments around the anchor (default: 2)
+   - Returns: Session revision and cited transcript evidence
+
+21. `resolve_participant`
+   - Explain possible stored speaker-label matches with transcript citations
+   - Inputs:
+     - `name` (string): Name or speaker label to investigate
+     - `limit` (number, optional): Maximum candidates (default: 10)
+   - Returns: Unresolved candidates and evidence. This tool never binds an identity or performs biometric matching.
+
 ## Configuration
 
 ### API Key
@@ -147,6 +181,25 @@ To point agents at another local app build or a test fixture:
 export CEPESSA_SESSIONS_ROOT="/path/to/Cepessa/Sessions"
 export CEPESSA_CLIPS_ROOT="/path/to/Cepessa/Clips"
 ```
+
+The meeting-brain tools build a retained in-memory SQLite projection and never open
+an index file. For sessions using `TranscriptionEvidence`, discovery uses the global
+flat `<base>/MeetingEvidenceOutbox`, where each JSON file is the full immutable
+envelope. The consumer requires its per-session archived Run to be byte-identical,
+then verifies the canonical full-evidence hash (all envelope fields except
+`contentHash`), revision linkage, transcript byte offsets, timestamps, independent
+microphone/system integrity and SHA-256 provenance, session and run readiness, and
+the complete quality gate before citing the exact run and revision. Failed,
+degraded, incomplete, or corrupt evidence is quarantined per session; an invalid
+new revision withdraws that session’s older projection without blocking unrelated
+ready meetings. Older sessions are indexed from `session.json` only when the
+session status is `ready`, and every resulting citation is explicitly marked
+`legacy-session-json`.
+
+Meeting-brain source files are opened read-only with no-follow, single-hardlink, and
+inode-stability checks. The tools never expose absolute source paths or biometric
+data and reject symlink/path escapes. The projection is rebuilt from session
+evidence for each MCP request; `CEPESSA_MEETING_BRAIN_DB` is intentionally ignored.
 
 ### Usage with Claude Desktop
 

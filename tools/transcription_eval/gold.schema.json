@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cepessa.local/schemas/transcription-eval-gold-v1.json",
+  "title": "Cepessa transcription gold JSONL record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "clip_id",
+    "source_sha256",
+    "track",
+    "split",
+    "start_ms",
+    "end_ms",
+    "segments"
+  ],
+  "properties": {
+    "clip_id": {"type": "string", "minLength": 1},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "track": {"enum": ["microphone", "system", "mixed"]},
+    "split": {"enum": ["development", "locked", "stress", "negative_control"]},
+    "start_ms": {"type": "integer", "minimum": 0},
+    "end_ms": {"type": "integer", "exclusiveMinimum": 0},
+    "text": {"type": "string"},
+    "critical_terms": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "strata": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["start_ms", "end_ms", "speaker_id", "text"],
+        "properties": {
+          "start_ms": {"type": "integer", "minimum": 0},
+          "end_ms": {"type": "integer", "exclusiveMinimum": 0},
+          "speaker_id": {"type": "string", "minLength": 1},
+          "person_id": {"type": ["string", "null"]},
+          "text": {"type": "string"},
+          "overlap": {"type": "boolean"},
+          "uncertain": {"type": "boolean"},
+          "inaudible": {"type": "boolean"},
+          "language_spans": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["start_token", "end_token", "language"],
+              "properties": {
+                "start_token": {"type": "integer", "minimum": 0},
+                "end_token": {"type": "integer", "minimum": 0},
+                "language": {"enum": ["he", "en", "mixed", "other"]}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -68,6 +68,7 @@ final class LocalMeetingRecorder: ObservableObject {
   private var micCaptureService: LocalMeetingAudioCaptureService?
   private var systemCaptureService: AnyObject?
   nonisolated(unsafe) private var micWriter: LocalMeetingWaveFileWriter?
+  nonisolated(unsafe) private var micTranscriptWriter: LocalMeetingWaveFileWriter?
   nonisolated(unsafe) private var systemWriter: LocalMeetingWaveFileWriter?
   nonisolated(unsafe) private var mixedWriter: LocalMeetingWaveFileWriter?
   nonisolated(unsafe) private var synchronizedPCM = LocalMeetingSynchronizedPCMBuffer()
@@ -108,6 +109,7 @@ final class LocalMeetingRecorder: ObservableObject {
       captureArtifacts: [],
       audioArtifacts: .init(
         micFileName: "mic.wav",
+        micTranscriptFileName: "mic-transcript.wav",
         systemFileName: "system.wav",
         mixedFileName: "mixed.wav"
       )
@@ -116,6 +118,8 @@ final class LocalMeetingRecorder: ObservableObject {
     do {
       try fileLayout.ensureDirectories(for: session.id)
       micWriter = try LocalMeetingWaveFileWriter(fileURL: fileLayout.micAudioURL(for: session.id))
+      micTranscriptWriter = try LocalMeetingWaveFileWriter(
+        fileURL: fileLayout.micTranscriptAudioURL(for: session.id))
       systemWriter = try LocalMeetingWaveFileWriter(
         fileURL: fileLayout.systemAudioURL(for: session.id))
       mixedWriter = try LocalMeetingWaveFileWriter(
@@ -284,6 +288,9 @@ final class LocalMeetingRecorder: ObservableObject {
       guard let self, self.isCaptureGateOpen else { return }
       do {
         try self.micWriter?.append(pcm16Data: data)
+        let transcriptData =
+          self.mixMode == .systemOnly ? Data(repeating: 0, count: data.count) : data
+        try self.micTranscriptWriter?.append(pcm16Data: transcriptData)
       } catch {
         Task { @MainActor in
           self.lastErrorMessage = error.localizedDescription
@@ -381,9 +388,11 @@ final class LocalMeetingRecorder: ObservableObject {
 
   nonisolated private func closeWriters() {
     try? micWriter?.close()
+    try? micTranscriptWriter?.close()
     try? systemWriter?.close()
     try? mixedWriter?.close()
     micWriter = nil
+    micTranscriptWriter = nil
     systemWriter = nil
     mixedWriter = nil
   }

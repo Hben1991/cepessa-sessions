@@ -42,7 +42,14 @@ final class LocalMeetingTranscriptionArchitectureTests: XCTestCase {
     XCTAssertEqual(decoded.engine, .whisperKit)
     XCTAssertEqual(decoded.segments.first?.startTime, 1.25)
     XCTAssertEqual(decoded.segments.first?.endTime, 3.5)
+    XCTAssertEqual(decoded.segments.first?.words, [])
     XCTAssertEqual(decoded.warnings, ["low confidence"])
+  }
+
+  func testLegacyTranscriptionSegmentWithoutWordsStillDecodes() throws {
+    let data = Data(#"{"startTime":0,"endTime":1,"text":"legacy"}"#.utf8)
+    let decoded = try JSONDecoder().decode(LocalSessionTranscriptionSegment.self, from: data)
+    XCTAssertEqual(decoded.words, [])
   }
 
   @MainActor
@@ -86,13 +93,14 @@ final class LocalMeetingTranscriptionArchitectureTests: XCTestCase {
 
     await importTask.value
 
-    await waitForArchitectureCondition("final transcript is ready") {
+    await waitForArchitectureCondition("final transcript is persisted") {
       model.selectedSession?.transcriptText == "Final ASR text"
         && !model.isTranscribing
     }
 
     XCTAssertFalse(model.isTranscribing)
-    XCTAssertEqual(model.selectedSession?.status, .ready)
+    XCTAssertEqual(model.selectedSession?.status, .failed)
+    XCTAssertEqual(model.selectedSession?.transcriptionEvidence?.disposition, .degraded)
   }
 }
 
@@ -141,7 +149,32 @@ private struct PassthroughLocalAudioImportService: LocalSessionAudioImporting {
       at: destinationWavURL.deletingLastPathComponent(),
       withIntermediateDirectories: true
     )
-    try Data("normalized audio".utf8).write(to: destinationWavURL)
+    var data = Data()
+    let sampleData = Data(repeating: 0, count: 3_200)
+    data.append("RIFF".data(using: .ascii)!)
+    appendUInt32(UInt32(36 + sampleData.count), to: &data)
+    data.append("WAVEfmt ".data(using: .ascii)!)
+    appendUInt32(16, to: &data)
+    appendUInt16(1, to: &data)
+    appendUInt16(1, to: &data)
+    appendUInt32(16_000, to: &data)
+    appendUInt32(32_000, to: &data)
+    appendUInt16(2, to: &data)
+    appendUInt16(16, to: &data)
+    data.append("data".data(using: .ascii)!)
+    appendUInt32(UInt32(sampleData.count), to: &data)
+    data.append(sampleData)
+    try data.write(to: destinationWavURL)
+  }
+
+  private func appendUInt16(_ value: UInt16, to data: inout Data) {
+    var value = value.littleEndian
+    withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+  }
+
+  private func appendUInt32(_ value: UInt32, to data: inout Data) {
+    var value = value.littleEndian
+    withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
   }
 }
 
