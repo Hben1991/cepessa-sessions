@@ -73,8 +73,8 @@ struct LocalSessionFileLayout {
   private static let legacySessionsRootName = "Meetings"
   private static let currentRootName = "Cepessa"
   fileprivate static let automaticLanguageCode = "auto"
-  private static let whisperKitModelIDsBySpeedMode: [LocalSessionTranscriptionSpeedMode: [String]]
-    = [
+  private static let whisperKitModelIDsBySpeedMode: [LocalSessionTranscriptionSpeedMode: [String]] =
+    [
       .fastDraft: [
         "openai_whisper-small",
         "openai_whisper-base",
@@ -302,6 +302,25 @@ struct LocalSessionFileLayout {
     sessionDirectory(for: sessionID).appendingPathComponent("Exports", isDirectory: true)
   }
 
+  func transcriptionEvidenceDirectory(for sessionID: UUID) -> URL {
+    sessionDirectory(for: sessionID).appendingPathComponent(
+      "TranscriptionEvidence", isDirectory: true)
+  }
+
+  func transcriptionRunsDirectory(for sessionID: UUID) -> URL {
+    transcriptionEvidenceDirectory(for: sessionID).appendingPathComponent(
+      "Runs", isDirectory: true)
+  }
+
+  func speakerAnnotationsURL(for sessionID: UUID) -> URL {
+    sessionDirectory(for: sessionID)
+      .appendingPathComponent("speaker-annotations.jsonl", isDirectory: false)
+  }
+
+  var meetingEvidenceOutboxDirectory: URL {
+    baseDirectory.appendingPathComponent("MeetingEvidenceOutbox", isDirectory: true)
+  }
+
   func promptPackageMarkdownURL(for sessionID: UUID) -> URL {
     exportsDirectory(for: sessionID).appendingPathComponent(
       "session-package.md", isDirectory: false)
@@ -319,6 +338,11 @@ struct LocalSessionFileLayout {
 
   func micAudioURL(for sessionID: UUID) -> URL {
     sessionDirectory(for: sessionID).appendingPathComponent("mic.wav", isDirectory: false)
+  }
+
+  func micTranscriptAudioURL(for sessionID: UUID) -> URL {
+    sessionDirectory(for: sessionID).appendingPathComponent(
+      "mic-transcript.wav", isDirectory: false)
   }
 
   func systemAudioURL(for sessionID: UUID) -> URL {
@@ -366,6 +390,8 @@ struct LocalSessionFileLayout {
     try fileManager.createDirectory(at: sessionsDirectory, withIntermediateDirectories: true)
     try fileManager.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
     try fileManager.createDirectory(at: modelDirectory(), withIntermediateDirectories: true)
+    try fileManager.createDirectory(
+      at: meetingEvidenceOutboxDirectory, withIntermediateDirectories: true)
 
     if let sessionID {
       try fileManager.createDirectory(
@@ -374,6 +400,8 @@ struct LocalSessionFileLayout {
         at: attachmentsDirectory(for: sessionID), withIntermediateDirectories: true)
       try fileManager.createDirectory(
         at: exportsDirectory(for: sessionID), withIntermediateDirectories: true)
+      try fileManager.createDirectory(
+        at: transcriptionRunsDirectory(for: sessionID), withIntermediateDirectories: true)
     }
   }
 
@@ -518,11 +546,13 @@ struct LocalSessionFileLayout {
     let candidates = [
       modelDirectory(for: modelID),
       legacyModelDirectory(for: modelID),
-      URL(fileURLWithPath: "/Users/ben/Documents/App/General/__MODELS__/\(modelID)", isDirectory: true),
+      URL(
+        fileURLWithPath: "/Users/ben/Documents/App/General/__MODELS__/\(modelID)", isDirectory: true
+      ),
     ]
 
-    for candidate in candidates where isWhisperKitModelDirectory(candidate, fileManager: fileManager)
-    {
+    for candidate in candidates
+    where isWhisperKitModelDirectory(candidate, fileManager: fileManager) {
       return candidate
     }
 

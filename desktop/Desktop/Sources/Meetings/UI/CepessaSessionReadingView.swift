@@ -14,6 +14,8 @@ struct CepessaSessionReadingView: View {
   @AppStorage("cepessa.reading.textScale") private var textScale: Double = 1.0
   @GestureState private var pinch: CGFloat = 1
   @State private var enlargedImage: NSImage?
+  @State private var renameTarget: LocalSessionTranscriptSegment?
+  @State private var proposedSpeakerName = ""
 
   private let inlineImageMaxHeight: CGFloat = 320
 
@@ -39,13 +41,15 @@ struct CepessaSessionReadingView: View {
         content(for: session)
       } else {
         emptyState(
-          title: "No session open",
-          message: "Pick a session from the floating bar."
+          title: "No Session Open",
+          message: "Choose a session from the toolbar to read its transcript.",
+          symbol: "rectangle.stack"
         )
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .background(CepessaColors.backgroundPrimary)
+    // Long-form text always sits on an opaque reading surface — never glass.
+    .background(CepessaColors.readingSurface)
     .gesture(
       MagnifyGesture()
         .updating($pinch) { value, state, _ in
@@ -61,19 +65,43 @@ struct CepessaSessionReadingView: View {
         enlargedOverlay(enlargedImage)
       }
     }
+    .alert(
+      "Rename speaker",
+      isPresented: Binding(
+        get: { renameTarget != nil },
+        set: { if !$0 { renameTarget = nil } }
+      ),
+      presenting: renameTarget
+    ) { segment in
+      TextField("Speaker name", text: $proposedSpeakerName)
+      Button("Cancel", role: .cancel) {
+        renameTarget = nil
+      }
+      Button("Save") {
+        if let speakerID = segment.speakerID {
+          _ = model.renameSpeaker(speakerID: speakerID, to: proposedSpeakerName)
+        }
+        renameTarget = nil
+      }
+      .disabled(proposedSpeakerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    } message: { _ in
+      Text("This adds a local correction without changing the original transcript evidence.")
+    }
   }
 
+  /// Image lightbox. The scrim is a system material so it follows appearance
+  /// and Reduce Transparency instead of a fixed black wash, and the dismiss
+  /// control is the standard hierarchical close glyph.
   private func enlargedOverlay(_ image: NSImage) -> some View {
     ZStack {
       Rectangle()
-        .fill(Color.black.opacity(0.72))
+        .fill(.regularMaterial)
         .ignoresSafeArea()
 
       Image(nsImage: image)
         .resizable()
         .scaledToFit()
-        .padding(40)
-        .shadow(color: .black.opacity(0.4), radius: 30, y: 12)
+        .padding(CepessaChrome.Space.xxl)
 
       VStack {
         HStack {
@@ -81,15 +109,15 @@ struct CepessaSessionReadingView: View {
           Button {
             enlargedImage = nil
           } label: {
-            Image(systemName: "xmark")
-              .font(.system(size: 13, weight: .bold))
-              .foregroundColor(.white)
-              .frame(width: 30, height: 30)
-              .background(Color.white.opacity(0.16), in: Circle())
+            Image(systemName: "xmark.circle.fill")
+              .font(.system(size: 20))
+              .symbolRenderingMode(.hierarchical)
+              .foregroundStyle(.secondary)
           }
           .buttonStyle(.plain)
           .keyboardShortcut(.cancelAction)
-          .padding(20)
+          .accessibilityLabel("Close image")
+          .padding(CepessaChrome.Space.l)
         }
         Spacer()
       }
@@ -105,9 +133,11 @@ struct CepessaSessionReadingView: View {
     let hasText = !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
     if !hasText {
+      let status = CepessaStatusStyle.resolve(session.status)
       emptyState(
-        title: "Transcript not ready",
-        message: "The raw audio is saved. Run Transcribe from the toolbar."
+        title: pendingTitle(for: status),
+        message: pendingMessage(for: session, status: status),
+        symbol: status == .ready ? "waveform" : status.symbol
       )
     } else {
       GeometryReader { proxy in
@@ -125,6 +155,45 @@ struct CepessaSessionReadingView: View {
         }
         .scrollIndicators(.hidden)
       }
+    }
+  }
+
+  /// What to say when a session has no transcript text yet.
+  ///
+  /// The old copy told everyone to "Run Transcribe from the toolbar" — which
+  /// is wrong advice while capture is still running and worse advice while the
+  /// transcript is already being generated. Each state now says what is
+  /// actually happening, in the same words the indicator and the menu-bar item
+  /// use for it.
+  private func pendingTitle(for status: CepessaStatusStyle) -> String {
+    switch status {
+    case .capturing: return "Recording"
+    case .working: return "Transcribing"
+    case .needsAttention: return "Needs Attention"
+    case .ready: return "Transcript Not Ready"
+    }
+  }
+
+  private func pendingMessage(for session: LocalSession, status: CepessaStatusStyle) -> String {
+    switch status {
+    case .capturing:
+      return "This session is still being captured. The transcript appears once you stop."
+    case .working:
+      if let detail = model.processingStatusDetail?.trimmingCharacters(in: .whitespacesAndNewlines),
+        !detail.isEmpty
+      {
+        return detail
+      }
+      return "Preparing the transcript on this Mac."
+    case .needsAttention:
+      if let error = model.recorderErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+        !error.isEmpty
+      {
+        return error
+      }
+      return "Processing stopped before a transcript was written. Try Transcribe from the toolbar."
+    case .ready:
+      return "The audio is saved. Run Transcribe from the toolbar to read it."
     }
   }
 
@@ -154,25 +223,44 @@ struct CepessaSessionReadingView: View {
         .lineSpacing(sz(5))
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contextMenu {
+          if segment.speakerID != nil {
+            Button("Rename \(segment.speaker)") {
+              proposedSpeakerName = segment.speaker
+              renameTarget = segment
+            }
+            Button("Undo latest speaker rename") {
+              if let speakerID = segment.speakerID {
+                _ = model.undoLatestSpeakerRename(speakerID: speakerID)
+              }
+            }
+          }
+        }
 
       if !images.isEmpty {
         VStack(alignment: .leading, spacing: sz(8)) {
-          ForEach(images, id: \.0) { _, image in
-            Image(nsImage: image)
-              .resizable()
-              .scaledToFit()
-              .frame(maxWidth: width, maxHeight: inlineImageMaxHeight, alignment: .leading)
-              .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-              .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                  .stroke(CepessaColors.hairline.opacity(0.6), lineWidth: 1)
-              )
-              .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-              .onTapGesture { enlargedImage = image }
-              .onHover { inside in
-                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-              }
-              .help("Click to enlarge")
+          ForEach(images, id: \.0) { _, title, image in
+            Button {
+              enlargedImage = image
+            } label: {
+              Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: width, maxHeight: inlineImageMaxHeight, alignment: .leading)
+                .clipShape(
+                  RoundedRectangle(cornerRadius: CepessaChrome.cardRadius, style: .continuous)
+                )
+                .overlay(
+                  RoundedRectangle(cornerRadius: CepessaChrome.cardRadius, style: .continuous)
+                    .strokeBorder(CepessaColors.border, lineWidth: 1)
+                )
+                .contentShape(
+                  RoundedRectangle(cornerRadius: CepessaChrome.cardRadius, style: .continuous)
+                )
+            }
+            .buttonStyle(.plain)
+            .help("Open \(title)")
+            .accessibilityLabel("Open attachment \(title)")
           }
         }
         .padding(.top, sz(4))
@@ -183,7 +271,7 @@ struct CepessaSessionReadingView: View {
   /// Screenshots and image attachments pinned to this transcript moment.
   private func timelineImages(
     for item: LocalSessionTranscriptTimelineItem, in session: LocalSession
-  ) -> [(UUID, NSImage)] {
+  ) -> [(UUID, String, NSImage)] {
     var attachments = item.attachments
     let captureAttachmentIDs = Set(item.captureArtifacts.flatMap { $0.attachmentIDs })
     if !captureAttachmentIDs.isEmpty {
@@ -196,7 +284,7 @@ struct CepessaSessionReadingView: View {
         return nil
       }
       seen.insert(attachment.id)
-      return (attachment.id, image)
+      return (attachment.id, attachment.title, image)
     }
   }
 
@@ -247,14 +335,13 @@ struct CepessaSessionReadingView: View {
     .accessibilityHidden(true)
   }
 
-  private func emptyState(title: String, message: String) -> some View {
-    VStack(spacing: 8) {
-      Text(title)
-        .font(.system(size: 15, weight: .semibold))
-        .foregroundColor(CepessaColors.textSecondary)
+  /// The system empty state — correct metrics, typography and VoiceOver
+  /// grouping for free, instead of a hand-rolled stack of labels.
+  private func emptyState(title: String, message: String, symbol: String) -> some View {
+    ContentUnavailableView {
+      Label(title, systemImage: symbol)
+    } description: {
       Text(message)
-        .font(.system(size: 13))
-        .foregroundColor(CepessaColors.textTertiary)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
@@ -262,8 +349,8 @@ struct CepessaSessionReadingView: View {
 
 // MARK: - Native window toolbar
 
-/// Owns the reading window's toolbar: the session picker, language, export and
-/// transcribe controls. Keeping these in the titlebar leaves the content pure.
+/// Owns the reading window's toolbar: the session picker, export and transcribe
+/// controls. Keeping these in the titlebar leaves the content pure.
 @MainActor
 final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbarItemValidation {
   private weak var model: LocalMeetingAppModel?
@@ -272,7 +359,6 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
   private let exporter = LocalSessionRecapExporter()
 
   private let sessionItemID = NSToolbarItem.Identifier("cepessa.reading.session")
-  private let languageItemID = NSToolbarItem.Identifier("cepessa.reading.language")
   private let exportItemID = NSToolbarItem.Identifier("cepessa.reading.export")
   private let transcribeItemID = NSToolbarItem.Identifier("cepessa.reading.transcribe")
 
@@ -283,7 +369,7 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
 
     let toolbar = NSToolbar(identifier: "cepessa.reading.toolbar")
     toolbar.delegate = self
-    toolbar.displayMode = .iconOnly
+    toolbar.displayMode = .default
     toolbar.allowsUserCustomization = false
     window.toolbar = toolbar
     window.toolbarStyle = .unified
@@ -303,7 +389,7 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
   }
 
   func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-    [sessionItemID, .flexibleSpace, languageItemID, transcribeItemID, exportItemID]
+    [sessionItemID, .flexibleSpace, transcribeItemID, exportItemID]
   }
 
   func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -319,17 +405,10 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
     case sessionItemID:
       let item = NSMenuToolbarItem(itemIdentifier: identifier)
       item.title = currentSessionTitle
-      item.image = NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: "Sessions")
+      item.image = NSImage(
+        systemSymbolName: "rectangle.stack", accessibilityDescription: "Sessions")
       item.menu = sessionMenu()
       item.showsIndicator = true
-      return item
-
-    case languageItemID:
-      let item = NSMenuToolbarItem(itemIdentifier: identifier)
-      item.title = currentLanguage.shortTitle
-      item.menu = languageMenu()
-      item.showsIndicator = true
-      item.toolTip = "Document language"
       return item
 
     case transcribeItemID:
@@ -379,30 +458,11 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
     return menu
   }
 
-  private func languageMenu() -> NSMenu {
-    let menu = NSMenu()
-    for language in LocalSessionDocumentLanguage.allCases {
-      let item = NSMenuItem(
-        title: language.displayTitle, action: #selector(setLanguageAction(_:)), keyEquivalent: "")
-      item.target = self
-      item.representedObject = language.rawValue
-      item.state = (language == currentLanguage) ? .on : .off
-      menu.addItem(item)
-    }
-    return menu
-  }
-
   // MARK: Actions
 
   @objc private func selectSessionAction(_ sender: NSMenuItem) {
     guard let id = sender.representedObject as? UUID else { return }
     model?.selectSession(id: id)
-  }
-
-  @objc private func setLanguageAction(_ sender: NSMenuItem) {
-    guard let raw = sender.representedObject as? String else { return }
-    UserDefaults.standard.set(raw, forKey: "cepessa.sessions.documentLanguage")
-    refreshTitles()
   }
 
   @objc private func transcribeAction() {
@@ -426,7 +486,10 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
       do {
         _ = try self.exporter.exportTranscriptMarkdown(session: session, to: directory)
       } catch {
-        NSSound.beep()
+        let alert = NSAlert(error: error)
+        alert.messageText = "The transcript could not be exported"
+        alert.informativeText = error.localizedDescription
+        alert.beginSheetModal(for: window)
       }
     }
   }
@@ -448,12 +511,6 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
     }
   }
 
-  private var currentLanguage: LocalSessionDocumentLanguage {
-    LocalSessionDocumentLanguage(
-      rawValue: UserDefaults.standard.string(forKey: "cepessa.sessions.documentLanguage") ?? "")
-      ?? .hebrew
-  }
-
   private var currentSessionTitle: String {
     model?.selectedSession?.displayTitle ?? "Sessions"
   }
@@ -465,10 +522,10 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
         menuItem.title = currentSessionTitle
         menuItem.menu = sessionMenu()
       }
-      if item.itemIdentifier == languageItemID, let menuItem = item as? NSMenuToolbarItem {
-        menuItem.title = currentLanguage.shortTitle
-        menuItem.menu = languageMenu()
-      }
     }
+  }
+
+  func setVisible(_ isVisible: Bool) {
+    window?.toolbar?.isVisible = isVisible
   }
 }

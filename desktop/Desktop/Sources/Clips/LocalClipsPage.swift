@@ -1,334 +1,294 @@
 import AppKit
 import SwiftUI
 
+/// CLIPS is a two-pane document browser, not a dashboard: a list of recordings
+/// on the left, the selected clip's handoff details on the right, and one
+/// recorder bar pinned under the list. Everything else the old layout carried
+/// — the gradient, the 30pt headings, the dark 360pt hero placeholder — was
+/// decoration around three controls that already explain themselves.
 struct LocalClipsPage: View {
-  @StateObject private var model = LocalClipViewModel()
-  @State private var hoverClipID: LocalClipManifest.ID?
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @StateObject private var model = CepessaSessionsStore.shared.clipModel
+  @ObservedObject private var sessionModel = CepessaSessionsStore.shared.model
 
   var body: some View {
-    ZStack {
-      LinearGradient(
-        colors: [
-          CepessaColors.paperRaised,
-          CepessaColors.paper,
-          CepessaColors.paperDeep.opacity(0.72),
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-      )
-      .ignoresSafeArea()
-
-      HStack(spacing: 18) {
-        clipList
-        clipComposer
-        clipInspector
-      }
-      .padding(20)
+    NavigationSplitView {
+      sidebar
+        .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
+    } detail: {
+      detail
     }
   }
 
-  private var clipList: some View {
-    VStack(alignment: .leading, spacing: 18) {
-      VStack(alignment: .leading, spacing: 8) {
-        Text("CLIPS")
-          .scaledFont(size: 11, weight: .semibold)
-          .tracking(0.18)
-          .foregroundStyle(CepessaColors.textSecondary)
+  // MARK: - Sidebar
 
-        Text("Visual handoffs")
-          .scaledFont(size: 30, weight: .semibold)
-          .foregroundStyle(CepessaColors.textPrimary)
-
-        Text("Record the screen, speak over it, then copy a prompt that tells an agent how to inspect the video and transcript through MCP.")
-          .scaledFont(size: 13)
-          .foregroundStyle(CepessaColors.textSecondary)
-          .fixedSize(horizontal: false, vertical: true)
+  private var sidebar: some View {
+    List(selection: selection) {
+      ForEach(model.clips) { clip in
+        clipRow(clip)
+          .tag(clip.id)
       }
-
+    }
+    .overlay {
       if model.clips.isEmpty {
-        emptyClipList
-      } else {
-        ScrollView {
-          LazyVStack(spacing: 10) {
-            ForEach(model.clips) { clip in
-              clipRow(clip)
-            }
-          }
-          .padding(.trailing, 4)
+        ContentUnavailableView {
+          Label("No Clips", systemImage: "video.badge.plus")
+        } description: {
+          Text("Record the screen and narrate it to create an agent handoff.")
         }
-        .scrollIndicators(.hidden)
       }
     }
-    .padding(22)
-    .frame(minWidth: 300, idealWidth: 340, maxWidth: 370, maxHeight: .infinity, alignment: .top)
-    .cepessaCanvas(radius: 22)
+    .safeAreaInset(edge: .bottom, spacing: 0) {
+      recorderBar
+    }
   }
 
-  private var clipComposer: some View {
-    VStack(alignment: .leading, spacing: 16) {
-      HStack(alignment: .center, spacing: 12) {
-        VStack(alignment: .leading, spacing: 6) {
-          Text(model.isRecording ? "Recording CLIP" : "New CLIP")
-            .scaledFont(size: 24, weight: .semibold)
-            .foregroundStyle(CepessaColors.textPrimary)
-
-          Text(model.statusMessage ?? "Use CLIPS when a transcript is not enough and the agent needs to see what changed.")
-            .scaledFont(size: 13)
-            .foregroundStyle(CepessaColors.textSecondary)
-            .lineLimit(2)
-        }
-
-        Spacer(minLength: 0)
-
-        Text(model.recordingDurationText)
-          .scaledFont(size: 16, weight: .semibold, design: .monospaced)
-          .foregroundStyle(model.isRecording ? CepessaColors.error : CepessaColors.textSecondary)
-          .padding(.horizontal, 12)
-          .padding(.vertical, 8)
-          .background(CepessaColors.backgroundSecondary.opacity(0.82))
-          .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+  /// `selectClip` also syncs the draft fields, so selection has to route
+  /// through the view model rather than binding straight to the published id.
+  private var selection: Binding<LocalClipManifest.ID?> {
+    Binding(
+      get: { model.selectedClipID },
+      set: { id in
+        guard let id else { return }
+        model.selectClip(id)
       }
-
-      HStack(spacing: 10) {
-        TextField("CLIP title", text: $model.titleDraft)
-          .textFieldStyle(.plain)
-          .padding(.horizontal, 12)
-          .frame(height: 38)
-          .background(CepessaColors.backgroundSecondary.opacity(0.86))
-          .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-        Button {
-          model.isRecording ? model.stopClip() : model.startClip()
-        } label: {
-          Label(
-            model.isRecording ? "Stop CLIP" : "Record CLIP",
-            systemImage: model.isRecording ? "stop.circle.fill" : "record.circle.fill"
-          )
-        }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-        .tint(model.isRecording ? CepessaColors.error : CepessaColors.capture)
-      }
-
-      TextField("What should the agent understand from this?", text: $model.intentDraft)
-        .textFieldStyle(.plain)
-        .padding(.horizontal, 12)
-        .frame(height: 38)
-        .background(CepessaColors.backgroundSecondary.opacity(0.86))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-      recordingPreview
-
-      HStack(spacing: 8) {
-        Label("Screen video", systemImage: "display")
-        Label("Mic + system audio", systemImage: "waveform")
-        Label("Transcript", systemImage: "text.quote")
-        Label("Post notes", systemImage: "note.text")
-      }
-      .scaledFont(size: 11, weight: .medium)
-      .foregroundStyle(CepessaColors.textSecondary)
-    }
-    .padding(22)
-    .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-    .cepessaCanvas(radius: 22)
-  }
-
-  private var clipInspector: some View {
-    VStack(alignment: .leading, spacing: 16) {
-      if let clip = model.selectedClip {
-        Text("Agent prompt")
-          .scaledFont(size: 24, weight: .semibold)
-          .foregroundStyle(CepessaColors.textPrimary)
-
-        Button {
-          model.copyAgentPrompt(for: clip.id)
-        } label: {
-          Label("Copy agent prompt", systemImage: "doc.on.doc")
-            .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-
-        if let clipboardMessage = model.clipboardMessage {
-          Text(clipboardMessage)
-            .scaledFont(size: 11, weight: .semibold)
-            .foregroundStyle(CepessaColors.success)
-        }
-
-        packetRow("MCP clip id", detail: clip.id.uuidString, symbol: "server.rack")
-        packetRow("clip-video.mov", detail: "Screen recording path is included in the prompt", symbol: "play.rectangle")
-        packetRow("transcript.json", detail: "\(clip.transcriptSegments.count) transcript segments", symbol: "text.quote")
-        packetRow("notes.md", detail: "Optional post-recording context", symbol: "note.text")
-
-        VStack(alignment: .leading, spacing: 8) {
-          Text("Post notes")
-            .scaledFont(size: 13, weight: .semibold)
-            .foregroundStyle(CepessaColors.textPrimary)
-
-          TextEditor(text: $model.postNotesDraft)
-            .font(.system(size: 13))
-            .scrollContentBackground(.hidden)
-            .frame(minHeight: 112)
-            .padding(8)
-            .background(CepessaColors.backgroundSecondary.opacity(0.8))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-          HStack {
-            Button("Save notes") {
-              model.saveSelectedNotes()
-            }
-            .buttonStyle(.bordered)
-
-            Button {
-              if let url = model.clipDirectoryURL(for: clip.id) {
-                NSWorkspace.shared.activateFileViewerSelecting([url])
-              }
-            } label: {
-              Label("Reveal", systemImage: "folder")
-            }
-            .buttonStyle(.bordered)
-          }
-        }
-
-        Text("MCP: get_local_clip(\(clip.id.uuidString))")
-          .scaledFont(size: 11, weight: .semibold, design: .monospaced)
-          .foregroundStyle(CepessaColors.textSecondary)
-          .lineLimit(2)
-      } else {
-        emptyInspector
-      }
-    }
-    .padding(22)
-    .frame(minWidth: 320, idealWidth: 360, maxWidth: 400, maxHeight: .infinity, alignment: .top)
-    .cepessaCanvas(radius: 22)
-  }
-
-  private var recordingPreview: some View {
-    ZStack {
-      RoundedRectangle(cornerRadius: 18, style: .continuous)
-        .fill(CepessaColors.captureDeep.opacity(0.94))
-
-      VStack(spacing: 8) {
-        Image(systemName: model.isRecording ? "record.circle.fill" : "display.and.arrow.down")
-          .scaledFont(size: 34, weight: .semibold)
-        Text(model.isRecording ? "Screen recording in progress" : "Screen handoff recorder")
-          .scaledFont(size: 18, weight: .semibold)
-        Text("After recording, copy a prompt that points the agent to this CLIP through MCP.")
-          .scaledFont(size: 13)
-          .multilineTextAlignment(.center)
-          .frame(maxWidth: 430)
-      }
-      .foregroundStyle(Color.white.opacity(0.88))
-    }
-    .frame(minHeight: 360)
-    .overlay(
-      RoundedRectangle(cornerRadius: 18, style: .continuous)
-        .stroke(CepessaColors.border.opacity(0.25), lineWidth: 1)
     )
   }
 
+  /// Title, then the one line that says what the clip is about, then when it
+  /// happened. A status line appears only when the clip is doing something or
+  /// needs looking at — stamping "Ready" on every finished row is noise.
   private func clipRow(_ clip: LocalClipManifest) -> some View {
-    let isSelected = model.selectedClipID == clip.id
-    return VStack(alignment: .leading, spacing: 8) {
-      HStack {
-        Text(clip.title)
-          .scaledFont(size: 14, weight: .semibold)
-          .foregroundStyle(CepessaColors.textPrimary)
-          .lineLimit(1)
+    let status = CepessaStatusStyle.resolve(clip.status)
 
-        Spacer()
-
-        Text(clip.status.rawValue.uppercased())
-          .scaledFont(size: 9, weight: .bold)
-          .foregroundStyle(clip.status == .ready ? CepessaColors.backgroundPrimary : Color.white)
-          .padding(.horizontal, 8)
-          .padding(.vertical, 4)
-          .background(clip.status == .ready ? CepessaColors.success : CepessaColors.capture)
-          .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-      }
+    return VStack(alignment: .leading, spacing: CepessaChrome.Space.xxs) {
+      Text(clip.title)
+        .font(.body)
+        .lineLimit(1)
 
       Text(clip.intent ?? clip.transcriptText.nilIfBlank ?? "No transcript yet")
-        .scaledFont(size: 12)
-        .foregroundStyle(CepessaColors.textSecondary)
-        .lineLimit(2)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
 
-      Text(clip.startedAt.formatted(date: .abbreviated, time: .shortened))
-        .scaledFont(size: 11)
-        .foregroundStyle(CepessaColors.textTertiary)
-    }
-    .padding(14)
-    .background(
-      RoundedRectangle(cornerRadius: 8, style: .continuous)
-        .fill(isSelected ? CepessaColors.capture.opacity(0.13) : CepessaColors.backgroundSecondary.opacity(0.74))
-    )
-    .overlay(
-      RoundedRectangle(cornerRadius: 8, style: .continuous)
-        .stroke(isSelected ? CepessaColors.capture.opacity(0.34) : CepessaColors.border.opacity(0.22), lineWidth: 1)
-    )
-    .scaleEffect(hoverClipID == clip.id && !isSelected && !reduceMotion ? 1.006 : 1)
-    .onTapGesture {
-      model.selectClip(clip.id)
-    }
-    .onHover { isInside in
-      hoverClipID = isInside ? clip.id : nil
-    }
-  }
+      HStack(spacing: CepessaChrome.Space.xs) {
+        Text(clip.startedAt.formatted(date: .abbreviated, time: .shortened))
+          .font(.caption2)
+          .foregroundStyle(.tertiary)
 
-  private func packetRow(_ title: String, detail: String, symbol: String) -> some View {
-    HStack(alignment: .top, spacing: 12) {
-      Image(systemName: symbol)
-        .scaledFont(size: 15, weight: .semibold)
-        .foregroundStyle(CepessaColors.capture)
-        .frame(width: 22)
-      VStack(alignment: .leading, spacing: 3) {
-        Text(title)
-          .scaledFont(size: 13, weight: .semibold)
-          .foregroundStyle(CepessaColors.textPrimary)
-        Text(detail)
-          .scaledFont(size: 11)
-          .foregroundStyle(CepessaColors.textSecondary)
+        if status != .ready {
+          CepessaStatusLabel(style: status, font: .caption2)
+        }
       }
-      Spacer(minLength: 0)
     }
-    .padding(12)
-    .background(CepessaColors.backgroundSecondary.opacity(0.72))
-    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .padding(.vertical, CepessaChrome.Space.xxs)
+    .accessibilityElement(children: .combine)
   }
 
-  private var emptyClipList: some View {
-    VStack(spacing: 10) {
-      Image(systemName: "video.badge.plus")
-        .scaledFont(size: 30)
-        .foregroundStyle(CepessaColors.textTertiary)
-      Text("No CLIPS yet")
-        .scaledFont(size: 15, weight: .semibold)
-      Text("Record the screen, narrate, and add post notes for agent handoffs.")
-        .scaledFont(size: 12)
-        .foregroundStyle(CepessaColors.textSecondary)
-        .multilineTextAlignment(.center)
+  /// One capture control, always in the same place, with the transport button
+  /// carrying the same red the floating indicator uses for live capture. The
+  /// only line of prose under it is the app's own truth about why recording is
+  /// or is not possible right now — never a general description of the feature.
+  private var recorderBar: some View {
+    VStack(spacing: CepessaChrome.Space.s) {
+      Divider()
+
+      VStack(spacing: CepessaChrome.Space.xs) {
+        HStack(spacing: CepessaChrome.Space.s) {
+          TextField("Clip title", text: $model.titleDraft)
+            .textFieldStyle(.roundedBorder)
+            .disabled(model.isRecording)
+
+          if model.isRecording {
+            HStack(spacing: CepessaChrome.Space.xs) {
+              Circle()
+                .fill(CepessaColors.signalRed)
+                .frame(width: 7, height: 7)
+              Text(model.recordingDurationText)
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(CepessaColors.textPrimary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Recording time \(model.recordingDurationText)")
+          }
+
+          Button {
+            model.isRecording ? model.stopClip() : model.startClip()
+          } label: {
+            Label(
+              model.isRecording ? "Stop" : "Record",
+              systemImage: model.isRecording ? "stop.fill" : "record.circle"
+            )
+          }
+          .buttonStyle(.borderedProminent)
+          .controlSize(.regular)
+          .tint(model.isRecording ? CepessaColors.signalRed : CepessaColors.accent)
+          .disabled(isRecordBlocked)
+          .help(model.isRecording ? "Stop recording this clip" : "Record a new clip")
+          .accessibilityLabel(model.isRecording ? "Stop recording" : "Record clip")
+        }
+
+        TextField("Agent focus (optional)", text: $model.intentDraft)
+          .textFieldStyle(.roundedBorder)
+          .disabled(model.isRecording)
+          .accessibilityLabel("Agent focus")
+      }
+      .padding(.horizontal, CepessaChrome.Space.m)
+
+      if let blocker = recorderBlockerMessage {
+        Label(blocker, systemImage: "exclamationmark.triangle.fill")
+          .labelStyle(.titleAndIcon)
+          .font(.caption)
+          .foregroundStyle(CepessaColors.textSecondary)
+          .lineLimit(2)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.horizontal, CepessaChrome.Space.m)
+      } else if let status = model.statusMessage {
+        Text(status)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(2)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.horizontal, CepessaChrome.Space.m)
+      }
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .padding(.bottom, CepessaChrome.Space.m)
+    .background(.bar)
   }
 
-  private var emptyInspector: some View {
-    VStack(spacing: 10) {
-      Image(systemName: "shippingbox")
-        .scaledFont(size: 30)
-        .foregroundStyle(CepessaColors.textTertiary)
-      Text("No CLIP selected")
-        .scaledFont(size: 15, weight: .semibold)
-      Text("Select or record a CLIP to copy the agent prompt.")
-        .scaledFont(size: 12)
-        .foregroundStyle(CepessaColors.textSecondary)
-        .multilineTextAlignment(.center)
+  private var isSessionBusy: Bool {
+    sessionModel.isRecording || sessionModel.isTranscribing
+  }
+
+  private var isRecordBlocked: Bool {
+    !model.isRecording && (isSessionBusy || !hasScreenRecordingAccess)
+  }
+
+  /// A clip is a screen recording; without that permission the capture would
+  /// start and immediately produce an empty file. Saying so up front is more
+  /// honest than letting it fail.
+  private var hasScreenRecordingAccess: Bool {
+    CGPreflightScreenCaptureAccess()
+  }
+
+  private var recorderBlockerMessage: String? {
+    guard !model.isRecording else { return nil }
+    if isSessionBusy {
+      return "Finish the active session recording or transcription before starting a clip."
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    if !hasScreenRecordingAccess {
+      return "Screen Recording access is needed to capture a clip. Grant it in Settings."
+    }
+    return nil
+  }
+
+  // MARK: - Detail
+
+  @ViewBuilder
+  private var detail: some View {
+    if let clip = model.selectedClip {
+      Form {
+        Section {
+          LabeledContent("Recorded", value: clip.startedAt.formatted(date: .long, time: .shortened))
+          if clip.endedAt != nil {
+            LabeledContent("Length", value: durationText(clip.duration))
+          }
+          LabeledContent("Status") {
+            CepessaStatusLabel(
+              style: CepessaStatusStyle.resolve(clip.status),
+              detail: clip.errorMessage,
+              font: .body
+            )
+            .multilineTextAlignment(.trailing)
+          }
+          LabeledContent(
+            "Transcript",
+            value: clip.transcriptSegments.isEmpty
+              ? "Not available"
+              : "\(clip.transcriptSegments.count) segments"
+          )
+          LabeledContent("Clip ID") {
+            Text(clip.id.uuidString)
+              .font(.caption.monospaced())
+              .textSelection(.enabled)
+          }
+        } header: {
+          Text(clip.title)
+        }
+
+        Section("Notes") {
+          TextField("Agent focus", text: $model.intentDraft)
+            .accessibilityLabel("What the agent should understand from this clip")
+
+          TextEditor(text: $model.postNotesDraft)
+            .font(.body)
+            .frame(minHeight: 96)
+            .accessibilityLabel("Post-recording notes")
+
+          Button("Save Context") { model.saveSelectedNotes() }
+        }
+
+        // Only shown when there is a transcript to show. This is the clip's
+        // own recorded text, read-only — the editable fields stay in Notes.
+        if !clip.transcriptSegments.isEmpty {
+          Section("Transcript") {
+            Text(clip.transcriptText)
+              .font(.callout)
+              .foregroundStyle(CepessaColors.textPrimary)
+              .textSelection(.enabled)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .accessibilityLabel("Clip transcript")
+          }
+        }
+
+        Section {
+          Button {
+            model.copyAgentPrompt(for: clip.id)
+          } label: {
+            Label("Copy Agent Prompt", systemImage: "doc.on.doc")
+          }
+
+          Button {
+            if let url = model.clipDirectoryURL(for: clip.id) {
+              NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+          } label: {
+            Label("Reveal in Finder", systemImage: "folder")
+          }
+
+          if let clipboardMessage = model.clipboardMessage {
+            Text(clipboardMessage)
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+        } header: {
+          Text("Handoff")
+        } footer: {
+          Text("The prompt points an agent at this clip's video and transcript through MCP.")
+        }
+      }
+      .formStyle(.grouped)
+    } else {
+      ContentUnavailableView {
+        Label("No Clip Selected", systemImage: "shippingbox")
+      } description: {
+        Text("Select a clip to copy its agent prompt.")
+      }
+    }
+  }
+
+  private func durationText(_ duration: TimeInterval) -> String {
+    let total = max(0, Int(duration.rounded()))
+    let hours = total / 3600
+    let minutes = (total % 3600) / 60
+    let seconds = total % 60
+    return hours > 0
+      ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+      : String(format: "%d:%02d", minutes, seconds)
   }
 }
 
-private extension String {
-  var nilIfBlank: String? {
+extension String {
+  fileprivate var nilIfBlank: String? {
     let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
   }

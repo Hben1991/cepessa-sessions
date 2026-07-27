@@ -165,6 +165,11 @@ def test_local_session_tools_do_not_require_omi_api_key():
     assert requires_omi_api_key("list_local_clips") is False
     assert requires_omi_api_key("get_local_clip") is False
     assert requires_omi_api_key("list_local_clip_files") is False
+    assert requires_omi_api_key("brain_status") is False
+    assert requires_omi_api_key("search_meeting_brain") is False
+    assert requires_omi_api_key("prepare_agent_context") is False
+    assert requires_omi_api_key("get_meeting_evidence") is False
+    assert requires_omi_api_key("resolve_participant") is False
     assert requires_omi_api_key("get_conversations") is True
 
 

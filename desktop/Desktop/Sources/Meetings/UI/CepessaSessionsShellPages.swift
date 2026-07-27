@@ -345,10 +345,13 @@ private struct CepessaLibraryDetailPane: View {
                   .tracking(0.18)
                   .foregroundStyle(CepessaColors.textSecondary)
 
-                Text(LocalSessionRecapMarkdownDocument.title(for: session, language: selectedDocumentLanguage))
-                  .scaledFont(size: 28, weight: .semibold)
-                  .foregroundStyle(CepessaColors.textPrimary)
-                  .lineLimit(2)
+                Text(
+                  LocalSessionRecapMarkdownDocument.title(
+                    for: session, language: selectedDocumentLanguage)
+                )
+                .scaledFont(size: 28, weight: .semibold)
+                .foregroundStyle(CepessaColors.textPrimary)
+                .lineLimit(2)
 
                 Text(session.startedAt.formatted(date: .complete, time: .shortened))
                   .scaledFont(size: 12)
@@ -1698,16 +1701,17 @@ final class CepessaStorageSettingsModel: ObservableObject {
 
   init(fileManager: FileManager = .default) {
     self.fileManager = fileManager
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-      .appendingPathComponent("Cepessa", isDirectory: true)
-    self.sessionsRoot = appSupport.appendingPathComponent("Sessions", isDirectory: true)
-    self.clipsRoot = appSupport.appendingPathComponent("Clips", isDirectory: true)
+    let storageRoot = LocalSessionStorageRoot.defaultBaseDirectory
+    self.sessionsRoot = storageRoot.appendingPathComponent("Sessions", isDirectory: true)
+    self.clipsRoot = storageRoot.appendingPathComponent("Clips", isDirectory: true)
     refresh()
   }
 
   var sessionsSizeText: String { Self.byteCountFormatter.string(fromByteCount: sessionsBytes) }
   var clipsSizeText: String { Self.byteCountFormatter.string(fromByteCount: clipsBytes) }
-  var totalSizeText: String { Self.byteCountFormatter.string(fromByteCount: sessionsBytes + clipsBytes) }
+  var totalSizeText: String {
+    Self.byteCountFormatter.string(fromByteCount: sessionsBytes + clipsBytes)
+  }
 
   func refresh() {
     sessionsBytes = directorySize(at: sessionsRoot)
@@ -1745,11 +1749,13 @@ final class CepessaStorageSettingsModel: ObservableObject {
   }
 
   private func directorySize(at root: URL) -> Int64 {
-    guard let enumerator = fileManager.enumerator(
-      at: root,
-      includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-      options: [.skipsHiddenFiles]
-    ) else {
+    guard
+      let enumerator = fileManager.enumerator(
+        at: root,
+        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+        options: [.skipsHiddenFiles]
+      )
+    else {
       return 0
     }
 
@@ -1774,161 +1780,68 @@ final class CepessaStorageSettingsModel: ObservableObject {
   }()
 }
 
+/// Which irreversible storage action the user has asked for. Clearing local
+/// recordings is the only destructive thing this app can do, so it never
+/// happens on a single click — the button arms a confirmation dialog that
+/// names exactly what is about to be deleted.
+private enum CepessaStorageCleanupRequest: String, Identifiable {
+  case sessions
+  case clips
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .sessions: return "Delete all local sessions?"
+    case .clips: return "Delete all local clips?"
+    }
+  }
+
+  var message: String {
+    switch self {
+    case .sessions:
+      return
+        "Every recording, transcript, and attachment in the Sessions folder is removed from this Mac. This cannot be undone."
+    case .clips:
+      return
+        "Every clip video, transcript, and note in the Clips folder is removed from this Mac. This cannot be undone."
+    }
+  }
+
+  var confirmTitle: String {
+    switch self {
+    case .sessions: return "Delete Sessions"
+    case .clips: return "Delete Clips"
+    }
+  }
+}
+
+/// A standard macOS settings pane: one grouped `Form`, native pickers and
+/// toggles, system-drawn section headers. The previous version painted a
+/// gradient, a 30pt display heading and three custom cards over what is
+/// really five controls and a folder listing.
 struct CepessaSessionsSettingsPage: View {
   @StateObject private var storageModel = CepessaStorageSettingsModel()
-  @AppStorage("cepessa.sessions.keepAudio") private var keepAudio = true
+  @ObservedObject private var sessionModel = CepessaSessionsStore.shared.model
+  @ObservedObject private var speakerModels =
+    CepessaSessionsStore.shared.model.speakerModelProvisioner
+  @ObservedObject private var clipModel = CepessaSessionsStore.shared.clipModel
   @AppStorage("cepessa.sessions.preferredTranscriptLanguage") private var transcriptLanguage =
     "Mixed"
   @AppStorage("cepessa.sessions.transcriptionSpeedMode") private var transcriptionSpeedMode =
     "Balanced"
   @AppStorage(CepessaSessionFloatingBarPreferences.enabledKey) private var floatingBarEnabled =
     true
-  @State private var openSettingsPickerTitle: String?
+  @State private var cleanupRequest: CepessaStorageCleanupRequest?
 
   var body: some View {
-    ZStack {
-      LinearGradient(
-        colors: [CepessaColors.backgroundPrimary, CepessaColors.backgroundSecondary.opacity(0.96)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-      )
-      .ignoresSafeArea()
-
-      ScrollView {
-        VStack(alignment: .leading, spacing: 18) {
-          VStack(alignment: .leading, spacing: 10) {
-            Text("Sessions")
-              .scaledFont(size: 11, weight: .semibold)
-              .tracking(0.18)
-              .foregroundStyle(CepessaColors.textTertiary)
-
-            Text("Workspace Settings")
-              .scaledFont(size: 30, weight: .semibold)
-              .foregroundStyle(CepessaColors.textPrimary)
-
-            Text("Tune capture behavior, storage, and permissions for this Mac.")
-              .scaledFont(size: 13)
-              .foregroundStyle(CepessaColors.textSecondary)
-          }
-
-          settingsCard(title: "Capture") {
-            VStack(spacing: 14) {
-              pickerRow(
-                title: "Transcript language", value: $transcriptLanguage,
-                options: ["Mixed", "Hebrew-first", "English-first"])
-              pickerRow(
-                title: "Transcription speed", value: $transcriptionSpeedMode,
-                options: ["Fast draft", "Balanced", "Most accurate"])
-
-              Text(
-                "Fast draft starts with lighter local models when available. Hebrew-first and English-first add a language hint while keeping bilingual detection on."
-              )
-              .scaledFont(size: 12)
-              .foregroundStyle(CepessaColors.textSecondary)
-              .frame(maxWidth: .infinity, alignment: .leading)
-
-              Toggle(isOn: $keepAudio) {
-                Text("Keep raw audio after processing")
-                  .scaledFont(size: 13)
-                  .foregroundStyle(CepessaColors.textPrimary)
-              }
-              .toggleStyle(.switch)
-
-              Toggle(isOn: $floatingBarEnabled) {
-                Text("Show floating recording bar")
-                  .scaledFont(size: 13)
-                  .foregroundStyle(CepessaColors.textPrimary)
-              }
-              .toggleStyle(.switch)
-
-              Text(
-                "A draggable recording control appears while capture is live. The status bar still shows recording and transcription progress."
-              )
-              .scaledFont(size: 12)
-              .foregroundStyle(CepessaColors.textSecondary)
-              .frame(maxWidth: .infinity, alignment: .leading)
-            }
-          }
-
-          settingsCard(title: "Permissions") {
-            VStack(spacing: 12) {
-              permissionRow(
-                title: "Microphone access",
-                isGranted: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
-              permissionRow(
-                title: "Screen capture access", isGranted: CGPreflightScreenCaptureAccess())
-
-              HStack(spacing: 10) {
-                settingsAction(title: "Open Microphone Privacy") {
-                  openSystemSettings(anchor: "Privacy_Microphone")
-                }
-                settingsAction(title: "Open Screen Recording Privacy") {
-                  openSystemSettings(anchor: "Privacy_ScreenCapture")
-                }
-              }
-            }
-          }
-
-          settingsCard(title: "Local storage") {
-            VStack(alignment: .leading, spacing: 12) {
-              Text("Sessions, transcripts, CLIPS, audio, and attachments stay on this Mac by default.")
-                .scaledFont(size: 12)
-                .foregroundStyle(CepessaColors.textSecondary)
-
-              storageUsageRow(
-                title: "Sessions",
-                detail: storageModel.sessionsRoot.path,
-                size: storageModel.sessionsSizeText
-              )
-
-              storageUsageRow(
-                title: "CLIPS",
-                detail: storageModel.clipsRoot.path,
-                size: storageModel.clipsSizeText
-              )
-
-              storageUsageRow(
-                title: "Total",
-                detail: "Local Cepessa storage",
-                size: storageModel.totalSizeText
-              )
-
-              HStack(spacing: 10) {
-                settingsAction(title: "Reveal Sessions Folder") {
-                  NSWorkspace.shared.activateFileViewerSelecting([storageModel.sessionsRoot])
-                }
-                settingsAction(title: "Reveal CLIPS Folder") {
-                  NSWorkspace.shared.activateFileViewerSelecting([storageModel.clipsRoot])
-                }
-                settingsAction(title: "Reveal Models Folder") {
-                  NSWorkspace.shared.activateFileViewerSelecting([modelsRoot])
-                }
-              }
-
-              HStack(spacing: 10) {
-                settingsAction(title: "Refresh Storage") {
-                  storageModel.refresh()
-                }
-                settingsAction(title: "Clear Sessions") {
-                  storageModel.clearSessions()
-                  CepessaSessionsStore.shared.model.loadStoredSessions()
-                }
-                settingsAction(title: "Clear CLIPS") {
-                  storageModel.clearClips()
-                }
-              }
-
-              if let cleanupMessage = storageModel.cleanupMessage {
-                Text(cleanupMessage)
-                  .scaledFont(size: 12, weight: .semibold)
-                  .foregroundStyle(CepessaColors.textSecondary)
-              }
-            }
-          }
-        }
-        .padding(24)
-      }
+    Form {
+      captureSection
+      speakerRecognitionSection
+      permissionsSection
+      storageSection
     }
+    .formStyle(.grouped)
     .onAppear {
       CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
       CepessaSessionStatusBarController.shared.connect(model: CepessaSessionsStore.shared.model)
@@ -1937,12 +1850,212 @@ struct CepessaSessionsSettingsPage: View {
     .onChange(of: floatingBarEnabled) { _, _ in
       CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
     }
-    .onExitCommand {
-      guard openSettingsPickerTitle != nil else { return }
-      withAnimation(.easeOut(duration: 0.12)) {
-        openSettingsPickerTitle = nil
+    .confirmationDialog(
+      cleanupRequest?.title ?? "",
+      isPresented: Binding(
+        get: { cleanupRequest != nil },
+        set: { if !$0 { cleanupRequest = nil } }
+      ),
+      presenting: cleanupRequest
+    ) { request in
+      Button(request.confirmTitle, role: .destructive) { performCleanup(request) }
+      Button("Cancel", role: .cancel) {}
+    } message: { request in
+      Text(request.message)
+    }
+  }
+
+  // MARK: - Sections
+
+  private var captureSection: some View {
+    Section {
+      Picker("Transcript language", selection: $transcriptLanguage) {
+        Text("Mixed").tag("Mixed")
+        Text("Hebrew-first").tag("Hebrew-first")
+        Text("English-first").tag("English-first")
+      }
+
+      Picker("Transcription speed", selection: $transcriptionSpeedMode) {
+        Text("Fast draft").tag("Fast draft")
+        Text("Balanced").tag("Balanced")
+        Text("Most accurate").tag("Most accurate")
+      }
+
+      Toggle("Show the floating recording indicator", isOn: $floatingBarEnabled)
+    } header: {
+      Text("Capture")
+    } footer: {
+      Text(
+        "Fast draft uses lighter local models when available. A language choice adds a hint while keeping bilingual detection on. The menu bar always shows recording and transcription progress, even with the indicator hidden."
+      )
+    }
+  }
+
+  private var permissionsSection: some View {
+    Section("Permissions") {
+      permissionRow(
+        title: "Microphone",
+        isGranted: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+        openAnchor: "Privacy_Microphone"
+      )
+      permissionRow(
+        title: "Screen Recording",
+        isGranted: CGPreflightScreenCaptureAccess(),
+        openAnchor: "Privacy_ScreenCapture"
+      )
+    }
+  }
+
+  private var speakerRecognitionSection: some View {
+    Section {
+      LabeledContent("Speaker separation") {
+        HStack(spacing: CepessaChrome.Space.s) {
+          if case .downloading(let progress) = speakerModels.state {
+            ProgressView(value: progress)
+              .frame(width: 92)
+            Text("\(Int((progress * 100).rounded()))%")
+              .monospacedDigit()
+              .foregroundStyle(.secondary)
+          } else {
+            Text(speakerModelStatus)
+              .foregroundStyle(.secondary)
+          }
+
+          switch speakerModels.state {
+          case .notInstalled:
+            Button("Install") { speakerModels.prepareIfNeeded() }
+          case .failed:
+            Button("Retry") { speakerModels.retry() }
+          case .downloading, .verifying, .ready:
+            EmptyView()
+          }
+        }
+      }
+
+      if case .failed(let message) = speakerModels.state {
+        Text(message)
+          .font(.caption)
+          .foregroundStyle(CepessaColors.warning)
+      }
+    } header: {
+      Text("Speaker Recognition")
+    } footer: {
+      Text(
+        "Cepessa downloads the local SpeakerKit Core ML models on demand from argmaxinc/speakerkit-coreml at pinned revision \(LocalSessionSpeakerModelContract.modelRevision). Meeting audio is never uploaded by this feature. Model attribution does not imply redistribution rights."
+      )
+    }
+  }
+
+  private var speakerModelStatus: String {
+    switch speakerModels.state {
+    case .notInstalled: return "Not installed"
+    case .downloading: return "Downloading"
+    case .verifying: return "Verifying"
+    case .ready: return "Ready for local diarization"
+    case .failed: return "Needs attention"
+    }
+  }
+
+  private var storageSection: some View {
+    Section {
+      storageRow(
+        title: "Sessions", path: storageModel.sessionsRoot, size: storageModel.sessionsSizeText)
+      storageRow(title: "Clips", path: storageModel.clipsRoot, size: storageModel.clipsSizeText)
+      storageRow(title: "Models", path: modelsRoot, size: nil)
+
+      LabeledContent("Total", value: storageModel.totalSizeText)
+
+      Button("Recalculate") { storageModel.refresh() }
+
+      if let cleanupMessage = storageModel.cleanupMessage {
+        Text(cleanupMessage)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
+      // Destructive actions live below a divider, are red, and are the only
+      // controls in the pane that open a confirmation.
+      Button("Delete All Sessions…", role: .destructive) { cleanupRequest = .sessions }
+        .disabled(sessionModel.isRecording || sessionModel.isTranscribing || clipModel.isRecording)
+        .help(
+          sessionModel.isRecording || sessionModel.isTranscribing || clipModel.isRecording
+            ? "Finish the active recording or transcription before deleting sessions."
+            : "Delete every local session after confirmation."
+        )
+      Button("Delete All Clips…", role: .destructive) { cleanupRequest = .clips }
+        .disabled(clipModel.isRecording)
+        .help(
+          clipModel.isRecording
+            ? "Stop the active clip recording before deleting clips."
+            : "Delete every local clip after confirmation."
+        )
+    } header: {
+      Text("Local Storage")
+    } footer: {
+      Text("Recordings, transcripts, clips, and attachments stay on this Mac.")
+    }
+  }
+
+  // MARK: - Rows
+
+  private func permissionRow(title: String, isGranted: Bool, openAnchor: String) -> some View {
+    LabeledContent(title) {
+      HStack(spacing: CepessaChrome.Space.s) {
+        if isGranted {
+          Text("Granted")
+            .foregroundStyle(.secondary)
+        } else {
+          Label {
+            Text("Not granted")
+              .foregroundStyle(CepessaColors.textPrimary)
+          } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+              .foregroundStyle(CepessaColors.warning)
+          }
+        }
+
+        Button("Open…") { openSystemSettings(anchor: openAnchor) }
+          .accessibilityLabel("Open \(title) privacy settings")
       }
     }
+    .accessibilityElement(children: .contain)
+    .accessibilityValue(isGranted ? "Granted" : "Not granted")
+  }
+
+  private func storageRow(title: String, path: URL, size: String?) -> some View {
+    LabeledContent {
+      HStack(spacing: CepessaChrome.Space.s) {
+        if let size {
+          Text(size)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+        }
+        Button {
+          NSWorkspace.shared.activateFileViewerSelecting([path])
+        } label: {
+          Image(systemName: "folder")
+        }
+        .buttonStyle(.borderless)
+        .help(path.path)
+        .accessibilityLabel("Reveal \(title) folder in Finder")
+      }
+    } label: {
+      Text(title)
+    }
+  }
+
+  // MARK: - Actions
+
+  private func performCleanup(_ request: CepessaStorageCleanupRequest) {
+    switch request {
+    case .sessions:
+      storageModel.clearSessions()
+      CepessaSessionsStore.shared.model.loadStoredSessions()
+    case .clips:
+      storageModel.clearClips()
+      clipModel.loadClips()
+    }
+    cleanupRequest = nil
   }
 
   private var modelsRoot: URL {
@@ -1950,158 +2063,7 @@ struct CepessaSessionsSettingsPage: View {
   }
 
   private var fileLayout: LocalMeetingFileLayout {
-    LocalMeetingFileLayout(
-      baseDirectory: FileManager.default.urls(
-        for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Cepessa", isDirectory: true)
-    )
-  }
-
-  private func settingsCard<Content: View>(title: String, @ViewBuilder content: () -> Content)
-    -> some View
-  {
-    VStack(alignment: .leading, spacing: 14) {
-      Text(title)
-        .scaledFont(size: 18, weight: .semibold)
-        .foregroundStyle(CepessaColors.textPrimary)
-
-      content()
-    }
-    .padding(20)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .cepessaPaper(radius: 16)
-  }
-
-  private func pickerRow(title: String, value: Binding<String>, options: [String]) -> some View {
-    HStack {
-      Text(title)
-        .scaledFont(size: 13)
-        .foregroundStyle(CepessaColors.textPrimary)
-
-      Spacer(minLength: 20)
-
-      CepessaToolbarMenu(
-        isOpen: Binding(
-          get: { openSettingsPickerTitle == title },
-          set: { openSettingsPickerTitle = $0 ? title : nil }
-        ),
-        alignment: .trailing,
-        label: {
-          HStack(spacing: 8) {
-            Text(value.wrappedValue)
-              .scaledFont(size: 12, weight: .semibold)
-              .foregroundStyle(CepessaColors.textPrimary)
-              .lineLimit(1)
-
-            Image(systemName: "chevron.down")
-              .scaledFont(size: 8.5, weight: .bold)
-              .foregroundStyle(CepessaColors.textTertiary)
-          }
-          .padding(.horizontal, 12)
-          .frame(width: 190, height: 40, alignment: .trailing)
-          .background(CepessaColors.backgroundRaised.opacity(0.72))
-          .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-          .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-              .stroke(CepessaColors.border.opacity(0.18), lineWidth: 1)
-          }
-        },
-        content: {
-          VStack(spacing: 3) {
-            ForEach(options, id: \.self) { option in
-              settingsMenuOption(title: option, isSelected: value.wrappedValue == option) {
-                value.wrappedValue = option
-                openSettingsPickerTitle = nil
-              }
-            }
-          }
-          .frame(width: 210)
-        }
-      )
-    }
-  }
-
-  private func settingsMenuOption(
-    title: String,
-    isSelected: Bool,
-    action: @escaping () -> Void
-  ) -> some View {
-    Button(action: action) {
-      HStack(spacing: 9) {
-        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-          .scaledFont(size: 12, weight: .semibold)
-          .foregroundStyle(isSelected ? CepessaColors.accentPrimary : CepessaColors.textTertiary)
-
-        Text(title)
-          .scaledFont(size: 12, weight: .semibold)
-          .foregroundStyle(CepessaColors.textPrimary)
-          .lineLimit(1)
-
-        Spacer(minLength: 0)
-      }
-      .padding(.horizontal, 10)
-      .padding(.vertical, 8)
-      .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
-      .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-    .buttonStyle(CepessaPressStyle(scale: 0.985, pressedBrightness: -0.01))
-    .accessibilityElement(children: .ignore)
-    .accessibilityLabel(title)
-    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
-  }
-
-  private func permissionRow(title: String, isGranted: Bool) -> some View {
-    HStack {
-      Label(title, systemImage: isGranted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-        .scaledFont(size: 13, weight: .medium)
-        .foregroundStyle(isGranted ? CepessaColors.textPrimary : CepessaColors.warning)
-
-      Spacer(minLength: 0)
-
-      Text(isGranted ? "Ready" : "Needs access")
-        .scaledFont(size: 11, weight: .semibold)
-        .foregroundStyle(isGranted ? CepessaColors.backgroundPrimary : Color.white)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(isGranted ? CepessaColors.success : CepessaColors.warning)
-        .clipShape(Capsule())
-    }
-  }
-
-  private func settingsAction(title: String, action: @escaping () -> Void) -> some View {
-    Button(action: action) {
-      Text(title)
-        .scaledFont(size: 12, weight: .semibold)
-        .foregroundStyle(CepessaColors.textPrimary)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(CepessaColors.backgroundSecondary.opacity(0.84))
-        .clipShape(Capsule())
-    }
-    .buttonStyle(CepessaPressStyle(scale: 0.975))
-  }
-
-  private func storageUsageRow(title: String, detail: String, size: String) -> some View {
-    HStack(alignment: .firstTextBaseline, spacing: 12) {
-      VStack(alignment: .leading, spacing: 3) {
-        Text(title)
-          .scaledFont(size: 13, weight: .semibold)
-          .foregroundStyle(CepessaColors.textPrimary)
-        Text(detail)
-          .scaledFont(size: 11)
-          .foregroundStyle(CepessaColors.textSecondary)
-          .lineLimit(1)
-          .truncationMode(.middle)
-          .textSelection(.enabled)
-      }
-      Spacer(minLength: 0)
-      Text(size)
-        .scaledFont(size: 13, weight: .semibold, design: .monospaced)
-        .foregroundStyle(CepessaColors.textPrimary)
-    }
-    .padding(12)
-    .background(CepessaColors.backgroundRaised.opacity(0.72))
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    LocalMeetingFileLayout(baseDirectory: LocalSessionStorageRoot.defaultBaseDirectory)
   }
 
   private func openSystemSettings(anchor: String) {

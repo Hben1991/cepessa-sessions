@@ -1,0 +1,123 @@
+{
+  "contentHash" : "6a637994f11f8d9d61c9465e8e1fa94f37e3d53d20140fe985c6de7a5a1cb75c",
+  "evidenceId" : "meeting:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee:run:11111111-2222-4333-8444-555555555555",
+  "parentContentHash" : null,
+  "quality" : {
+    "diarization" : "available",
+    "hasVerifiableTimestamps" : true,
+    "isComplete" : true,
+    "issues" : [],
+    "sourceSeparationPreserved" : true,
+    "speechCoverage" : null
+  },
+  "revision" : 1,
+  "run" : {
+    "completedAt" : "2026-07-26T10:05:00Z",
+    "createdAt" : "2026-07-26T10:00:00Z",
+    "detectedLanguages" : [
+      "en",
+      "he"
+    ],
+    "diarizationStatus" : "available",
+    "disposition" : "ready",
+    "engine" : "whisperKit",
+    "id" : "11111111-2222-4333-8444-555555555555",
+    "issues" : [],
+    "model" : {
+      "identifier" : "whisperKitMultilingualTurbo",
+      "modelBasename" : "small-bilingual-v1"
+    },
+    "requestedLanguage" : "auto"
+  },
+  "schemaVersion" : "meeting-evidence/v1",
+  "segments" : [
+    {
+      "activeText" : "שלום team",
+      "confidence" : null,
+      "endSeconds" : 1,
+      "id" : "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      "isTimed" : true,
+      "language" : "he",
+      "rawASRText" : "שלום team",
+      "sourceId" : "system-source",
+      "speakerId" : "remote-speaker",
+      "startSeconds" : 0,
+      "timestampProvenance" : "asr",
+      "uncertainty" : []
+    },
+    {
+      "activeText" : "sounds good",
+      "confidence" : null,
+      "endSeconds" : 2,
+      "id" : "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+      "isTimed" : true,
+      "language" : "en",
+      "rawASRText" : "sounds good",
+      "sourceId" : "microphone-source",
+      "speakerId" : "local-speaker",
+      "startSeconds" : 1,
+      "timestampProvenance" : "asr",
+      "uncertainty" : []
+    }
+  ],
+  "session" : {
+    "id" : "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "startedAt" : "2026-07-26T10:00:00Z",
+    "status" : "ready",
+    "title" : "Bilingual planning"
+  },
+  "sourceRef" : "cepessa-session://aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/transcript",
+  "sources" : [
+    {
+      "durationSeconds" : 2,
+      "fileName" : "mic-transcript.wav",
+      "id" : "microphone-source",
+      "integrity" : "available",
+      "issues" : [],
+      "kind" : "microphone",
+      "role" : "primary",
+      "sha256" : "20eaebffe1816e0ffa6f7f854f5ef4ea80d5349faaf0ce1fec1b713e7fde58fa"
+    },
+    {
+      "durationSeconds" : 2,
+      "fileName" : "system.wav",
+      "id" : "system-source",
+      "integrity" : "available",
+      "issues" : [],
+      "kind" : "system",
+      "role" : "primary",
+      "sha256" : "80a70ab25a7b91b00f2bfb39d4866900b00c9cc18cb0deee295a5460a5c0856c"
+    }
+  ],
+  "speakers" : [
+    {
+      "confidence" : null,
+      "id" : "remote-speaker",
+      "identityStatus" : "anonymous",
+      "kind" : "anonymous",
+      "label" : "Speaker 1"
+    },
+    {
+      "confidence" : null,
+      "id" : "local-speaker",
+      "identityStatus" : "confirmed",
+      "kind" : "local",
+      "label" : "You"
+    }
+  ],
+  "transcript" : {
+    "byteOffsets" : [
+      {
+        "segmentId" : "66666666-7777-4888-8999-aaaaaaaaaaaa",
+        "utf8Length" : 13,
+        "utf8Start" : 11
+      },
+      {
+        "segmentId" : "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+        "utf8Length" : 11,
+        "utf8Start" : 30
+      }
+    ],
+    "renderedText" : "Speaker 1: שלום team\nYou: sounds good\n"
+  }
+}

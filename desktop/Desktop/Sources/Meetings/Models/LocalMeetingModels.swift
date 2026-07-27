@@ -91,11 +91,13 @@ struct LocalSessionProcessingLogEntry: Identifiable, Equatable, Sendable {
 
 struct LocalSessionAudioArtifacts: Codable, Equatable, Sendable {
   var micFileName: String?
+  var micTranscriptFileName: String? = nil
   var systemFileName: String?
   var mixedFileName: String?
 
   static let empty = LocalSessionAudioArtifacts(
     micFileName: nil,
+    micTranscriptFileName: nil,
     systemFileName: nil,
     mixedFileName: nil
   )
@@ -144,6 +146,58 @@ struct LocalSessionTranscriptSegment: Identifiable, Codable, Equatable, Sendable
   var text: String
   var timestamp: Date
   var endTimestamp: Date? = nil
+  var speakerID: String? = nil
+  var source: LocalSessionAudioSourceKind? = nil
+  var identityStatus: LocalSessionSpeakerIdentityStatus? = nil
+  var uncertainty: [String] = []
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case speaker
+    case text
+    case timestamp
+    case endTimestamp
+    case speakerID
+    case source
+    case identityStatus
+    case uncertainty
+  }
+
+  init(
+    id: UUID,
+    speaker: String,
+    text: String,
+    timestamp: Date,
+    endTimestamp: Date? = nil,
+    speakerID: String? = nil,
+    source: LocalSessionAudioSourceKind? = nil,
+    identityStatus: LocalSessionSpeakerIdentityStatus? = nil,
+    uncertainty: [String] = []
+  ) {
+    self.id = id
+    self.speaker = speaker
+    self.text = text
+    self.timestamp = timestamp
+    self.endTimestamp = endTimestamp
+    self.speakerID = speakerID
+    self.source = source
+    self.identityStatus = identityStatus
+    self.uncertainty = uncertainty
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(UUID.self, forKey: .id)
+    speaker = try container.decode(String.self, forKey: .speaker)
+    text = try container.decode(String.self, forKey: .text)
+    timestamp = try container.decode(Date.self, forKey: .timestamp)
+    endTimestamp = try container.decodeIfPresent(Date.self, forKey: .endTimestamp)
+    speakerID = try container.decodeIfPresent(String.self, forKey: .speakerID)
+    source = try container.decodeIfPresent(LocalSessionAudioSourceKind.self, forKey: .source)
+    identityStatus =
+      try container.decodeIfPresent(LocalSessionSpeakerIdentityStatus.self, forKey: .identityStatus)
+    uncertainty = try container.decodeIfPresent([String].self, forKey: .uncertainty) ?? []
+  }
 }
 
 struct LocalSessionRecapSection: Identifiable, Codable, Equatable, Sendable {
@@ -288,7 +342,8 @@ struct LocalSessionDocumentChatMessage: Identifiable, Codable, Equatable, Sendab
     text = try container.decode(String.self, forKey: .text)
     createdAt = try container.decode(Date.self, forKey: .createdAt)
     sourceCitations =
-      try container.decodeIfPresent([LocalSessionDocumentSourceCitation].self, forKey: .sourceCitations)
+      try container.decodeIfPresent(
+        [LocalSessionDocumentSourceCitation].self, forKey: .sourceCitations)
       ?? []
   }
 }
@@ -388,19 +443,24 @@ struct LocalSessionDocumentEditProposal: Codable, Equatable, Sendable {
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     assistantMessage = try container.decode(String.self, forKey: .assistantMessage)
-    operation = try container.decodeIfPresent(LocalSessionDocumentOperation.self, forKey: .operation)
+    operation = try container.decodeIfPresent(
+      LocalSessionDocumentOperation.self, forKey: .operation)
     sessionTitle = try container.decodeIfPresent(String.self, forKey: .sessionTitle)
     documentMarkdown = try container.decodeIfPresent(String.self, forKey: .documentMarkdown)
-    recapPatch = try container.decodeIfPresent(LocalSessionDocumentRecapPatch.self, forKey: .recapPatch)
+    recapPatch = try container.decodeIfPresent(
+      LocalSessionDocumentRecapPatch.self, forKey: .recapPatch)
     transcriptPatches =
-      try container.decodeIfPresent([LocalSessionDocumentTranscriptPatch].self, forKey: .transcriptPatches)
+      try container.decodeIfPresent(
+        [LocalSessionDocumentTranscriptPatch].self, forKey: .transcriptPatches)
       ?? []
     speakerRenames =
-      try container.decodeIfPresent([LocalSessionDocumentSpeakerRename].self, forKey: .speakerRenames)
+      try container.decodeIfPresent(
+        [LocalSessionDocumentSpeakerRename].self, forKey: .speakerRenames)
       ?? []
     warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
     sourceCitations =
-      try container.decodeIfPresent([LocalSessionDocumentSourceCitation].self, forKey: .sourceCitations)
+      try container.decodeIfPresent(
+        [LocalSessionDocumentSourceCitation].self, forKey: .sourceCitations)
       ?? []
   }
 
@@ -517,6 +577,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
   var captureArtifacts: [LocalSessionCaptureArtifact]
   var audioArtifacts: LocalSessionAudioArtifacts
   var contentClassification: LocalSessionContentClassification?
+  var transcriptionEvidence: LocalSessionTranscriptionEvidenceSummary?
   var documentMarkdown: String?
   var documentChat: LocalSessionDocumentChat
 
@@ -540,6 +601,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     captureArtifacts: [LocalSessionCaptureArtifact] = [],
     audioArtifacts: LocalSessionAudioArtifacts,
     contentClassification: LocalSessionContentClassification? = nil,
+    transcriptionEvidence: LocalSessionTranscriptionEvidenceSummary? = nil,
     documentMarkdown: String? = nil,
     documentChat: LocalSessionDocumentChat = .empty
   ) {
@@ -553,6 +615,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     self.captureArtifacts = captureArtifacts
     self.audioArtifacts = audioArtifacts
     self.contentClassification = contentClassification
+    self.transcriptionEvidence = transcriptionEvidence
     self.documentMarkdown = documentMarkdown
     self.documentChat = documentChat
   }
@@ -569,6 +632,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     case captureArtifacts
     case audioArtifacts
     case contentClassification
+    case transcriptionEvidence
     case documentMarkdown
     case documentChat
   }
@@ -596,6 +660,9 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     contentClassification =
       try container.decodeIfPresent(
         LocalSessionContentClassification.self, forKey: .contentClassification)
+    transcriptionEvidence =
+      try container.decodeIfPresent(
+        LocalSessionTranscriptionEvidenceSummary.self, forKey: .transcriptionEvidence)
     documentMarkdown = try container.decodeIfPresent(String.self, forKey: .documentMarkdown)
     documentChat =
       try container.decodeIfPresent(LocalSessionDocumentChat.self, forKey: .documentChat)
@@ -615,6 +682,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     try container.encode(captureArtifacts, forKey: .captureArtifacts)
     try container.encode(audioArtifacts, forKey: .audioArtifacts)
     try container.encodeIfPresent(contentClassification, forKey: .contentClassification)
+    try container.encodeIfPresent(transcriptionEvidence, forKey: .transcriptionEvidence)
     try container.encodeIfPresent(documentMarkdown, forKey: .documentMarkdown)
     try container.encode(documentChat, forKey: .documentChat)
   }
@@ -804,7 +872,8 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     let sections = normalizedSections(for: recap)
     for section in sections {
       let generatedTitle = section.title.trimmingCharacters(in: .whitespacesAndNewlines)
-      let title = generatedTitle.isEmpty ? title(for: section.kind, language: language) : generatedTitle
+      let title =
+        generatedTitle.isEmpty ? title(for: section.kind, language: language) : generatedTitle
       lines.append("## \(sanitizedLine(title))")
       lines.append("")
 
@@ -901,7 +970,8 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     for recap: LocalSessionRecap,
     language: LocalSessionDocumentLanguage
   ) -> String {
-    let generatedTitle = recap.sections.first { $0.kind == .overview }?.title
+    let generatedTitle =
+      recap.sections.first { $0.kind == .overview }?.title
       .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     return generatedTitle.isEmpty ? title(for: .overview, language: language) : generatedTitle
   }
@@ -943,8 +1013,10 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
   }
 
   private static func shouldBuildEnglishRecapFromTranscript(_ session: LocalSession) -> Bool {
-    let sourceText = [session.documentMarkdown ?? "", session.recap.overview, session.transcriptText]
-      .joined(separator: " ")
+    let sourceText = [
+      session.documentMarkdown ?? "", session.recap.overview, session.transcriptText,
+    ]
+    .joined(separator: " ")
     guard sourceText.containsHebrewScript else { return false }
     return !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
@@ -963,15 +1035,19 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
       keyPoints.append(
         "The discussion focused on sharpening the product direction: the value it creates, the first use case to prove, and the business opportunity behind it."
       )
-      actionItems.append("Turn the product direction into a short list of concrete use cases and priorities.")
-      openQuestions.append("Which first use case should be proven before expanding the product scope?")
+      actionItems.append(
+        "Turn the product direction into a short list of concrete use cases and priorities.")
+      openQuestions.append(
+        "Which first use case should be proven before expanding the product scope?")
     }
 
     if signals.hasBusinessAgent {
       keyPoints.append(
         "A central thread was the need for a business owner to get a clear operational view instead of scattered information across calls, chats, dashboards, and financial tools."
       )
-      actionItems.append("Define the business-agent workflow around owner questions, available data, and expected outputs.")
+      actionItems.append(
+        "Define the business-agent workflow around owner questions, available data, and expected outputs."
+      )
       openQuestions.append("Which data points must the business agent answer reliably on day one?")
     }
 
@@ -979,51 +1055,65 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
       keyPoints.append(
         "The dashboard idea was framed around simple business health signals, including budget, cash-flow, and status indicators that should be easy to read."
       )
-      actionItems.append("Map the dashboard states into a small set of clear business-health indicators.")
+      actionItems.append(
+        "Map the dashboard states into a small set of clear business-health indicators.")
     }
 
     if signals.hasWebsiteRefresh {
       keyPoints.append(
         "The website conversation centered on refresh work, content updates, recommendations, and making the editing flow clearer."
       )
-      actionItems.append("Prepare a concise website update list covering content, recommendations, forms, and ownership.")
-      openQuestions.append("Which website updates are urgent, and which can wait for a later iteration?")
+      actionItems.append(
+        "Prepare a concise website update list covering content, recommendations, forms, and ownership."
+      )
+      openQuestions.append(
+        "Which website updates are urgent, and which can wait for a later iteration?")
     }
 
     if signals.hasWebflowDataFlow {
       keyPoints.append(
         "The Webflow, Make, Monday, hosting, and domain references point to a practical need to explain how information moves through the website stack."
       )
-      actionItems.append("Document the information flow between Webflow, Make, Monday, hosting, and related domain/security touchpoints.")
-      openQuestions.append("What information is stored or transferred at each step, and who owns the security answer?")
+      actionItems.append(
+        "Document the information flow between Webflow, Make, Monday, hosting, and related domain/security touchpoints."
+      )
+      openQuestions.append(
+        "What information is stored or transferred at each step, and who owns the security answer?")
     }
 
     if containsAny(corpus, ["גלילה", "scroll", "קופצת", "לאט", "איטי"]) {
       keyPoints.append(
         "The website discussion included scrolling behavior and performance issues that make the experience feel less controlled."
       )
-      actionItems.append("Reproduce the scrolling behavior and decide whether it is a performance issue, layout issue, or interaction issue.")
+      actionItems.append(
+        "Reproduce the scrolling behavior and decide whether it is a performance issue, layout issue, or interaction issue."
+      )
     }
 
     if containsAny(corpus, ["analytics", "אנליטיקס", "clarity", "mixpanel"]) {
       keyPoints.append(
         "Analytics came up as a way to understand real user behavior before making broader site decisions."
       )
-      actionItems.append("Choose the analytics setup and connect it before the next design or content pass.")
+      actionItems.append(
+        "Choose the analytics setup and connect it before the next design or content pass.")
     }
 
     if containsAny(corpus, ["coming soon", "סימולציות", "ראיונות", "interview simulation"]) {
       keyPoints.append(
         "The interview simulation area needs clearer status and copy, including the coming soon state."
       )
-      actionItems.append("Clarify the interview simulation section so users understand what is available now and what is coming later.")
+      actionItems.append(
+        "Clarify the interview simulation section so users understand what is available now and what is coming later."
+      )
     }
 
     if keyPoints.isEmpty {
       keyPoints.append(
         "The meeting raised practical follow-up topics, but the transcript does not provide a single stable theme strong enough to turn into a more specific brief."
       )
-      actionItems.append("Review the transcript once and convert only clearly supported items into a short work list.")
+      actionItems.append(
+        "Review the transcript once and convert only clearly supported items into a short work list."
+      )
       openQuestions.append("What is the one topic this meeting should drive forward?")
     }
 
@@ -1067,7 +1157,9 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
           kind: .nextSteps,
           language: .english,
           summary: "Recommended next move.",
-          bullets: ["Turn the useful points from the meeting into a short owner-based task list with priorities and a review date."]
+          bullets: [
+            "Turn the useful points from the meeting into a short owner-based task list with priorities and a review date."
+          ]
         ),
       ]
     )
@@ -1155,7 +1247,8 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
         "קובייה", "גלגל", "גלגול", "להתגנב", "לתקוף", "חץ", "מריק", "מיכאל",
         "מכשפה", "עץ",
       ]
-      let sceneSummary = roleplaySignals.contains(where: { corpus.contains($0) })
+      let sceneSummary =
+        roleplaySignals.contains(where: { corpus.contains($0) })
         ? "התוכן המרכזי הוא סצנת משחק תפקידים: גלגולי קובייה, ניסיון התגנבות ותקיפה, חץ שמחטיא ופוגע בעץ מושחת, והמשך איום סביב מריק, מיכאל והמכשפה."
         : "התוכן המרכזי הוא הנושא שנשמע מתוך הסרטון והנקודות הבולטות שעולות ממנו."
       let overview = "המסמך עוסק ב\(sourceDescription). \(sceneSummary)"
@@ -1289,31 +1382,44 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     var openQuestions: [String] = []
 
     if signals.hasProductDirection {
-      keyPoints.append("הדיון עסק בחידוד כיוון המוצר: איזה ערך הוא נותן, למי, ומה ההזדמנות העסקית שצריך להוכיח.")
+      keyPoints.append(
+        "הדיון עסק בחידוד כיוון המוצר: איזה ערך הוא נותן, למי, ומה ההזדמנות העסקית שצריך להוכיח.")
       actionItems.append("להפוך את כיוון המוצר לרשימת תרחישי שימוש ותעדוף קצרה.")
       openQuestions.append("איזה תרחיש שימוש ראשון צריך להוכיח לפני שמרחיבים את המוצר?")
     }
 
     if signals.hasBusinessAgent {
-      keyPoints.append("עלה צורך לתת לבעל העסק תמונת מצב ברורה מתוך מידע שמפוזר היום בין שיחות, צ'אט, דשבורדים וכלים פיננסיים.")
-      actionItems.append("להגדיר את זרימת העבודה של הסוכן העסקי: אילו שאלות הוא עונה עליהן, מאיפה מגיע המידע, ומה הפלט המצופה.")
+      keyPoints.append(
+        "עלה צורך לתת לבעל העסק תמונת מצב ברורה מתוך מידע שמפוזר היום בין שיחות, צ'אט, דשבורדים וכלים פיננסיים."
+      )
+      actionItems.append(
+        "להגדיר את זרימת העבודה של הסוכן העסקי: אילו שאלות הוא עונה עליהן, מאיפה מגיע המידע, ומה הפלט המצופה."
+      )
       openQuestions.append("אילו נתונים הסוכן העסקי חייב לדעת לענות עליהם כבר בגרסה הראשונה?")
     }
 
     if signals.hasDashboard {
-      keyPoints.append("הרעיון של דשבורד עסקי עלה סביב מדדי בריאות פשוטים כמו תקציב, תזרים וסימוני מצב שקל להבין מהר.")
+      keyPoints.append(
+        "הרעיון של דשבורד עסקי עלה סביב מדדי בריאות פשוטים כמו תקציב, תזרים וסימוני מצב שקל להבין מהר."
+      )
       actionItems.append("למפות את מצבי הדשבורד לרשימה קצרה של אינדיקציות עסקיות ברורות.")
     }
 
     if signals.hasWebsiteRefresh {
-      keyPoints.append("חלק מהדיון עסק ברענון האתר, עדכון תכנים והסבר ברור יותר של אופן ניהול המלצות או אזורי תוכן.")
-      actionItems.append("להכין רשימת עדכוני אתר קצרה: תכנים, המלצות, טפסים, דומיין ובעלות על כל משימה.")
+      keyPoints.append(
+        "חלק מהדיון עסק ברענון האתר, עדכון תכנים והסבר ברור יותר של אופן ניהול המלצות או אזורי תוכן."
+      )
+      actionItems.append(
+        "להכין רשימת עדכוני אתר קצרה: תכנים, המלצות, טפסים, דומיין ובעלות על כל משימה.")
       openQuestions.append("אילו עדכוני אתר דחופים עכשיו ואילו שייכים לאיטרציה מאוחרת יותר?")
     }
 
     if signals.hasWebflowDataFlow {
-      keyPoints.append("האזכורים של Webflow, Make, Monday, אחסון ודומיין מצביעים על צורך להסביר בצורה נקייה איך מידע עובר בתוך מערך האתר.")
-      actionItems.append("לתעד את זרימת המידע בין Webflow, Make, Monday, האחסון ונקודות הדומיין/אבטחה.")
+      keyPoints.append(
+        "האזכורים של Webflow, Make, Monday, אחסון ודומיין מצביעים על צורך להסביר בצורה נקייה איך מידע עובר בתוך מערך האתר."
+      )
+      actionItems.append(
+        "לתעד את זרימת המידע בין Webflow, Make, Monday, האחסון ונקודות הדומיין/אבטחה.")
       openQuestions.append("איזה מידע נשמר או עובר בכל שלב, ומי אחראי לתשובת האבטחה?")
     }
 
@@ -1358,7 +1464,9 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
           kind: .nextSteps,
           language: .hebrew,
           summary: "המשך מומלץ.",
-          bullets: ["להפוך את הנקודות החשובות לרשימת משימות קצרה עם בעלים, סדר עדיפויות ותאריך בדיקה."]
+          bullets: [
+            "להפוך את הנקודות החשובות לרשימת משימות קצרה עם בעלים, סדר עדיפויות ותאריך בדיקה."
+          ]
         ),
       ]
     )
@@ -1379,7 +1487,7 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
 
     let corpus =
       ([session.transcriptText, recap.overview]
-        + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
+      + recap.sections.flatMap { [$0.title, $0.summary] + $0.bullets })
       .joined(separator: " ")
       .lowercased()
     let signals = meetingTopicSignals(in: corpus)
@@ -1501,10 +1609,12 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     }
 
     guard !topics.isEmpty else {
-      return "הפגישה כללה דיון עבודה שדורש זיקוק למשימות המשך. לא זוהה נושא יחיד מספיק יציב, ולכן המסמך מתמקד רק בנקודות שנתמכות בבירור בפגישה."
+      return
+        "הפגישה כללה דיון עבודה שדורש זיקוק למשימות המשך. לא זוהה נושא יחיד מספיק יציב, ולכן המסמך מתמקד רק בנקודות שנתמכות בבירור בפגישה."
     }
 
-    return "הפגישה התמקדה ב\(topics.prefix(3).joined(separator: ", ")). התוצרים החשובים הם חידוד הכיוון, סגירת שאלות פתוחות והפיכת הנושאים למשימות עבודה ברורות."
+    return
+      "הפגישה התמקדה ב\(topics.prefix(3).joined(separator: ", ")). התוצרים החשובים הם חידוד הכיוון, סגירת שאלות פתוחות והפיכת הנושאים למשימות עבודה ברורות."
   }
 
   private static func englishOverview(for signals: MeetingTopicSignals) -> String {
@@ -1526,10 +1636,12 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     }
 
     guard !topics.isEmpty else {
-      return "The meeting covered practical follow-up work, but no single topic was stable enough to dominate the brief. The document keeps only points that are clearly supported by the session."
+      return
+        "The meeting covered practical follow-up work, but no single topic was stable enough to dominate the brief. The document keeps only points that are clearly supported by the session."
     }
 
-    return "The meeting focused on \(topics.prefix(3).joined(separator: ", ")). The useful outcomes are sharper direction, open questions to resolve, and follow-up work that can become clear tasks."
+    return
+      "The meeting focused on \(topics.prefix(3).joined(separator: ", ")). The useful outcomes are sharper direction, open questions to resolve, and follow-up work that can become clear tasks."
   }
 
   private struct MeetingTopicSignals {
@@ -1616,7 +1728,8 @@ struct LocalSessionRecapMarkdownDocument: Equatable, Sendable {
     session.transcriptSegments.compactMap { segment in
       let text = sanitizedLine(segment.text)
       guard !text.isEmpty else { return nil }
-      let speaker = sanitizedLine(segment.speaker).isEmpty ? "Speaker" : sanitizedLine(segment.speaker)
+      let speaker =
+        sanitizedLine(segment.speaker).isEmpty ? "Speaker" : sanitizedLine(segment.speaker)
       let offset = max(0, segment.timestamp.timeIntervalSince(session.startedAt))
       return "[\(timeString(for: offset))] \(speaker): \(text)"
     }

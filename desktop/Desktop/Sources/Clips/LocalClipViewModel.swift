@@ -1,6 +1,6 @@
+import AppKit
 import Combine
 import Foundation
-import AppKit
 import SwiftUI
 
 @MainActor
@@ -31,8 +31,7 @@ final class LocalClipViewModel: ObservableObject {
     store: LocalClipStore? = nil,
     clipFileLayout: LocalClipFileLayout = LocalClipFileLayout(),
     sessionFileLayout: LocalSessionFileLayout = LocalSessionFileLayout(
-      baseDirectory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Cepessa", isDirectory: true)),
+      baseDirectory: LocalSessionStorageRoot.defaultBaseDirectory),
     transcriptionService: any LocalSessionTranscribing = LocalMeetingTranscriptionService(),
     fileManager: FileManager = .default
   ) {
@@ -56,10 +55,23 @@ final class LocalClipViewModel: ObservableObject {
   }
 
   func loadClips() {
-    clips = store.loadClips()
+    clips = store.loadClips().map { storedClip in
+      guard storedClip.status == .recording || storedClip.status == .processing else {
+        return storedClip
+      }
+
+      var recovered = storedClip
+      recovered.status = .failed
+      recovered.endedAt = recovered.endedAt ?? Date()
+      recovered.errorMessage =
+        "This clip was interrupted before capture and transcription completed."
+      try? store.save(recovered)
+      return recovered
+    }
     if selectedClipID == nil {
       selectedClipID = clips.first?.id
     }
+    syncDrafts()
   }
 
   func selectClip(_ clipID: LocalClipManifest.ID) {
@@ -132,6 +144,11 @@ final class LocalClipViewModel: ObservableObject {
       statusMessage = "Recording CLIP. Speak while the screen is captured."
       startTimer(startedAt: clip.startedAt)
     } catch {
+      stopTimer()
+      stopScreenRecording()
+      if audioSession != nil {
+        _ = await audioRecorder.stopRecording()
+      }
       clip.status = .failed
       clip.errorMessage = error.localizedDescription
       upsertClip(clip)
@@ -162,13 +179,17 @@ final class LocalClipViewModel: ObservableObject {
       await transcribeClipAudio(clipID: clipID)
     } else {
       mutateClip(id: clipID) { clip in
-        clip.status = .ready
+        clip.status = .failed
         clip.errorMessage = "CLIP video was saved, but no audio transcript was available."
       }
     }
 
     audioSession = nil
-    statusMessage = "CLIP ready. Copy the agent prompt or connect through MCP."
+    if clip(for: clipID)?.status == .ready {
+      statusMessage = "CLIP ready. Copy the agent prompt or connect through MCP."
+    } else {
+      statusMessage = clip(for: clipID)?.errorMessage ?? "CLIP capture needs attention."
+    }
   }
 
   private func startScreenRecording(to videoURL: URL) throws {
@@ -189,7 +210,10 @@ final class LocalClipViewModel: ObservableObject {
   }
 
   private func copyAudioIfAvailable(from session: LocalSession, to clipID: UUID) {
-    guard let sourceURL = sessionFileLayout.existingAudioURL(for: session.id, artifacts: session.audioArtifacts, fileManager: fileManager) else {
+    guard
+      let sourceURL = sessionFileLayout.existingAudioURL(
+        for: session.id, artifacts: session.audioArtifacts, fileManager: fileManager)
+    else {
       return
     }
     let destinationURL = clipFileLayout.audioURL(for: clipID)
@@ -209,14 +233,15 @@ final class LocalClipViewModel: ObservableObject {
     let audioURL = clipFileLayout.audioURL(for: clipID)
     guard fileManager.fileExists(atPath: audioURL.path) else {
       mutateClip(id: clipID) { clip in
-        clip.status = .ready
+        clip.status = .failed
         clip.errorMessage = "CLIP video was saved, but audio was not available for transcription."
       }
       return
     }
 
     let settings = LocalSessionTranscriptionSettings.current()
-    let plan = sessionFileLayout.resolvedTranscriptionPlan(settings: settings, fileManager: fileManager)
+    let plan = sessionFileLayout.resolvedTranscriptionPlan(
+      settings: settings, fileManager: fileManager)
     await transcriptionService.warmUp(modelURL: plan.modelURL)
 
     do {
@@ -243,7 +268,7 @@ final class LocalClipViewModel: ObservableObject {
       }
     } catch {
       mutateClip(id: clipID) { clip in
-        clip.status = .ready
+        clip.status = .failed
         clip.errorMessage = "CLIP saved, but transcription failed. \(error.localizedDescription)"
       }
     }
@@ -280,33 +305,33 @@ final class LocalClipViewModel: ObservableObject {
     let transcript = clip.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
     let notes = clip.postNotes.trimmingCharacters(in: .whitespacesAndNewlines)
     return """
-    I recorded a Cepessa CLIP for you.
+      I recorded a Cepessa CLIP for you.
 
-    Connect to the Cepessa Sessions MCP server and call get_local_clip with this clip_id:
-    \(clip.id.uuidString)
+      Connect to the Cepessa Sessions MCP server and call get_local_clip with this clip_id:
+      \(clip.id.uuidString)
 
-    Use the returned paths to inspect:
-    - clip-video.mov for the screen recording
-    - transcript.json / transcript_segments for what I said
-    - notes.md / post_notes for extra context I added after recording
+      Use the returned paths to inspect:
+      - clip-video.mov for the screen recording
+      - transcript.json / transcript_segments for what I said
+      - notes.md / post_notes for extra context I added after recording
 
-    Local folder:
-    \(directory)
+      Local folder:
+      \(directory)
 
-    Title:
-    \(clip.title)
+      Title:
+      \(clip.title)
 
-    Intent:
-    \(clip.intent ?? "No explicit intent was written.")
+      Intent:
+      \(clip.intent ?? "No explicit intent was written.")
 
-    Post notes:
-    \(notes.isEmpty ? "No post notes yet." : notes)
+      Post notes:
+      \(notes.isEmpty ? "No post notes yet." : notes)
 
-    Transcript preview:
-    \(transcript.isEmpty ? "Transcript is not available yet." : transcript.truncated(maxLength: 1200))
+      Transcript preview:
+      \(transcript.isEmpty ? "Transcript is not available yet." : transcript.truncated(maxLength: 1200))
 
-    Please use both the video and transcript before deciding what I want changed.
-    """
+      Please use both the video and transcript before deciding what I want changed.
+      """
   }
 
   private func inferredClipTitle(for clip: LocalClipManifest) -> String {
@@ -317,7 +342,8 @@ final class LocalClipViewModel: ObservableObject {
       .components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
       .first { $0.count >= 12 } ?? transcript
-    let compact = source
+    let compact =
+      source
       .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
       .trimmingCharacters(in: .whitespacesAndNewlines)
       .truncated(maxLength: 64)
@@ -361,12 +387,12 @@ final class LocalClipViewModel: ObservableObject {
   }
 }
 
-private extension String {
-  var nilIfEmpty: String? {
+extension String {
+  fileprivate var nilIfEmpty: String? {
     isEmpty ? nil : self
   }
 
-  func truncated(maxLength: Int) -> String {
+  fileprivate func truncated(maxLength: Int) -> String {
     guard count > maxLength else { return self }
     let endIndex = index(startIndex, offsetBy: max(0, maxLength - 1))
     return String(self[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines) + "…"

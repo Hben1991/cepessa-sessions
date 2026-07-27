@@ -8,6 +8,26 @@ enum CepessaSessionStatusBarMode: Equatable {
   case transcribing
   case failed
   case transcriptReady
+
+  /// Recording remains the primary visual contract even when capture needs
+  /// attention. A warning can augment an active recording; it must never hide
+  /// the timer or replace the stop affordance.
+  static func resolve(
+    isRecording: Bool,
+    hasFault: Bool,
+    isTranscribing: Bool
+  ) -> Self {
+    if isRecording {
+      return .recording
+    }
+    if hasFault {
+      return .failed
+    }
+    if isTranscribing {
+      return .transcribing
+    }
+    return .idle
+  }
 }
 
 struct CepessaSessionStatusBarSnapshot: Equatable {
@@ -28,8 +48,45 @@ struct CepessaSessionStatusBarSnapshot: Equatable {
   )
 
   @MainActor
-  static func make(from model: LocalMeetingAppModel) -> Self {
-    if let error = model.recorderErrorMessage, !error.isEmpty {
+  static func make(from model: LocalMeetingAppModel, clipModel: LocalClipViewModel) -> Self {
+    if clipModel.isRecording {
+      return CepessaSessionStatusBarSnapshot(
+        mode: .recording,
+        title: "Clip recording \(clipModel.recordingDurationText)",
+        detail: "Capturing the screen and local audio for a clip.",
+        progress: nil,
+        canRetryLocal: false,
+        queueCount: model.processingQueue.count
+      )
+    }
+
+    let resolvedMode = CepessaSessionStatusBarMode.resolve(
+      isRecording: model.isRecording,
+      hasFault: model.recorderErrorMessage?.isEmpty == false,
+      isTranscribing: model.isTranscribing
+    )
+
+    if resolvedMode == .recording {
+      let captureWarning = model.recorderErrorMessage?.trimmingCharacters(
+        in: .whitespacesAndNewlines)
+      let detail: String
+      if let captureWarning, !captureWarning.isEmpty {
+        detail = "Capture needs attention: \(captureWarning)"
+      } else {
+        detail = "Capturing local audio. Stop recording to run the final transcript pass."
+      }
+
+      return CepessaSessionStatusBarSnapshot(
+        mode: .recording,
+        title: "Recording \(model.recordingDurationText)",
+        detail: detail,
+        progress: nil,
+        canRetryLocal: false,
+        queueCount: model.processingQueue.count
+      )
+    }
+
+    if resolvedMode == .failed, let error = model.recorderErrorMessage, !error.isEmpty {
       return CepessaSessionStatusBarSnapshot(
         mode: .failed,
         title: "Transcription needs attention",
@@ -40,18 +97,7 @@ struct CepessaSessionStatusBarSnapshot: Equatable {
       )
     }
 
-    if model.isRecording {
-      return CepessaSessionStatusBarSnapshot(
-        mode: .recording,
-        title: "Recording \(model.recordingDurationText)",
-        detail: "Capturing local audio. Stop recording to run the final transcript pass.",
-        progress: nil,
-        canRetryLocal: false,
-        queueCount: model.processingQueue.count
-      )
-    }
-
-    if model.isTranscribing {
+    if resolvedMode == .transcribing {
       return CepessaSessionStatusBarSnapshot(
         mode: .transcribing,
         title: model.processingStatusTitle ?? "Transcribing",
@@ -77,6 +123,9 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
   private weak var model: LocalMeetingAppModel?
   private var cancellables: Set<AnyCancellable> = []
   private var snapshot = CepessaSessionStatusBarSnapshot.idle
+  private var clipModel: LocalClipViewModel {
+    CepessaSessionsStore.shared.clipModel
+  }
 
   func connect(model: LocalMeetingAppModel) {
     if self.model !== model {
@@ -88,7 +137,12 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
   }
 
   func toggleRecording() {
+    guard !clipModel.isRecording else { return }
     model?.toggleRecording()
+  }
+
+  func stopClipRecording() {
+    clipModel.stopClip()
   }
 
   func openMainWindow() {
@@ -98,6 +152,10 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
   func retryLocalTranscription() {
     guard let sessionID = model?.selectedSessionID else { return }
     model?.retranscribeSession(id: sessionID)
+  }
+
+  func refreshAccessibilityState() {
+    refresh()
   }
 
   private func bind(to model: LocalMeetingAppModel) {
@@ -113,6 +171,9 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
       model.$processingStatusDetail.map { _ in () }.eraseToAnyPublisher(),
       model.$processingProgress.map { _ in () }.eraseToAnyPublisher(),
       model.$processingSnapshots.map { _ in () }.eraseToAnyPublisher(),
+      clipModel.$isRecording.map { _ in () }.eraseToAnyPublisher(),
+      clipModel.$recordingDurationText.map { _ in () }.eraseToAnyPublisher(),
+      clipModel.$statusMessage.map { _ in () }.eraseToAnyPublisher(),
     ]
 
     Publishers.MergeMany(publishers)
@@ -132,13 +193,54 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
 
   private func refresh() {
     guard let model else { return }
-    snapshot = CepessaSessionStatusBarSnapshot.make(from: model)
+    snapshot = CepessaSessionStatusBarSnapshot.make(from: model, clipModel: clipModel)
 
     if let button = statusItem?.button {
       button.image = statusImage(for: snapshot.mode)
       button.title = titleSuffix(for: snapshot)
       button.toolTip = "\(snapshot.title) - \(snapshot.detail)"
+      applyAccessibility(to: button, model: model)
     }
+  }
+
+  /// The status item is the only surface guaranteed to exist in every state —
+  /// including when the floating indicator has been hidden mid-recording — so
+  /// it has to speak the full situation, and the way back, on its own.
+  private func applyAccessibility(to button: NSStatusBarButton, model: LocalMeetingAppModel) {
+    if clipModel.isRecording {
+      let label = "Cepessa Sessions, clip recording"
+      button.setAccessibilityLabel(label)
+      button.setAccessibilityTitle(label)
+      button.setAccessibilityValue(
+        "Clip recording "
+          + CepessaSessionIndicatorAccessibility.compactSpokenTimer(
+            clipModel.recordingDurationText))
+      button.setAccessibilityHelp(CepessaSessionIndicatorAccessibility.statusItemAction)
+      return
+    }
+
+    let hasFault = model.recorderErrorMessage?.isEmpty == false
+    let indicatorHidden =
+      model.isRecording && !CepessaSessionFloatingBarController.shared.isBarVisible
+
+    let label = CepessaSessionIndicatorAccessibility.statusItemLabel(
+      isRecording: model.isRecording,
+      isTranscribing: model.isTranscribing,
+      hasFault: hasFault
+    )
+    button.setAccessibilityLabel(label)
+    button.setAccessibilityTitle(label)
+    button.setAccessibilityValue(
+      CepessaSessionIndicatorAccessibility.statusItemValue(
+        isRecording: model.isRecording,
+        isTranscribing: model.isTranscribing,
+        hasFault: hasFault,
+        timerText: model.recordingDurationText,
+        progress: snapshot.progress,
+        indicatorHidden: indicatorHidden
+      )
+    )
+    button.setAccessibilityHelp(CepessaSessionIndicatorAccessibility.statusItemAction)
   }
 
   // MARK: - Menu
@@ -161,13 +263,38 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
     menu.addItem(.separator())
 
     let isRecording = model?.isRecording == true
-    let record = NSMenuItem(
-      title: isRecording ? "Stop Recording" : "Start Recording",
-      action: #selector(recordMenuItem),
-      keyEquivalent: ""
-    )
-    record.target = self
-    menu.addItem(record)
+    let isClipRecording = clipModel.isRecording
+
+    // A hidden indicator must never become a dead end: while capture is live
+    // the way back sits at the top of the menu, not buried under it.
+    if isRecording && !CepessaSessionFloatingBarController.shared.isBarVisible {
+      let reveal = NSMenuItem(
+        title: "Show Recording Indicator",
+        action: #selector(toggleBarMenuItem),
+        keyEquivalent: ""
+      )
+      reveal.target = self
+      menu.addItem(reveal)
+      menu.addItem(.separator())
+    }
+
+    if isClipRecording {
+      let stopClip = NSMenuItem(
+        title: "Stop Clip Recording",
+        action: #selector(stopClipMenuItem),
+        keyEquivalent: ""
+      )
+      stopClip.target = self
+      menu.addItem(stopClip)
+    } else {
+      let record = NSMenuItem(
+        title: isRecording ? "Stop Recording" : "Start Recording",
+        action: #selector(recordMenuItem),
+        keyEquivalent: ""
+      )
+      record.target = self
+      menu.addItem(record)
+    }
 
     if snapshot.mode == .failed && snapshot.canRetryLocal {
       let retry = NSMenuItem(
@@ -214,13 +341,15 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
     menu.addItem(.separator())
 
     let barVisible = CepessaSessionFloatingBarController.shared.isBarVisible
-    let toggleBar = NSMenuItem(
-      title: barVisible ? "Hide Floating Bar" : "Show Floating Bar",
-      action: #selector(toggleBarMenuItem),
-      keyEquivalent: ""
-    )
-    toggleBar.target = self
-    menu.addItem(toggleBar)
+    if !isRecording || barVisible {
+      let toggleBar = NSMenuItem(
+        title: barVisible ? "Hide Recording Indicator" : "Show Recording Indicator",
+        action: #selector(toggleBarMenuItem),
+        keyEquivalent: ""
+      )
+      toggleBar.target = self
+      menu.addItem(toggleBar)
+    }
 
     let settings = NSMenuItem(
       title: "Settings…", action: #selector(settingsMenuItem), keyEquivalent: ",")
@@ -237,6 +366,10 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
 
   @objc private func recordMenuItem() {
     toggleRecording()
+  }
+
+  @objc private func stopClipMenuItem() {
+    stopClipRecording()
   }
 
   @objc private func retryMenuItem() {
@@ -284,7 +417,8 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
     case .idle:
       return ""
     case .recording:
-      return " \(snapshot.title.replacingOccurrences(of: "Recording ", with: ""))"
+      let raw = snapshot.title.split(separator: " ").last.map(String.init) ?? snapshot.title
+      return " \(CepessaSessionIndicatorTimer.compactText(from: raw))"
     case .transcribing:
       return snapshot.progress.map { " \(Int(($0 * 100).rounded()))%" } ?? " ..."
     case .failed:

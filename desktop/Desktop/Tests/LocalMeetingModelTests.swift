@@ -825,20 +825,23 @@ final class LocalMeetingAppModelTests: XCTestCase {
     }
   }
 
-  func testDefaultBaseDirectoryPointsAtApplicationSupportMeetings() {
-    let model = LocalMeetingAppModel()
-    let mirror = Mirror(reflecting: model)
-
-    guard let fileLayout = mirror.descendant("fileLayout") as? LocalMeetingFileLayout else {
-      XCTFail("Expected LocalMeetingAppModel to keep its resolved file layout.")
-      return
-    }
-
+  func testProductionBaseDirectoryPointsAtApplicationSupportCepessa() {
     let expectedBaseDirectory = fileManager.urls(
       for: .applicationSupportDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("Cepessa", isDirectory: true)
 
-    XCTAssertEqual(fileLayout.baseDirectory, expectedBaseDirectory)
+    XCTAssertEqual(LocalSessionStorageRoot.productionBaseDirectory, expectedBaseDirectory)
+  }
+
+  func testDefaultBaseDirectoryIsIsolatedDuringTests() {
+    let resolvedBaseDirectory = LocalSessionStorageRoot.defaultBaseDirectory
+    let expectedPrefix = fileManager.temporaryDirectory.appendingPathComponent(
+      "CepessaSessionsTests-\(ProcessInfo.processInfo.processIdentifier)",
+      isDirectory: true
+    )
+
+    XCTAssertEqual(resolvedBaseDirectory, expectedPrefix)
+    XCTAssertNotEqual(resolvedBaseDirectory, LocalSessionStorageRoot.productionBaseDirectory)
   }
 
   func testInitLoadsStoredSessionsNewestFirstAndSelectsTopSession() throws {
@@ -866,6 +869,59 @@ final class LocalMeetingAppModelTests: XCTestCase {
     XCTAssertEqual(model.sessions.map(\.id), [newerSession.id, olderSession.id])
     XCTAssertEqual(model.selectedSessionID, newerSession.id)
     XCTAssertEqual(model.selectedSession?.title, "Newer")
+  }
+
+  @MainActor
+  func testSpeakerRenameNeverLeaksIntoPersistedSessionAndUndoRestoresEvidenceLabel() throws {
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let sessionID = UUID()
+    let speakerID = "stable-speaker-1"
+    var session = makeSession(
+      id: sessionID,
+      startedAt: Date(timeIntervalSince1970: 2_500),
+      status: .ready,
+      title: "Base title",
+      segments: [
+        .init(
+          id: UUID(),
+          speaker: "Speaker 1",
+          text: "Original evidence words.",
+          timestamp: Date(timeIntervalSince1970: 2_501),
+          endTimestamp: Date(timeIntervalSince1970: 2_502),
+          speakerID: speakerID,
+          source: .system,
+          identityStatus: .anonymous
+        )
+      ]
+    )
+    session.transcriptionEvidence = .init(
+      runID: "run-1",
+      revision: 1,
+      disposition: .ready,
+      contentHash: "immutable-content-hash",
+      parentContentHash: nil,
+      runFileName: "missing-test-envelope.json",
+      outboxFileName: "outbox.json",
+      issues: []
+    )
+    try store.save(session)
+    let model = LocalMeetingAppModel(store: store, fileLayout: layout)
+
+    XCTAssertTrue(model.renameSpeaker(speakerID: speakerID, to: "Maya"))
+    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Maya")
+    XCTAssertTrue(model.updateSessionTitle("Updated title"))
+
+    let afterTitleSave = try XCTUnwrap(store.loadSessions().first)
+    XCTAssertEqual(afterTitleSave.title, "Updated title")
+    XCTAssertEqual(afterTitleSave.transcriptSegments.first?.speaker, "Speaker 1")
+    XCTAssertEqual(afterTitleSave.transcriptSegments.first?.identityStatus, .anonymous)
+
+    XCTAssertTrue(model.undoLatestSpeakerRename(speakerID: speakerID))
+    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Speaker 1")
+    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.identityStatus, .anonymous)
+    XCTAssertEqual(store.loadSessions().first?.transcriptSegments.first?.speaker, "Speaker 1")
   }
 
   func testInitNormalizesInterruptedSessionsToFailed() throws {
@@ -1515,14 +1571,10 @@ final class LocalMeetingAppModelTests: XCTestCase {
       at: layout.sessionDirectory(for: sessionID),
       withIntermediateDirectories: true
     )
-    try Data([
-      0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00,
-      0x57, 0x41, 0x56, 0x45, 0x66, 0x6D, 0x74, 0x20,
-      0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
-      0x80, 0x3E, 0x00, 0x00, 0x00, 0x7D, 0x00, 0x00,
-      0x02, 0x00, 0x10, 0x00, 0x64, 0x61, 0x74, 0x61,
-      0x00, 0x00, 0x00, 0x00,
-    ]).write(to: layout.mixedAudioURL(for: sessionID))
+    try writeMonoPCM16Wav(
+      to: layout.mixedAudioURL(for: sessionID),
+      samples: Array(repeating: 1_000, count: 16_000)
+    )
 
     let transcriptionService = StubLocalSessionTranscriptionService(
       result: LocalSessionTranscriptionResult(
@@ -1547,14 +1599,15 @@ final class LocalMeetingAppModelTests: XCTestCase {
     }
 
     XCTAssertEqual(model.selectedSessionID, sessionID)
-    XCTAssertEqual(model.selectedSession?.status, .ready)
+    XCTAssertEqual(model.selectedSession?.status, .failed)
+    XCTAssertEqual(model.selectedSession?.transcriptionEvidence?.disposition, .degraded)
     XCTAssertEqual(model.processingQueue.count, 1)
     XCTAssertEqual(model.processingQueue.first?.id, sessionID)
     XCTAssertEqual(model.processingQueue.first?.phase, .transcribing)
     XCTAssertEqual(transcriptionService.receivedAudioURLs, [layout.mixedAudioURL(for: sessionID)])
   }
 
-  func testRetranscriptionLabelsSegmentsFromMicAndSystemEnergy() async throws {
+  func testRetranscriptionDoesNotClaimSpeakerSeparationWithoutDiarization() async throws {
     let layout = LocalMeetingFileLayout(
       baseDirectory: tempRootURL.appendingPathComponent("Meetings", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
@@ -1566,6 +1619,7 @@ final class LocalMeetingAppModelTests: XCTestCase {
       title: "Speaker recovery",
       audioArtifacts: .init(
         micFileName: "mic.wav",
+        micTranscriptFileName: "mic-transcript.wav",
         systemFileName: "system.wav",
         mixedFileName: "mixed.wav"
       )
@@ -1577,6 +1631,10 @@ final class LocalMeetingAppModelTests: XCTestCase {
     )
     try writeMonoPCM16Wav(
       to: layout.micAudioURL(for: sessionID),
+      samples: makeDominantSourceSamples(firstSecondAmplitude: 12_000, secondSecondAmplitude: 120)
+    )
+    try writeMonoPCM16Wav(
+      to: layout.micTranscriptAudioURL(for: sessionID),
       samples: makeDominantSourceSamples(firstSecondAmplitude: 12_000, secondSecondAmplitude: 120)
     )
     try writeMonoPCM16Wav(
@@ -1607,12 +1665,14 @@ final class LocalMeetingAppModelTests: XCTestCase {
 
     model.retranscribeSession(id: sessionID)
 
-    await waitUntil("source-aware speakers are applied") {
-      model.selectedSession?.transcriptSegments.count == 2
+    await waitUntil("fallback transcript is applied") {
+      model.selectedSession?.transcriptSegments.count == 2 && !model.isTranscribing
     }
 
     XCTAssertEqual(
-      model.selectedSession?.transcriptSegments.map(\.speaker), ["You", "Remote speaker"])
+      model.selectedSession?.transcriptSegments.map(\.speaker), ["Speaker 1", "Speaker 1"])
+    XCTAssertEqual(model.selectedSession?.status, .failed)
+    XCTAssertEqual(model.selectedSession?.transcriptionEvidence?.disposition, .degraded)
   }
 
   // Retained as historical coverage for the removed document-chat surface.

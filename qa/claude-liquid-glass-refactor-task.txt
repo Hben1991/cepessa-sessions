@@ -1,0 +1,86 @@
+Refactor the entire reachable Cepessa Sessions macOS desktop UI into a genuinely minimalist, premium Liquid Glass design.
+
+You are the sole implementation writer in this isolated worktree:
+/private/tmp/cepessa-meeting-brain-worktree
+
+The user explicitly wants Claude Opus 5 to perform this design refactor.
+
+Product outcome
+---------------
+- The app must feel like a quiet, native, high-end macOS 26 utility rather than a dense custom dashboard.
+- Use native Liquid Glass APIs on macOS 26 where they improve hierarchy and interaction.
+- Provide solid/material fallbacks for earlier supported macOS versions and for Reduce Transparency.
+- Preserve full light/dark support, Increase Contrast, Reduce Motion, keyboard navigation, and VoiceOver.
+- Prefer semantic system colors and typography. Remove unnecessary hardcoded whites/blacks and decorative chrome.
+- Keep controls compact for pointer use. Do not turn the app into an iOS layout.
+- Preserve standard title bars, traffic lights, menus, toolbar behavior, and window resizing.
+- Preserve the functional recording, transcription, Clips, Settings, evidence, storage, and file-layout contracts unless a visual fix requires a tightly scoped adjustment.
+
+Reachable product surfaces in scope
+-----------------------------------
+1. Accessory launch and status item.
+2. Floating recording indicator and its deliberate control tray.
+3. Sessions transcript reading window, toolbar, empty states, timeline, and image preview.
+4. Clips list/composer/inspector/empty/recording/processing states.
+5. Reachable Settings capture, permissions, storage, and destructive-action presentation.
+6. Shared visual tokens, buttons, cards, materials, spacing, and typography used by those surfaces.
+
+Do not spend time redesigning unreachable legacy workspace, recap/chat, or attachment-deck source unless a shared component requires a small compatibility edit.
+
+Recording indicator contract
+----------------------------
+The user rejects both the installed 356x64 panel and the current 208x36 source lozenge as too large and busy.
+
+Implement the Claude-selected micro-lozenge direction:
+- Idle visual footprint: 22x22 circle.
+- Healthy recording under one hour: approximately 66x22.
+- Content at rest: one state ring plus an advancing monospaced timer. No REC label.
+- Remove the separate green health dot, waveform, chevron, pinned-hover dashboard, and redundant state labels.
+- Healthy state should not display a success color. Absence of warning means healthy.
+- Encode partial/failure through ring shape or a single warning glyph, with color only as confirmation.
+- Pointer proximity may alter opacity only. Do not change geometry merely because the pointer passes nearby.
+- A deliberate click opens a compact approximately 220x30 control tray.
+- Stop must remain reachable from the tray, a deliberate pointer path, context menu, and existing status-menu action.
+- Do not expose capture/attachment controls at rest.
+- Preserve the existing accessibility identifiers where practical.
+- The menu-bar status item must have a meaningful accessibility label, value, and action in every state.
+- Hidden-during-recording behavior must leave an obvious reversible status path.
+
+Design quality bar
+------------------
+- Use one coherent visual system across Sessions, Clips, Settings, status item, and floating indicator.
+- Use glass sparingly for navigation, toolbars, transient control surfaces, and grouped interactive controls—not as a blur over every card.
+- Avoid generic dashboard card grids, giant headings, gradients for decoration, excessive borders, and pill-on-pill nesting.
+- Establish a clear 8pt-based spacing rhythm with compact 22-28pt controls.
+- Favor whitespace, typographic hierarchy, and one restrained accent over ornamental chrome.
+- Main content must remain readable over glass; transcript text should use stable opaque reading surfaces when needed.
+- Destructive storage actions must look dangerous and require deliberate confirmation in the UI. Do not delete any real data while testing.
+
+Safety and scope contract
+-------------------------
+- Work only in the isolated worktree.
+- Do not touch /Applications/Sessions.app or its running process.
+- Do not start a production recording.
+- Do not delete, move, rewrite, or inspect private recording contents.
+- Do not edit the QA workbook, QA builder, output reports, MCP, backend, mobile, credentials, signing configuration, account state, or external services.
+- Do not commit, push, merge, release, install, publish, or change user/global Claude or app configuration.
+- Do not add package dependencies unless absolutely necessary; prefer native frameworks.
+- Preserve existing uncommitted transcription/evidence work.
+
+Implementation and proof
+------------------------
+- Inspect the current reachable SwiftUI/AppKit source before editing.
+- Make the refactor in bounded, reviewable files.
+- Add or update tests for geometry, state, accessibility labels, and any changed interaction reducer.
+- Run swift format on changed Swift files.
+- Run focused tests, then the full Swift suite if focused tests pass.
+- Do not claim visual success from compilation alone.
+
+Finish with:
+1. Files changed.
+2. Design decisions and removed visual clutter.
+3. Tests run and exact results.
+4. Remaining failures or unverified visual states.
+5. Worktree path.
+
+Leave final visual QA, integration, installation, commits, and release to Codex and Ben.

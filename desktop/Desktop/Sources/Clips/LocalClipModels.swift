@@ -46,8 +46,7 @@ struct LocalClipFileLayout {
   }
 
   static var defaultBaseDirectory: URL {
-    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-      .appendingPathComponent("Cepessa", isDirectory: true)
+    LocalSessionStorageRoot.defaultBaseDirectory
       .appendingPathComponent("Clips", isDirectory: true)
   }
 
