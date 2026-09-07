@@ -106,9 +106,11 @@ def write_ready_envelope(
     envelope_session_status: str = "ready",
     quality_complete: bool = True,
     quality_timestamps: bool = True,
-    quality_source_separation: bool = True,
+    quality_source_separation: bool | None = None,
+    quality_speech_coverage: float | None = None,
     microphone_sha: str | None = "1" * 64,
     system_sha: str | None = "2" * 64,
+    imported: bool = False,
     active_text: str = "נסגור את ה-roadmap ונשלח design review מחר",
     stale_session_text: str = "stale mutable transcript",
     corrupt_hash: bool = False,
@@ -124,6 +126,44 @@ def write_ready_envelope(
     rendered_text = f"Dana: {active_text}\n"
     prefix_length = len("Dana: ".encode())
     source_ref = f"cepessa-session://{session_id.lower()}/transcript"
+    sources = [
+        {
+            "id": "77777777-7777-4777-8777-777777777777",
+            "kind": "microphone",
+            "fileName": "mic.wav",
+            "role": "primary",
+            "integrity": "available",
+            "durationSeconds": 30,
+            "sha256": microphone_sha,
+            "issues": [],
+        },
+        {
+            "id": source_id,
+            "kind": "system",
+            "fileName": "system.wav",
+            "role": "primary",
+            "integrity": "available",
+            "durationSeconds": 30,
+            "sha256": system_sha,
+            "issues": [],
+        },
+    ]
+    if imported:
+        sources = [
+            {
+                "id": source_id,
+                "kind": "imported",
+                "fileName": "imported.wav",
+                "role": "primary",
+                "integrity": "available",
+                "durationSeconds": 30,
+                "sha256": "3" * 64,
+                "issues": [],
+            }
+        ]
+    if quality_source_separation is None:
+        quality_source_separation = not imported
+
     envelope = {
         "schemaVersion": "meeting-evidence/v1",
         "evidenceId": f"meeting:{session_id}:run:{run_id}",
@@ -149,28 +189,7 @@ def write_ready_envelope(
             "diarizationStatus": diarization_status,
             "issues": [],
         },
-        "sources": [
-            {
-                "id": "77777777-7777-4777-8777-777777777777",
-                "kind": "microphone",
-                "fileName": "mic.wav",
-                "role": "primary",
-                "integrity": "available",
-                "durationSeconds": 30,
-                "sha256": microphone_sha,
-                "issues": [],
-            },
-            {
-                "id": source_id,
-                "kind": "system",
-                "fileName": "system.wav",
-                "role": "primary",
-                "integrity": "available",
-                "durationSeconds": 30,
-                "sha256": system_sha,
-                "issues": [],
-            },
-        ],
+        "sources": sources,
         "speakers": [
             {
                 "id": speaker_id,
@@ -208,7 +227,7 @@ def write_ready_envelope(
         },
         "quality": {
             "isComplete": quality_complete,
-            "speechCoverage": None,
+            "speechCoverage": quality_speech_coverage,
             "hasVerifiableTimestamps": quality_timestamps,
             "sourceSeparationPreserved": quality_source_separation,
             "diarization": diarization_status,
@@ -233,6 +252,7 @@ def write_ready_envelope(
         "transcriptSegments": [
             {"id": "stale-segment", "speaker": "Eve", "text": stale_session_text}
         ],
+        "audioArtifacts": {"importedFileName": "imported.wav"} if imported else {},
         "transcriptionEvidence": {
             "runID": run_id,
             "revision": revision,
@@ -254,6 +274,27 @@ def write_ready_envelope(
         "segment_id": segment_id,
         "speaker_id": speaker_id,
     }
+
+
+def replace_fixture_envelope(
+    fixture: dict,
+    envelope: dict,
+    *,
+    rehash: bool = True,
+) -> str:
+    if rehash:
+        envelope["contentHash"] = canonical_full_evidence_hash(envelope)
+    envelope_bytes = json.dumps(
+        envelope, ensure_ascii=False, sort_keys=True, indent=2
+    ).encode()
+    fixture["run_path"].write_bytes(envelope_bytes)
+    fixture["outbox_path"].write_bytes(envelope_bytes)
+    session = json.loads(fixture["session_path"].read_text(encoding="utf-8"))
+    session["transcriptionEvidence"]["contentHash"] = envelope["contentHash"]
+    fixture["session_path"].write_text(
+        json.dumps(session, ensure_ascii=False), encoding="utf-8"
+    )
+    return envelope["contentHash"]
 
 
 def test_search_supports_hebrew_english_and_exact_citations(tmp_path):
@@ -285,6 +326,182 @@ def test_search_supports_hebrew_english_and_exact_citations(tmp_path):
     }
     assert index.search("stale mutable transcript")["matches"] == []
     assert str(tmp_path) not in json.dumps(result, ensure_ascii=False)
+
+
+def test_explicit_imported_evidence_is_indexed_searched_and_returned(tmp_path):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(
+        index.sessions_root,
+        imported=True,
+        quality_speech_coverage=0.9834,
+        active_text="verified imported audio transcript",
+    )
+
+    status = index.refresh()
+    search = index.search("imported audio")
+    evidence = index.evidence(SESSION_UUID)
+
+    assert status["sessions"] == 1
+    assert search["citation_count"] == 1
+    assert search["matches"][0]["citation"]["source_kind"] == "imported"
+    assert search["matches"][0]["citation"]["content_hash"] == fixture["content_hash"]
+    assert evidence["session"]["content_hash"] == fixture["content_hash"]
+    assert evidence["segments"][0]["citation"]["source_kind"] == "imported"
+
+
+@pytest.mark.parametrize("missing_field", ["sha256", "durationSeconds"])
+def test_imported_evidence_requires_hash_and_duration(tmp_path, missing_field):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(
+        index.sessions_root,
+        imported=True,
+        quality_speech_coverage=0.98,
+    )
+    envelope = json.loads(fixture["outbox_path"].read_text(encoding="utf-8"))
+    envelope["sources"][0][missing_field] = None
+    replace_fixture_envelope(fixture, envelope)
+
+    status = index.refresh()
+
+    assert status["sessions"] == 0
+    assert status["not_ready"] == 1
+
+
+def test_imported_evidence_requires_one_present_source(tmp_path):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(
+        index.sessions_root,
+        imported=True,
+        quality_speech_coverage=0.98,
+    )
+    envelope = json.loads(fixture["outbox_path"].read_text(encoding="utf-8"))
+    envelope["sources"] = []
+    replace_fixture_envelope(fixture, envelope)
+
+    status = index.refresh()
+
+    assert status["sessions"] == 0
+    assert status["not_ready"] == 1
+
+
+def test_tampered_imported_evidence_is_rejected(tmp_path):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(
+        index.sessions_root,
+        imported=True,
+        quality_speech_coverage=0.98,
+    )
+    envelope = json.loads(fixture["outbox_path"].read_text(encoding="utf-8"))
+    envelope["sources"][0]["durationSeconds"] = 29
+    replace_fixture_envelope(fixture, envelope, rehash=False)
+
+    status = index.refresh()
+
+    assert status["sessions"] == 0
+    assert status["corrupt_or_unreadable"] == 1
+
+
+def test_imported_segment_timing_must_fit_verified_source_duration(tmp_path):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(
+        index.sessions_root,
+        imported=True,
+        quality_speech_coverage=0.98,
+    )
+    envelope = json.loads(fixture["outbox_path"].read_text(encoding="utf-8"))
+    envelope["sources"][0]["durationSeconds"] = 10
+    replace_fixture_envelope(fixture, envelope)
+
+    status = index.refresh()
+
+    assert status["sessions"] == 0
+    assert status["not_ready"] == 1
+
+
+def test_imported_evidence_requires_primary_role(tmp_path):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(
+        index.sessions_root,
+        imported=True,
+        quality_speech_coverage=0.98,
+    )
+    envelope = json.loads(fixture["outbox_path"].read_text(encoding="utf-8"))
+    envelope["sources"][0]["role"] = "secondary"
+    replace_fixture_envelope(fixture, envelope)
+
+    status = index.refresh()
+
+    assert status["sessions"] == 0
+    assert status["not_ready"] == 1
+
+
+def test_imported_evidence_rejects_mixed_or_additional_sources(tmp_path):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(
+        index.sessions_root,
+        imported=True,
+        quality_speech_coverage=0.98,
+    )
+    envelope = json.loads(fixture["outbox_path"].read_text(encoding="utf-8"))
+    envelope["sources"].append(
+        {
+            "id": "88888888-8888-4888-8888-888888888888",
+            "kind": "mixed",
+            "fileName": "mixed.wav",
+            "role": "primary",
+            "integrity": "available",
+            "durationSeconds": 30,
+            "sha256": "8" * 64,
+            "issues": [],
+        }
+    )
+    replace_fixture_envelope(fixture, envelope)
+
+    status = index.refresh()
+
+    assert status["sessions"] == 0
+    assert status["not_ready"] == 1
+
+
+def test_relabelled_incomplete_capture_is_not_accepted_as_imported(tmp_path):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(index.sessions_root)
+    envelope = json.loads(fixture["outbox_path"].read_text(encoding="utf-8"))
+    source = envelope["sources"][1]
+    source["kind"] = "imported"
+    source["fileName"] = "imported.wav"
+    envelope["sources"] = [source]
+    envelope["quality"]["sourceSeparationPreserved"] = False
+    envelope["quality"]["speechCoverage"] = 0.98
+    replace_fixture_envelope(fixture, envelope)
+
+    status = index.refresh()
+
+    assert status["sessions"] == 0
+    assert status["not_ready"] == 1
+
+
+@pytest.mark.parametrize(
+    ("coverage", "source_separation"),
+    [(None, False), (0.899999, False), (0.98, True)],
+)
+def test_imported_evidence_requires_verified_coverage_and_truthful_separation(
+    tmp_path,
+    coverage,
+    source_separation,
+):
+    index = index_for(tmp_path)
+    write_ready_envelope(
+        index.sessions_root,
+        imported=True,
+        quality_speech_coverage=coverage,
+        quality_source_separation=source_separation,
+    )
+
+    status = index.refresh()
+
+    assert status["sessions"] == 0
+    assert status["not_ready"] == 1
 
 
 def test_exact_s1_physical_fixture_is_discovered_from_global_full_envelope(tmp_path):
