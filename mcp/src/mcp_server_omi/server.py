@@ -85,6 +85,8 @@ DEFAULT_CEPESSA_SESSIONS_ROOT = (
 )
 DEFAULT_CEPESSA_CLIPS_ROOT = Path.home() / "Library/Application Support/Cepessa/Clips"
 MAX_LOCAL_JSON_BYTES = 32 * 1024 * 1024
+GENERATED_SESSION_PACKAGE_DIRECTORY = "Exports"
+GENERATED_SESSION_PACKAGE_NAMES = ("session-package.md", "session-package.json")
 LOCAL_ID_PATTERN = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
 )
@@ -292,7 +294,14 @@ class ListLocalSessionFiles(BaseModel):
 class UpdateLocalSessionFields(BaseModel):
     session_id: str = Field(description="The local Cepessa session ID to update.")
     fields: dict[str, Any] = Field(
-        description="Top-level JSON fields to merge into session.json. This enables current and future app-backed session features."
+        description=(
+            "Top-level JSON fields to merge into session.json. User-editable fields "
+            "include title, titleOrigin, recap, documentMarkdown, documentChat, and "
+            "future user metadata. Capture and transcription-owned fields such as "
+            "status, timestamps, transcriptSegments, captureArtifacts, "
+            "audioArtifacts, transcriptionEvidence, and latestTranscriptionAttempt "
+            "are rejected when changed."
+        )
     )
     sessions_root: Optional[str] = Field(
         description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
@@ -718,6 +727,40 @@ def _write_local_session(session_json_path: Path, session: dict) -> None:
                 pass
 
 
+def _invalidate_generated_session_packages(session_json_path: Path) -> None:
+    """Remove only the desktop-generated package caches before metadata changes."""
+    exports_directory = session_json_path.parent / GENERATED_SESSION_PACKAGE_DIRECTORY
+    try:
+        exports_stat = exports_directory.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(exports_stat.st_mode) or not stat.S_ISDIR(exports_stat.st_mode):
+        raise LocalSessionPathError(
+            f"Generated package directory is unsafe: {exports_directory}"
+        )
+
+    for name in GENERATED_SESSION_PACKAGE_NAMES:
+        cache_path = exports_directory / name
+        try:
+            cache_stat = cache_path.lstat()
+        except FileNotFoundError:
+            continue
+        if (
+            stat.S_ISLNK(cache_stat.st_mode)
+            or not stat.S_ISREG(cache_stat.st_mode)
+            or cache_stat.st_nlink != 1
+        ):
+            raise LocalSessionPathError(
+                f"Generated package cache is unsafe: {cache_path}"
+            )
+        try:
+            cache_path.unlink()
+        except OSError as error:
+            raise LocalSessionPathError(
+                f"Cannot invalidate generated package cache: {cache_path}"
+            ) from error
+
+
 def _local_session_paths(sessions_root: Optional[str] = None) -> list[Path]:
     root = _validated_local_root(
         _local_sessions_root(sessions_root), "sessions", allow_missing=True
@@ -862,6 +905,12 @@ def _validate_json_value(value: Any, path: str = "value") -> None:
     raise LocalSessionValidationError(
         f"{path} contains a value that cannot be represented as JSON."
     )
+
+
+def _json_values_equal(left: Any, right: Any) -> bool:
+    return json.dumps(
+        left, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ) == json.dumps(right, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _optional(value: dict, key: str, path: str) -> Any:
@@ -1183,6 +1232,11 @@ def _validate_local_session(session: Any, session_id: Optional[str] = None) -> d
         _validate_transcription_evidence(
             session.get("transcriptionEvidence"), "session.transcriptionEvidence"
         )
+    if session.get("latestTranscriptionAttempt") is not None:
+        _validate_transcription_evidence(
+            session.get("latestTranscriptionAttempt"),
+            "session.latestTranscriptionAttempt",
+        )
     if session.get("documentMarkdown") is not None:
         _expect_string(session.get("documentMarkdown"), "session.documentMarkdown")
     if session.get("documentChat") is not None:
@@ -1260,6 +1314,141 @@ def _clip_artifact_path(
     return _validated_regular_file(path, label=f"CLIP.{field}")
 
 
+def _read_clip_artifact_prefix(path: Path, limit: int = 64 * 1024) -> bytes:
+    try:
+        file_stat = path.lstat()
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            return b""
+        with path.open("rb") as file:
+            return file.read(limit)
+    except OSError:
+        return b""
+
+
+def _has_valid_wav_container(path: Path) -> bool:
+    size = path.stat().st_size
+    if size < 44:
+        return False
+    data = _read_clip_artifact_prefix(path)
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return False
+    declared_size = int.from_bytes(data[4:8], "little") + 8
+    if declared_size > size:
+        return False
+
+    offset = 12
+    has_format = False
+    has_audio = False
+    while offset + 8 <= len(data) and offset + 8 <= declared_size:
+        chunk_name = data[offset : offset + 4]
+        chunk_size = int.from_bytes(data[offset + 4 : offset + 8], "little")
+        chunk_end = offset + 8 + chunk_size
+        if chunk_end > declared_size:
+            return False
+        if chunk_name == b"fmt " and chunk_size >= 16:
+            has_format = True
+        if chunk_name == b"data" and chunk_size > 0:
+            has_audio = True
+        offset = chunk_end + (chunk_size % 2)
+    return has_format and has_audio
+
+
+def _has_valid_mov_container(path: Path) -> bool:
+    size = path.stat().st_size
+    if size < 16:
+        return False
+    data = _read_clip_artifact_prefix(path, limit=32)
+    if len(data) < 12 or data[4:8] != b"ftyp":
+        return False
+    atom_size = int.from_bytes(data[:4], "big")
+    if atom_size == 1:
+        if len(data) < 16:
+            return False
+        atom_size = int.from_bytes(data[8:16], "big")
+    return atom_size >= 16 and atom_size <= size
+
+
+def _valid_clip_transcript_artifact(path: Path, clip_id: str) -> bool:
+    try:
+        transcript = _read_local_session(path)
+        if transcript.get("id") != clip_id:
+            return False
+        segments = transcript.get("segments")
+        if not isinstance(segments, list):
+            return False
+        for index, segment in enumerate(segments):
+            segment_path = f"CLIP.transcript.segments[{index}]"
+            segment = _expect_object(segment, segment_path)
+            _validate_local_id(segment.get("id"), f"{segment_path}.id")
+            _expect_number(segment.get("startOffset"), f"{segment_path}.startOffset")
+            _expect_number(segment.get("endOffset"), f"{segment_path}.endOffset")
+            _expect_string(segment.get("text"), f"{segment_path}.text")
+        _expect_string(transcript.get("text"), "CLIP.transcript.text")
+        return True
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _clip_artifact_readiness(clip: dict, clip_directory: Path, clip_id: str) -> dict:
+    issues = []
+    artifacts = (
+        (
+            "video",
+            _clip_artifact_path(
+                clip_directory,
+                clip.get("videoFileName"),
+                "videoFileName",
+                "clip-video.mov",
+            ),
+        ),
+        (
+            "audio",
+            _clip_artifact_path(
+                clip_directory,
+                clip.get("audioFileName"),
+                "audioFileName",
+                "clip-audio.wav",
+            ),
+        ),
+        (
+            "transcript",
+            _clip_artifact_path(
+                clip_directory,
+                clip.get("transcriptFileName"),
+                "transcriptFileName",
+                "transcript.json",
+            ),
+        ),
+    )
+    for kind, path in artifacts:
+        try:
+            _validated_regular_file(path, label=f"CLIP {kind}")
+            if path.stat().st_size == 0:
+                raise LocalSessionPathError(f"CLIP {kind} is empty: {path}")
+            if kind == "video" and path.suffix.lower() == ".mov":
+                if not _has_valid_mov_container(path):
+                    raise LocalSessionValidationError(
+                        "CLIP video container is incomplete"
+                    )
+            elif kind == "audio" and path.suffix.lower() == ".wav":
+                if not _has_valid_wav_container(path):
+                    raise LocalSessionValidationError(
+                        "CLIP audio container is incomplete"
+                    )
+            elif kind == "transcript" and not _valid_clip_transcript_artifact(
+                path, clip_id
+            ):
+                raise LocalSessionValidationError("CLIP transcript artifact is invalid")
+        except (OSError, ValueError, json.JSONDecodeError):
+            issues.append(f"{kind} artifact is missing or invalid")
+
+    return {
+        "ready": not issues,
+        "issues": issues,
+        "media_playability": "unverified",
+    }
+
+
 def _session_segments(session: dict) -> list[dict]:
     segments = session.get("transcriptSegments")
     if segments is None:
@@ -1307,6 +1496,15 @@ def _clip_transcript_segments(clip: dict) -> list[dict]:
 
 def _clip_summary(clip: dict, clip_json_path: Path) -> dict:
     segments = _clip_transcript_segments(clip)
+    artifact_readiness = _clip_artifact_readiness(
+        clip, clip_json_path.parent, clip_json_path.parent.name
+    )
+    stored_status = clip.get("status")
+    effective_status = (
+        "failed"
+        if stored_status == "ready" and not artifact_readiness["ready"]
+        else stored_status
+    )
     video_path = _clip_artifact_path(
         clip_json_path.parent,
         clip.get("videoFileName"),
@@ -1323,7 +1521,9 @@ def _clip_summary(clip: dict, clip_json_path: Path) -> dict:
         "title": str(clip.get("title") or "Untitled CLIP"),
         "started_at": str(clip.get("startedAt") or ""),
         "ended_at": clip.get("endedAt"),
-        "status": clip.get("status"),
+        "status": effective_status,
+        "stored_status": stored_status,
+        "artifact_readiness": artifact_readiness,
         "intent": clip.get("intent"),
         "transcript_segment_count": len(segments),
         "transcript_preview": preview[:500],
@@ -1433,9 +1633,21 @@ def get_local_clip(clip_id: str, clips_root: Optional[str] = None) -> dict:
     clip = _read_local_session(clip_json_path)
     _validate_clip(clip, clip_id)
     clip_directory = clip_json_path.parent
+    artifact_readiness = _clip_artifact_readiness(clip, clip_directory, clip_id)
+    stored_status = clip.get("status")
+    effective_status = (
+        "failed"
+        if stored_status == "ready" and not artifact_readiness["ready"]
+        else stored_status
+    )
+    effective_clip = dict(clip)
+    effective_clip["status"] = effective_status
     return {
         "id": str(clip.get("id") or clip_json_path.parent.name),
-        "clip": clip,
+        "clip": effective_clip,
+        "status": effective_status,
+        "stored_status": stored_status,
+        "artifact_readiness": artifact_readiness,
         "transcript_segments": _clip_transcript_segments(clip),
         "post_notes": clip.get("postNotes") or "",
         "clip_directory": str(clip_directory),
@@ -1604,6 +1816,7 @@ def update_local_session_title(
         candidate["titleOrigin"] = "user"
         _validate_local_session(candidate, session_id)
         summary = _session_summary(candidate, session_json_path)
+        _invalidate_generated_session_packages(session_json_path)
         _write_local_session(session_json_path, candidate)
         summary["old_title"] = old_title
         summary["new_title"] = new_title
@@ -1620,12 +1833,21 @@ def update_local_session_fields(
         raise ValueError("fields must be a non-empty object.")
 
     _validate_json_value(fields, "fields")
-    protected_fields = {"id"}
+    if "id" in fields:
+        raise ValueError("Cannot update protected session field(s): id")
+
+    protected_fields = {
+        "status",
+        "startedAt",
+        "endedAt",
+        "transcriptSegments",
+        "segments",
+        "captureArtifacts",
+        "audioArtifacts",
+        "transcriptionEvidence",
+        "latestTranscriptionAttempt",
+    }
     blocked = sorted(protected_fields.intersection(fields.keys()))
-    if blocked:
-        raise ValueError(
-            f"Cannot update protected session field(s): {', '.join(blocked)}"
-        )
 
     session_json_path = _resolve_local_session_json(session_id, sessions_root)
     with _local_session_lock(session_json_path):
@@ -1635,7 +1857,18 @@ def update_local_session_fields(
         for key, value in fields.items():
             candidate[key] = value
         _validate_local_session(candidate, session_id)
+        changed_protected = [
+            key
+            for key in blocked
+            if key not in session or not _json_values_equal(session[key], fields[key])
+        ]
+        if changed_protected:
+            raise ValueError(
+                "Cannot update protected session field(s): "
+                + ", ".join(changed_protected)
+            )
         summary = _session_summary(candidate, session_json_path)
+        _invalidate_generated_session_packages(session_json_path)
         _write_local_session(session_json_path, candidate)
         summary["updated_fields"] = sorted(fields.keys())
         summary["session_json_path"] = str(session_json_path)
@@ -1736,7 +1969,7 @@ async def serve(uid: str | None) -> None:
             ),
             Tool(
                 name=OmiTools.UPDATE_LOCAL_SESSION_FIELDS,
-                description="Atomically merge top-level JSON fields into a local Cepessa session.json file for app-backed current and future features.",
+                description="Atomically merge user-editable top-level JSON fields into a local Cepessa session.json file. Title, recap, document notes, document chat, and future user metadata are supported; capture and transcription-owned fields are rejected when changed.",
                 inputSchema=UpdateLocalSessionFields.model_json_schema(),
             ),
             Tool(

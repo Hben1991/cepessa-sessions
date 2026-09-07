@@ -7,6 +7,7 @@ enum LocalSessionStoreError: LocalizedError, Equatable {
     case missingSession(URL)
     case unsafeMetadata(URL)
     case invalidMetadata(URL)
+    case unsafeGeneratedCache(URL)
     case editConflict([String])
 
     var errorDescription: String? {
@@ -21,6 +22,8 @@ enum LocalSessionStoreError: LocalizedError, Equatable {
             return "The session metadata is unavailable or unsafe."
         case .invalidMetadata:
             return "This session's saved metadata is invalid."
+        case .unsafeGeneratedCache:
+            return "A generated session cache is unavailable or unsafe."
         case .editConflict:
             return "This session changed elsewhere. Refresh it and try again."
         }
@@ -150,6 +153,7 @@ final class LocalSessionStore {
                 data = incomingData
             }
 
+            try invalidateGeneratedPackages(for: session.id)
             try writeMetadata(data, to: metadataURL)
             let savedSession = try decoder.decode(LocalSession.self, from: data)
             try promptPackageBuilder.writePackage(for: savedSession)
@@ -191,6 +195,62 @@ final class LocalSessionStore {
         }
         defer { _ = flock(descriptor, LOCK_UN) }
         return try body()
+    }
+
+    private func repairCurrentPackage(for sessionID: UUID) throws -> LocalSession {
+        try withSessionLock(for: sessionID) {
+            let metadataURL = fileLayout.metadataURL(for: sessionID)
+            guard let metadataData = try existingMetadataData(at: metadataURL) else {
+                throw LocalSessionStoreError.missingSession(metadataURL)
+            }
+
+            let latestSession: LocalSession
+            do {
+                latestSession = try decoder.decode(LocalSession.self, from: metadataData)
+            } catch {
+                throw LocalSessionStoreError.invalidMetadata(metadataURL)
+            }
+            guard latestSession.id == sessionID else {
+                throw LocalSessionStoreError.invalidMetadata(metadataURL)
+            }
+
+            try promptPackageBuilder.writePackage(for: latestSession)
+            return latestSession
+        }
+    }
+
+    private func invalidateGeneratedPackages(for sessionID: UUID) throws {
+        let exportsDirectory = fileLayout.exportsDirectory(for: sessionID)
+        var exportsStatus = stat()
+        guard lstat(exportsDirectory.path, &exportsStatus) == 0 else {
+            guard errno == ENOENT else {
+                throw LocalSessionStoreError.unsafeGeneratedCache(exportsDirectory)
+            }
+            return
+        }
+        guard (exportsStatus.st_mode & S_IFMT) == S_IFDIR else {
+            throw LocalSessionStoreError.unsafeGeneratedCache(exportsDirectory)
+        }
+
+        let generatedPackageURLs = [
+            fileLayout.promptPackageMarkdownURL(for: sessionID),
+            fileLayout.promptPackageJSONURL(for: sessionID),
+        ]
+        for packageURL in generatedPackageURLs {
+            var packageStatus = stat()
+            guard lstat(packageURL.path, &packageStatus) == 0 else {
+                guard errno == ENOENT else {
+                    throw LocalSessionStoreError.unsafeGeneratedCache(packageURL)
+                }
+                continue
+            }
+            guard (packageStatus.st_mode & S_IFMT) == S_IFREG, packageStatus.st_nlink == 1 else {
+                throw LocalSessionStoreError.unsafeGeneratedCache(packageURL)
+            }
+            guard unlink(packageURL.path) == 0 else {
+                throw LocalSessionStoreError.unsafeGeneratedCache(packageURL)
+            }
+        }
     }
 
     private func validateDirectory(_ url: URL) throws {
@@ -295,7 +355,19 @@ final class LocalSessionStore {
                     let data = try Data(contentsOf: resolvedMetadataURL)
                     let session = try decoder.decode(LocalSession.self, from: data)
                     if directory.standardizedFileURL.path == fileLayout.sessionsDirectory.standardizedFileURL.path {
-                        try? promptPackageBuilder.writePackage(for: session)
+                        do {
+                            return try repairCurrentPackage(for: session.id)
+                        } catch {
+                            loadWarnings.append(
+                                "A saved session loaded, but its generated package could not be refreshed."
+                            )
+                            NSLog(
+                                "LocalSessionStore: Loaded session %@ without refreshing its generated package (%@)",
+                                session.id.uuidString,
+                                error.localizedDescription
+                            )
+                            return session
+                        }
                     }
                     return session
                 } catch {

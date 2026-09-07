@@ -91,6 +91,53 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
     )
   }
 
+  func testLoadRepairsGeneratedPackagesFromLatestMetadata() throws {
+    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let base = makeSession()
+    try store.save(base)
+
+    let markdownURL = layout.promptPackageMarkdownURL(for: base.id)
+    let jsonURL = layout.promptPackageJSONURL(for: base.id)
+    try Data("stale markdown".utf8).write(to: markdownURL)
+    try Data("stale json".utf8).write(to: jsonURL)
+
+    var latest = base
+    latest.title = "Latest metadata"
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try encoder.encode(latest).write(to: layout.metadataURL(for: base.id), options: .atomic)
+
+    let loaded = try XCTUnwrap(store.loadSessions().first { $0.id == base.id })
+    XCTAssertEqual(loaded.title, "Latest metadata")
+    let markdown = try String(contentsOf: markdownURL, encoding: .utf8)
+    let packageJSON = try String(contentsOf: jsonURL, encoding: .utf8)
+    XCTAssertTrue(markdown.contains("Latest metadata"))
+    XCTAssertTrue(packageJSON.contains("Latest metadata"))
+    XCTAssertFalse(markdown.contains("stale markdown"))
+    XCTAssertFalse(packageJSON.contains("stale json"))
+  }
+
+  func testLoadKeepsSessionWhenGeneratedPackageRepairFails() throws {
+    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let base = makeSession()
+    try store.save(base)
+
+    let exportsDirectory = layout.exportsDirectory(for: base.id)
+    try fileManager.removeItem(at: exportsDirectory)
+    try Data("unavailable".utf8).write(to: exportsDirectory)
+
+    let loaded = try XCTUnwrap(store.loadSessions().first { $0.id == base.id })
+    XCTAssertEqual(loaded, base)
+    XCTAssertTrue(
+      store.loadWarnings.contains {
+        $0.contains("generated package could not be refreshed")
+      }
+    )
+  }
+
   func testBaselineMergePromotesLegacySessionIntoCurrentSessions() throws {
     let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)

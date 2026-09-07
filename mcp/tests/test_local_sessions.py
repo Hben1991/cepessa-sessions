@@ -54,6 +54,13 @@ def write_session(root, session_id, title, started_at, segments, extra=None):
 def write_clip(root, clip_id, title, started_at, segments=None, extra=None):
     clip_dir = root / clip_id
     clip_dir.mkdir(parents=True)
+    normalized_segments = [
+        {
+            **segment,
+            "id": segment.get("id") or fixture_id(f"{clip_id}:segment:{index}"),
+        }
+        for index, segment in enumerate(segments or [])
+    ]
     payload = {
         "id": clip_id,
         "title": title,
@@ -65,18 +72,44 @@ def write_clip(root, clip_id, title, started_at, segments=None, extra=None):
         "audioFileName": "clip-audio.wav",
         "transcriptFileName": "transcript.json",
         "notesFileName": "notes.md",
-        "transcriptSegments": [
-            {
-                **segment,
-                "id": segment.get("id") or fixture_id(f"{clip_id}:segment:{index}"),
-            }
-            for index, segment in enumerate(segments or [])
-        ],
+        "transcriptSegments": normalized_segments,
         "postNotes": "Additional post-recording context.",
     }
     if extra:
         payload.update(extra)
     (clip_dir / "clip.json").write_text(json.dumps(payload), encoding="utf-8")
+    wav_body = (
+        b"WAVE"
+        + b"fmt "
+        + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little")
+        + (1).to_bytes(2, "little")
+        + (8_000).to_bytes(4, "little")
+        + (16_000).to_bytes(4, "little")
+        + (2).to_bytes(2, "little")
+        + (16).to_bytes(2, "little")
+        + b"data"
+        + (2).to_bytes(4, "little")
+        + b"\0\0"
+    )
+    (clip_dir / "clip-video.mov").write_bytes(
+        (16).to_bytes(4, "big") + b"ftypqt  \0\0\0\0"
+    )
+    (clip_dir / "clip-audio.wav").write_bytes(
+        b"RIFF" + (len(wav_body)).to_bytes(4, "little") + wav_body
+    )
+    (clip_dir / "transcript.json").write_text(
+        json.dumps(
+            {
+                "id": clip_id,
+                "title": title,
+                "segments": normalized_segments,
+                "text": "\n".join(segment["text"] for segment in normalized_segments),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (clip_dir / "notes.md").write_text(payload["postNotes"], encoding="utf-8")
 
 
 def test_list_local_sessions_returns_recent_transcript_summaries(tmp_path):
@@ -273,7 +306,13 @@ def test_list_local_clip_files_returns_agent_packet_inventory(tmp_path):
 
     assert result["id"] == CLIP_ONE_ID
     relative_paths = [file["relative_path"] for file in result["files"]]
-    assert relative_paths == ["clip-video.mov", "clip.json", "notes.md"]
+    assert relative_paths == [
+        "clip-audio.wav",
+        "clip-video.mov",
+        "clip.json",
+        "notes.md",
+        "transcript.json",
+    ]
 
 
 def test_update_local_session_title_writes_session_json(tmp_path):

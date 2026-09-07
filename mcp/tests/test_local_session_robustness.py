@@ -32,6 +32,7 @@ ATTACHMENT_ID = identifier("attachment")
 CAPTURE_ID = identifier("capture")
 CHAT_MESSAGE_ID = identifier("chat-message")
 CITATION_ID = identifier("citation")
+CLIP_ID = identifier("clip-artifact-readiness")
 
 
 def session_payload(
@@ -67,6 +68,66 @@ def write_manifest(
 
 def read_bytes(path: Path) -> bytes:
     return path.read_bytes()
+
+
+def write_ready_clip(root: Path, clip_id: str = CLIP_ID) -> Path:
+    clip_directory = root / clip_id
+    clip_directory.mkdir(parents=True)
+    segment = {
+        "id": SEGMENT_ID,
+        "startOffset": 0,
+        "endOffset": 1,
+        "text": "A valid clip transcript",
+    }
+    payload = {
+        "id": clip_id,
+        "title": "Ready clip",
+        "startedAt": "2026-09-07T08:00:00Z",
+        "endedAt": "2026-09-07T08:00:02Z",
+        "status": "ready",
+        "intent": "Review the capture",
+        "videoFileName": "clip-video.mov",
+        "audioFileName": "clip-audio.wav",
+        "transcriptFileName": "transcript.json",
+        "notesFileName": "notes.md",
+        "transcriptSegments": [segment],
+        "postNotes": "Notes",
+        "errorMessage": None,
+    }
+    (clip_directory / "clip.json").write_text(json.dumps(payload), encoding="utf-8")
+    (clip_directory / "clip-video.mov").write_bytes(
+        (16).to_bytes(4, "big") + b"ftypqt  \0\0\0\0"
+    )
+    wav_body = (
+        b"WAVE"
+        + b"fmt "
+        + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little")
+        + (1).to_bytes(2, "little")
+        + (8_000).to_bytes(4, "little")
+        + (16_000).to_bytes(4, "little")
+        + (2).to_bytes(2, "little")
+        + (16).to_bytes(2, "little")
+        + b"data"
+        + (2).to_bytes(4, "little")
+        + b"\0\0"
+    )
+    (clip_directory / "clip-audio.wav").write_bytes(
+        b"RIFF" + len(wav_body).to_bytes(4, "little") + wav_body
+    )
+    (clip_directory / "transcript.json").write_text(
+        json.dumps(
+            {
+                "id": clip_id,
+                "title": "Ready clip",
+                "segments": [segment],
+                "text": segment["text"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (clip_directory / "notes.md").write_text("Notes", encoding="utf-8")
+    return clip_directory
 
 
 def test_invalid_update_is_rejected_before_write_and_healthy_search_survives(tmp_path):
@@ -113,6 +174,33 @@ def test_invalid_nested_candidate_never_changes_manifest(
     before = read_bytes(path)
 
     with pytest.raises(LocalSessionValidationError, match=error_fragment):
+        update_local_session_fields(SESSION_ID, {field: value}, str(tmp_path))
+
+    assert read_bytes(path) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status", "ready"),
+        ("startedAt", "2026-09-07T08:05:00Z"),
+        ("endedAt", None),
+        ("transcriptSegments", []),
+        ("captureArtifacts", []),
+        ("audioArtifacts", {}),
+        ("transcriptionEvidence", None),
+        ("latestTranscriptionAttempt", None),
+    ],
+)
+def test_generic_update_rejects_capture_and_transcription_owned_mutations(
+    tmp_path, field, value
+):
+    payload = session_payload()
+    payload["status"] = "recording"
+    path = write_manifest(tmp_path, payload=payload)
+    before = read_bytes(path)
+
+    with pytest.raises(ValueError, match=f"{field}"):
         update_local_session_fields(SESSION_ID, {field: value}, str(tmp_path))
 
     assert read_bytes(path) == before
@@ -222,6 +310,10 @@ def test_valid_swift_shaped_update_preserves_unknown_extensions(tmp_path):
         "newExtension": {"nested": {"preserve": True}},
     }
 
+    stored_initial = json.loads(path.read_text(encoding="utf-8"))
+    for key in ("captureArtifacts", "audioArtifacts", "transcriptionEvidence"):
+        stored_initial[key] = update[key]
+    path.write_text(json.dumps(stored_initial), encoding="utf-8")
     result = update_local_session_fields(SESSION_ID, update, str(tmp_path))
     assert result["title"] == "Robustness fixture"
     stored = json.loads(path.read_text(encoding="utf-8"))
@@ -300,6 +392,37 @@ def test_title_update_marks_user_origin_only_after_validating_candidate(tmp_path
     stored = json.loads(path.read_text(encoding="utf-8"))
     assert stored["title"] == "Renamed"
     assert stored["titleOrigin"] == "user"
+
+
+def test_session_updates_invalidate_only_generated_package_caches(tmp_path):
+    path = write_manifest(tmp_path)
+    exports = path.parent / "Exports"
+    exports.mkdir()
+    generated = [exports / "session-package.md", exports / "session-package.json"]
+    unrelated = exports / "user-export.md"
+    for cache_path in generated:
+        cache_path.write_text("stale", encoding="utf-8")
+    unrelated.write_text("keep", encoding="utf-8")
+
+    update_local_session_title(SESSION_ID, "Renamed", str(tmp_path))
+
+    assert all(not cache_path.exists() for cache_path in generated)
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+    listed = list_local_session_files(SESSION_ID, str(tmp_path))
+    listed_paths = {entry["relative_path"] for entry in listed["files"]}
+    assert "Exports/user-export.md" in listed_paths
+    assert not listed_paths.intersection(
+        {"Exports/session-package.md", "Exports/session-package.json"}
+    )
+
+    for cache_path in generated:
+        cache_path.write_text("stale again", encoding="utf-8")
+    update_local_session_fields(
+        SESSION_ID, {"documentMarkdown": "Updated notes"}, str(tmp_path)
+    )
+
+    assert all(not cache_path.exists() for cache_path in generated)
+    assert unrelated.read_text(encoding="utf-8") == "keep"
 
 
 def test_update_fields_schema_exposes_sessions_root():
@@ -419,6 +542,38 @@ def test_clip_manifest_filenames_cannot_escape_clip_directory(tmp_path):
     with pytest.raises(LocalSessionValidationError, match="videoFileName"):
         get_local_clip(clip_id, str(tmp_path))
     assert list_local_clips(str(tmp_path)) == []
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "replacement", "kind"),
+    [
+        ("clip-audio.wav", None, "audio"),
+        ("clip-video.mov", b"\0" * 8, "video"),
+        ("transcript.json", b"{", "transcript"),
+    ],
+)
+def test_ready_clip_reports_invalid_required_artifacts(
+    tmp_path, artifact_name, replacement, kind
+):
+    clip_directory = write_ready_clip(tmp_path)
+    artifact_path = clip_directory / artifact_name
+    if replacement is None:
+        artifact_path.unlink()
+    else:
+        artifact_path.write_bytes(replacement)
+
+    listed = list_local_clips(str(tmp_path))
+    assert len(listed) == 1
+    summary = listed[0]
+    assert summary["stored_status"] == "ready"
+    assert summary["status"] == "failed"
+    assert summary["artifact_readiness"]["ready"] is False
+    assert any(kind in issue for issue in summary["artifact_readiness"]["issues"])
+
+    detail = get_local_clip(CLIP_ID, str(tmp_path))
+    assert detail["stored_status"] == "ready"
+    assert detail["status"] == "failed"
+    assert detail["clip"]["status"] == "failed"
 
 
 def test_session_lock_rejects_symlink_and_hardlink_lock_files(tmp_path):
