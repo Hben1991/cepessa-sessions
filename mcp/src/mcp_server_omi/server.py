@@ -812,6 +812,12 @@ def _expect_integer(value: Any, path: str) -> int:
     return value
 
 
+def _expect_bool(value: Any, path: str) -> bool:
+    if not isinstance(value, bool):
+        raise LocalSessionValidationError(f"{path} must be a boolean.")
+    return value
+
+
 def _expect_enum(value: Any, values: set[str], path: str) -> str:
     value = _expect_string(value, path)
     if value not in values:
@@ -1002,6 +1008,19 @@ def _validate_transcription_evidence(evidence: Any, path: str) -> None:
         _expect_list(evidence.get("issues"), f"{path}.issues")
     ):
         _expect_string(issue, f"{path}.issues[{index}]")
+    if _optional(evidence, "isComplete", path) is not None:
+        _expect_bool(evidence["isComplete"], f"{path}.isComplete")
+    if _optional(evidence, "speechCoverage", path) is not None:
+        coverage = _expect_number(evidence["speechCoverage"], f"{path}.speechCoverage")
+        if not 0 <= coverage <= 1:
+            raise LocalSessionValidationError(
+                f"{path}.speechCoverage must be between 0 and 1."
+            )
+    if _optional(evidence, "hasVerifiableTimestamps", path) is not None:
+        _expect_bool(
+            evidence["hasVerifiableTimestamps"],
+            f"{path}.hasVerifiableTimestamps",
+        )
 
 
 def _validate_source_citation(citation: Any, path: str) -> None:

@@ -232,6 +232,53 @@ def test_valid_swift_shaped_update_preserves_unknown_extensions(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("isComplete", "yes"),
+        ("speechCoverage", -0.1),
+        ("speechCoverage", 1.1),
+        ("hasVerifiableTimestamps", 1),
+    ],
+)
+def test_transcription_evidence_optional_fields_match_swift_types(
+    tmp_path, field, value
+):
+    path = write_manifest(
+        tmp_path,
+        payload={
+            **session_payload(),
+            "transcriptionEvidence": {
+                "runID": "run-1",
+                "revision": 1,
+                "disposition": "ready",
+                "contentHash": "hash",
+                "parentContentHash": None,
+                "runFileName": "run.json",
+                "outboxFileName": "outbox.json",
+                "issues": [],
+                field: value,
+            },
+        },
+    )
+    before = read_bytes(path)
+
+    with pytest.raises(
+        LocalSessionValidationError, match=f"transcriptionEvidence.{field}"
+    ):
+        update_local_session_fields(
+            SESSION_ID,
+            {
+                "transcriptionEvidence": json.loads(path.read_text())[
+                    "transcriptionEvidence"
+                ]
+            },
+            str(tmp_path),
+        )
+
+    assert read_bytes(path) == before
+
+
 def test_id_mutation_and_invalid_date_are_rejected_without_partial_write(tmp_path):
     path = write_manifest(tmp_path)
     before = read_bytes(path)
