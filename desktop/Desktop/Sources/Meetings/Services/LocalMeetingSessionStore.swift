@@ -334,7 +334,26 @@ final class LocalSessionStore {
     }
 
     private func loadSessions(in directory: URL) -> [LocalSession] {
-        guard fileManager.fileExists(atPath: directory.path) else {
+        var directoryStatus = stat()
+        guard lstat(directory.path, &directoryStatus) == 0 else {
+            let errorNumber = errno
+            guard errorNumber == ENOENT else {
+                loadWarnings.append(
+                    "The session library could not be read. Check access to its folder and try again."
+                )
+                NSLog(
+                    "LocalSessionStore: Refusing unsafe sessions directory %@ (%d)",
+                    directory.path,
+                    errorNumber
+                )
+            }
+            return []
+        }
+        guard (directoryStatus.st_mode & S_IFMT) == S_IFDIR else {
+            loadWarnings.append(
+                "The session library could not be read. Check access to its folder and try again."
+            )
+            NSLog("LocalSessionStore: Refusing non-directory sessions root %@", directory.path)
             return []
         }
 
@@ -347,13 +366,22 @@ final class LocalSessionStore {
 
             return sessionDirectories.compactMap { sessionDirectory -> LocalSession? in
                 do {
-                    let values = try sessionDirectory.resourceValues(forKeys: [.isDirectoryKey])
-                    guard values.isDirectory == true else { return nil }
+                    var sessionDirectoryStatus = stat()
+                    guard lstat(sessionDirectory.path, &sessionDirectoryStatus) == 0,
+                        (sessionDirectoryStatus.st_mode & S_IFMT) == S_IFDIR,
+                        let directoryID = UUID(uuidString: sessionDirectory.lastPathComponent)
+                    else {
+                        throw LocalSessionStoreError.unsafeMetadata(
+                            sessionDirectory.appendingPathComponent("session.json", isDirectory: false)
+                        )
+                    }
 
                     let resolvedMetadataURL = sessionDirectory.appendingPathComponent("session.json", isDirectory: false)
-                    guard fileManager.fileExists(atPath: resolvedMetadataURL.path) else { return nil }
-                    let data = try Data(contentsOf: resolvedMetadataURL)
+                    let data = try readMetadata(at: resolvedMetadataURL)
                     let session = try decoder.decode(LocalSession.self, from: data)
+                    guard session.id == directoryID else {
+                        throw LocalSessionStoreError.invalidMetadata(resolvedMetadataURL)
+                    }
                     if directory.standardizedFileURL.path == fileLayout.sessionsDirectory.standardizedFileURL.path {
                         do {
                             return try repairCurrentPackage(for: session.id)

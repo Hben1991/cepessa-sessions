@@ -138,6 +138,50 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
     )
   }
 
+  func testBulkLoadSkipsUnsafeAndMismatchedEntriesWithoutTouchingHealthySibling() throws {
+    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    let healthy = makeSession()
+    try store.save(healthy)
+
+    let sessionsDirectory = layout.sessionsDirectory
+    let symlinkEntryID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+    let symlinkTargetID = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
+    let symlinkTargetDirectory = rootURL.appendingPathComponent("outside-symlink", isDirectory: true)
+    try fileManager.createDirectory(at: symlinkTargetDirectory, withIntermediateDirectories: true)
+    let symlinkTargetMetadata = symlinkTargetDirectory.appendingPathComponent("session.json", isDirectory: false)
+    try encodedSessionData(makeSession(id: symlinkTargetID)).write(to: symlinkTargetMetadata)
+    let symlinkEntry = sessionsDirectory.appendingPathComponent(symlinkEntryID.uuidString, isDirectory: true)
+    try fileManager.createSymbolicLink(at: symlinkEntry, withDestinationURL: symlinkTargetDirectory)
+
+    let hardlinkEntryID = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+    let hardlinkTargetID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+    let hardlinkTargetMetadata = rootURL.appendingPathComponent("outside-hardlink.json", isDirectory: false)
+    try encodedSessionData(makeSession(id: hardlinkTargetID)).write(to: hardlinkTargetMetadata)
+    let hardlinkDirectory = sessionsDirectory.appendingPathComponent(hardlinkEntryID.uuidString, isDirectory: true)
+    try fileManager.createDirectory(at: hardlinkDirectory, withIntermediateDirectories: true)
+    let hardlinkEntryMetadata = hardlinkDirectory.appendingPathComponent("session.json", isDirectory: false)
+    XCTAssertEqual(Darwin.link(hardlinkTargetMetadata.path, hardlinkEntryMetadata.path), 0)
+
+    let mismatchedEntryID = UUID(uuidString: "55555555-5555-4555-8555-555555555555")!
+    let mismatchedPayloadID = UUID(uuidString: "66666666-6666-4666-8666-666666666666")!
+    let mismatchedDirectory = sessionsDirectory.appendingPathComponent(mismatchedEntryID.uuidString, isDirectory: true)
+    try fileManager.createDirectory(at: mismatchedDirectory, withIntermediateDirectories: true)
+    let mismatchedMetadata = mismatchedDirectory.appendingPathComponent("session.json", isDirectory: false)
+    try encodedSessionData(makeSession(id: mismatchedPayloadID)).write(to: mismatchedMetadata)
+
+    let symlinkTargetBefore = try Data(contentsOf: symlinkTargetMetadata)
+    let hardlinkTargetBefore = try Data(contentsOf: hardlinkTargetMetadata)
+    let mismatchedBefore = try Data(contentsOf: mismatchedMetadata)
+
+    let loaded = store.loadSessions()
+
+    XCTAssertEqual(loaded.map(\.id), [healthy.id])
+    XCTAssertEqual(try Data(contentsOf: symlinkTargetMetadata), symlinkTargetBefore)
+    XCTAssertEqual(try Data(contentsOf: hardlinkTargetMetadata), hardlinkTargetBefore)
+    XCTAssertEqual(try Data(contentsOf: mismatchedMetadata), mismatchedBefore)
+  }
+
   func testBaselineMergePromotesLegacySessionIntoCurrentSessions() throws {
     let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
@@ -187,8 +231,9 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
     }
   }
 
-  private func makeSession() -> LocalSession {
-    let id = UUID(uuidString: "B0C1D2E3-F4A5-46B7-88C9-001122334455")!
+  private func makeSession(
+    id: UUID = UUID(uuidString: "B0C1D2E3-F4A5-46B7-88C9-001122334455")!
+  ) -> LocalSession {
     let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
     return LocalSession(
       id: id,
@@ -205,5 +250,12 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
       ],
       audioArtifacts: .empty
     )
+  }
+
+  private func encodedSessionData(_ session: LocalSession) throws -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    encoder.dateEncodingStrategy = .iso8601
+    return try encoder.encode(session)
   }
 }
