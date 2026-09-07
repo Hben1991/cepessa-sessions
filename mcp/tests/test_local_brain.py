@@ -504,6 +504,41 @@ def test_imported_evidence_requires_verified_coverage_and_truthful_separation(
     assert status["not_ready"] == 1
 
 
+@pytest.mark.parametrize("source_index", [0, 1])
+def test_separated_evidence_requires_both_source_durations(tmp_path, source_index):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(index.sessions_root)
+    envelope = json.loads(fixture["outbox_path"].read_text(encoding="utf-8"))
+    envelope["sources"][source_index]["durationSeconds"] = None
+    replace_fixture_envelope(fixture, envelope)
+
+    status = index.refresh()
+
+    assert status["sessions"] == 0
+    assert status["not_ready"] == 1
+
+
+@pytest.mark.parametrize(
+    ("source_index", "wrong_file_name"),
+    [(0, "microphone.wav"), (1, "captured-system.wav")],
+)
+def test_separated_evidence_requires_canonical_source_filenames(
+    tmp_path,
+    source_index,
+    wrong_file_name,
+):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(index.sessions_root)
+    envelope = json.loads(fixture["outbox_path"].read_text(encoding="utf-8"))
+    envelope["sources"][source_index]["fileName"] = wrong_file_name
+    replace_fixture_envelope(fixture, envelope)
+
+    status = index.refresh()
+
+    assert status["sessions"] == 0
+    assert status["not_ready"] == 1
+
+
 def test_exact_s1_physical_fixture_is_discovered_from_global_full_envelope(tmp_path):
     index = index_for(tmp_path)
     fixture_bytes = S1_FIXTURE_PATH.read_bytes()

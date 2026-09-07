@@ -601,7 +601,18 @@ class MeetingBrainIndex:
 
         source_kinds = {source.get("kind") for source in raw_sources}
         if len(raw_sources) == 2 and source_kinds == {"microphone", "system"}:
-            if not all(is_available_primary(source) for source in raw_sources):
+            expected_file_names = {
+                "microphone": {"mic.wav", "mic-transcript.wav"},
+                "system": {"system.wav"},
+            }
+            if not all(
+                is_available_primary(source)
+                and source.get("fileName") in expected_file_names[source["kind"]]
+                and (duration := _optional_number(source.get("durationSeconds")))
+                is not None
+                and duration > 0
+                for source in raw_sources
+            ):
                 raise EvidenceNotReady(
                     "Independent microphone and system evidence is not ready."
                 )
