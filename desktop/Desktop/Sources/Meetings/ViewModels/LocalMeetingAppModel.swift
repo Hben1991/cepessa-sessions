@@ -38,6 +38,7 @@ final class LocalSessionAppModel: ObservableObject {
     }
   }
   @Published var selectedSessionID: LocalSession.ID?
+  @Published var isSessionLibraryPresented = false
   @Published private(set) var isRecording = false
   @Published private(set) var isTranscribing = false
   @Published private(set) var isGeneratingRecap = false
@@ -49,11 +50,14 @@ final class LocalSessionAppModel: ObservableObject {
   @Published private(set) var recordingDurationText = LocalMeetingRecordingTimer.shared
     .formattedDuration
   @Published private(set) var recorderErrorMessage: String?
+  @Published private(set) var sessionSaveErrors: [LocalSession.ID: String] = [:]
   @Published private(set) var processingStatusTitle: String?
   @Published private(set) var processingStatusDetail: String?
   @Published private(set) var processingProgress: Double?
   @Published private(set) var processingSnapshots: [LocalSessionProcessingSnapshot] = []
   @Published private(set) var retranscribableSessionIDs: Set<LocalSession.ID> = []
+  @Published private(set) var isCaptureTransitioning = false
+  let captureLifecycle: LocalCaptureLifecycle
   let speakerModelProvisioner: LocalSessionSpeakerModelProvisioner
 
   private let fileLayout: LocalSessionFileLayout
@@ -65,7 +69,12 @@ final class LocalSessionAppModel: ObservableObject {
   private let fileManager: FileManager
   private var activeImportSessionIDs: Set<LocalSession.ID> = []
   private var activeTranscriptionSessionIDs: Set<LocalSession.ID> = []
+  private var preservingTranscriptSessionIDs: Set<LocalSession.ID> = []
+  private var transcriptionBaselines: [LocalSession.ID: LocalSession] = [:]
+  private var persistedSessionIDs: Set<LocalSession.ID> = []
   private var warmedTranscriptionModelPath: String?
+  private var captureLease: LocalCaptureLifecycle.Lease?
+  private var captureTask: Task<Void, Never>?
   private var cancellables: Set<AnyCancellable> = []
 
   init(
@@ -75,7 +84,8 @@ final class LocalSessionAppModel: ObservableObject {
     transcriptionService: any LocalSessionTranscribing = LocalMeetingTranscriptionService(),
     audioImportService: any LocalSessionAudioImporting = LocalSessionAudioImportService(),
     speakerModelProvisioner: LocalSessionSpeakerModelProvisioner? = nil,
-    fileManager: FileManager = .default
+    fileManager: FileManager = .default,
+    captureLifecycle: LocalCaptureLifecycle? = nil
   ) {
     let resolvedFileLayout =
       fileLayout ?? LocalSessionFileLayout(baseDirectory: Self.defaultBaseDirectory)
@@ -103,8 +113,17 @@ final class LocalSessionAppModel: ObservableObject {
     )
     self.audioImportService = audioImportService
     self.fileManager = fileManager
+    self.captureLifecycle = captureLifecycle ?? LocalCaptureLifecycle()
     self.selectedSessionID = nil
     bindRecorder()
+    self.captureLifecycle.$phase
+      .sink { [weak self] phase in
+        switch phase {
+        case .starting, .stopping: self?.isCaptureTransitioning = true
+        case .idle, .recording: self?.isCaptureTransitioning = false
+        }
+      }
+      .store(in: &cancellables)
     loadStoredSessions()
   }
 
@@ -131,6 +150,9 @@ final class LocalSessionAppModel: ObservableObject {
 
   func canRetranscribe(_ session: LocalSession) -> Bool {
     guard processingSnapshot(for: session.id) == nil else { return false }
+    guard !activeTranscriptionSessionIDs.contains(session.id),
+      !activeImportSessionIDs.contains(session.id)
+    else { return false }
     return retranscribableSessionIDs.contains(session.id)
   }
 
@@ -148,18 +170,22 @@ final class LocalSessionAppModel: ObservableObject {
 
   func loadStoredSessions() {
     guard let store else { return }
+    sessionSaveErrors = [:]
 
     let storedSessions = store.loadSessions()
+    persistedSessionIDs.formUnion(storedSessions.map(\.id))
+    if let warning = store.loadWarnings.first { recorderErrorMessage = warning }
     let normalizedSessions = storedSessions.map(normalizedStoredSession(_:))
     refreshRetranscriptionAvailabilityCache(for: normalizedSessions)
 
     for (storedSession, normalizedSession) in zip(storedSessions, normalizedSessions)
     where storedSession != normalizedSession {
       do {
-        try store.save(normalizedSession)
+        try store.save(normalizedSession, mergingChangesFrom: storedSession)
       } catch {
-        recorderErrorMessage =
-          "Failed to recover an interrupted session. \(error.localizedDescription)"
+        let message = "Failed to recover an interrupted session. \(error.localizedDescription)"
+        recorderErrorMessage = message
+        sessionSaveErrors[storedSession.id] = message
       }
     }
     let annotationStore = LocalSessionSpeakerAnnotationStore(
@@ -232,7 +258,7 @@ final class LocalSessionAppModel: ObservableObject {
       else {
         return false
       }
-      guard let rawSession = store?.loadSessions().first(where: { $0.id == resolvedSessionID })
+      guard let rawSession = store?.loadSession(id: resolvedSessionID)
       else { return false }
       sessions[index] = annotationStore.applyingAnnotations(
         to: normalizedStoredSession(rawSession)
@@ -251,12 +277,37 @@ final class LocalSessionAppModel: ObservableObject {
       fileManager: fileManager
     )
     let mergedSession = mergedSession(from: session)
-    let persistedBase = store?.loadSessions().first { $0.id == mergedSession.id }
+    let persistedBase = store?.loadSession(id: mergedSession.id)
     let persistedSession = annotationStore.removingAnnotationProjection(
       from: mergedSession,
       persistedBase: persistedBase
     )
-    let displayedSession = annotationStore.applyingAnnotations(to: persistedSession)
+    let previousSession =
+      persistedBase != nil || persistedSessionIDs.contains(session.id)
+      ? sessions.first(where: { $0.id == session.id }) : nil
+    let baseline = previousSession.map {
+      annotationStore.removingAnnotationProjection(from: $0, persistedBase: persistedBase)
+    }
+    var displayedSession = annotationStore.applyingAnnotations(to: persistedSession)
+
+    do {
+      if let saved = try store?.save(persistedSession, mergingChangesFrom: baseline) {
+        persistedSessionIDs.insert(saved.id)
+        sessionSaveErrors.removeValue(forKey: saved.id)
+        displayedSession = annotationStore.applyingAnnotations(to: saved)
+      }
+    } catch {
+      let message = "Failed to save this session locally. \(error.localizedDescription)"
+      recorderErrorMessage = message
+      sessionSaveErrors[session.id] = message
+      if let saved = store?.loadSession(id: session.id) {
+        displayedSession = annotationStore.applyingAnnotations(to: saved)
+      } else {
+        displayedSession = previousSession ?? displayedSession
+        displayedSession.status = .failed
+        displayedSession.processingError = message
+      }
+    }
 
     if let existingIndex = sessions.firstIndex(where: { $0.id == displayedSession.id }) {
       sessions[existingIndex] = displayedSession
@@ -265,12 +316,6 @@ final class LocalSessionAppModel: ObservableObject {
     }
 
     sessions.sort { $0.startedAt > $1.startedAt }
-
-    do {
-      try store?.save(persistedSession)
-    } catch {
-      recorderErrorMessage = "Failed to save this session locally. \(error.localizedDescription)"
-    }
 
     return displayedSession
   }
@@ -288,17 +333,17 @@ final class LocalSessionAppModel: ObservableObject {
   @discardableResult
   func updateSessionTitle(_ title: String, for sessionID: LocalSession.ID? = nil) -> Bool {
     let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedTitle.isEmpty else { return false }
     guard let currentSession = sessions.first(where: { $0.id == (sessionID ?? selectedSessionID) })
     else {
       return false
     }
-    guard currentSession.title != trimmedTitle else { return true }
     let updatedSession = mutateSession(id: sessionID) { session in
       session.title = trimmedTitle
+      session.titleOrigin = .user
     }
-    guard updatedSession != nil else { return false }
-
-    return true
+    return updatedSession?.title == trimmedTitle
+      && store?.loadSession(id: currentSession.id)?.title == trimmedTitle
   }
 
   func clearSelection() {
@@ -328,10 +373,22 @@ final class LocalSessionAppModel: ObservableObject {
       }
     #endif
 
-    if isRecording {
-      Task { await stopRecording() }
-    } else {
-      Task { await startRecording() }
+    if let lease = captureLease {
+      guard captureLifecycle.beginStopping(lease) else { return }
+      let precedingTask = captureTask
+      captureTask = Task { [weak self] in
+        await precedingTask?.value
+        await self?.stopRecording(lease: lease)
+      }
+      return
+    }
+    do {
+      let lease = try captureLifecycle.beginCapture(.session)
+      captureLease = lease
+      recorderErrorMessage = nil
+      captureTask = Task { [weak self] in await self?.startRecording(lease: lease) }
+    } catch {
+      recorderErrorMessage = error.localizedDescription
     }
   }
 
@@ -354,14 +411,17 @@ final class LocalSessionAppModel: ObservableObject {
       audioArtifacts: .init(
         micFileName: nil,
         systemFileName: nil,
-        mixedFileName: "mixed.wav"
+        mixedFileName: nil,
+        importedFileName: "imported.wav"
       )
     )
+    session.titleOrigin = .imported
 
     session = upsertSession(session)
     selectedSessionID = session.id
 
-    let destinationURL = fileLayout.mixedAudioURL(for: session.id)
+    let destinationURL = fileLayout.sessionDirectory(for: session.id)
+      .appendingPathComponent("imported.wav", isDirectory: false)
     beginImport(for: session.id)
     setProcessingSnapshot(
       for: session.id,
@@ -386,6 +446,7 @@ final class LocalSessionAppModel: ObservableObject {
       endImport(for: session.id, clearSnapshot: true)
       _ = mutateSession(id: session.id) { currentSession in
         currentSession.status = .failed
+        currentSession.processingError = error.localizedDescription
       }
     }
   }
@@ -397,14 +458,17 @@ final class LocalSessionAppModel: ObservableObject {
   private func retranscribeSession(id: LocalSession.ID, shouldResetSelection: Bool) async {
     guard var session = sessions.first(where: { $0.id == id }) else { return }
     guard processingSnapshot(for: id) == nil else { return }
-    guard let audioURL = resolvedAudioURL(for: session) else {
+    guard !activeTranscriptionSessionIDs.contains(id), !activeImportSessionIDs.contains(id) else {
+      return
+    }
+    guard resolvedAudioURL(for: session) != nil else {
       recorderErrorMessage = "This session does not have a local audio file to transcribe."
       return
     }
 
+    transcriptionBaselines[id] = session
     session.status = .transcribing
-    session.transcriptSegments = []
-    session.recap = .empty
+    // Keep the previous transcript available until a replacement is saved.
     let preparedSession = upsertSession(session)
 
     if shouldResetSelection {
@@ -412,7 +476,8 @@ final class LocalSessionAppModel: ObservableObject {
     }
 
     recorderErrorMessage = nil
-    await transcribe(preparedSession, audioURL: audioURL)
+    // A stored capture must retain its original separated channels on retry.
+    await transcribe(preparedSession)
   }
 
   @discardableResult
@@ -572,23 +637,53 @@ final class LocalSessionAppModel: ObservableObject {
 
   func discardPendingDocumentChatProposal(for sessionID: LocalSession.ID? = nil) {}
 
-  private func startRecording() async {
+  private func startRecording(lease: LocalCaptureLifecycle.Lease) async {
     do {
       let session = try await recorder.startRecording()
       recorderErrorMessage = recorder.lastErrorMessage
       upsertSession(session)
       selectedSessionID = session.id
+      captureLifecycle.markRecording(lease)
     } catch {
       recorderErrorMessage = error.localizedDescription
+      captureLifecycle.finishCapture(lease)
+      if captureLease == lease { captureLease = nil }
     }
   }
 
-  private func stopRecording() async {
+  private func stopRecording(lease: LocalCaptureLifecycle.Lease, shouldTranscribe: Bool = true)
+    async
+  {
     if let session = await recorder.stopRecording() {
       let mergedSession = upsertSession(session)
       selectedSessionID = mergedSession.id
-      await transcribe(mergedSession)
+      captureLifecycle.finishCapture(lease)
+      if captureLease == lease { captureLease = nil }
+      if shouldTranscribe {
+        Task { [weak self] in await self?.transcribe(mergedSession) }
+      }
+    } else {
+      captureLifecycle.finishCapture(lease)
+      if captureLease == lease { captureLease = nil }
     }
+  }
+
+  /// Finish writers before normal termination; decoding can resume after relaunch.
+  func finishCaptureForTermination() async {
+    guard let lease = captureLease else { return }
+    _ = captureLifecycle.beginStopping(lease)
+    await captureTask?.value
+    guard captureLease == lease else { return }
+    await stopRecording(lease: lease, shouldTranscribe: false)
+  }
+
+  func refreshLibraryIfIdle() {
+    guard !captureLifecycle.isBusy, !isTranscribing, !isGeneratingRecap else { return }
+    loadStoredSessions()
+  }
+
+  func audioPlaybackURL(for session: LocalSession) -> URL? {
+    resolvedAudioURL(for: session)
   }
 
   private func bindRecorder() {
@@ -642,12 +737,14 @@ final class LocalSessionAppModel: ObservableObject {
   private func transcribe(_ session: LocalSession, audioURL: URL? = nil) async {
     var updatedSession = session
     let sessionID = session.id
+    let previouslySavedSession = transcriptionBaselines[sessionID] ?? session
     let transcriptionSettings = LocalSessionTranscriptionSettings.current()
     let transcriptionPlan = fileLayout.resolvedTranscriptionPlan(
       settings: transcriptionSettings,
       fileManager: fileManager
     )
-    let resolvedAudioURL = audioURL ?? fileLayout.mixedAudioURL(for: sessionID)
+    let resolvedAudioURL =
+      audioURL ?? self.resolvedAudioURL(for: session) ?? fileLayout.mixedAudioURL(for: sessionID)
 
     beginTranscription(for: sessionID)
     await warmUpTranscriptionModelIfNeeded(plan: transcriptionPlan)
@@ -655,7 +752,7 @@ final class LocalSessionAppModel: ObservableObject {
       for: sessionID,
       phase: .transcribing,
       title: "Preparing audio",
-      detail: "\(transcriptionPlan.speedMode.rawValue) mode is preparing the local mixed master.",
+      detail: "\(transcriptionPlan.speedMode.rawValue) mode is preparing the saved audio.",
       progress: 0.03,
       logMessages: [
         "Audio file: \(resolvedAudioURL.lastPathComponent)",
@@ -680,7 +777,7 @@ final class LocalSessionAppModel: ObservableObject {
           defaultFileName: "system.wav"
         )
         : nil
-      let priorEvidence = session.transcriptionEvidence
+      let priorEvidence = session.latestTranscriptionAttempt ?? session.transcriptionEvidence
       let result = try await evidenceTranscriptionCoordinator.transcribe(
         .init(
           session: session,
@@ -693,24 +790,54 @@ final class LocalSessionAppModel: ObservableObject {
           onProgress: { [weak self] update in
             guard let self else { return }
             await self.applyTranscriptionProgress(update, for: sessionID)
+          },
+          importedURL: session.audioArtifacts.importedFileName.flatMap {
+            sourceAudioURL(fileName: $0, sessionID: sessionID, defaultFileName: $0)
           }
         )
       )
 
-      updatedSession.status = result.envelope.run.disposition == .ready ? .ready : .failed
-      updatedSession.transcriptSegments = result.transcriptSegments
-      updatedSession.transcriptionEvidence = result.summary
-      updatedSession.title = inferredSessionTitle(for: updatedSession)
+      let isReady = result.envelope.run.disposition == .ready
+      let retainsPriorTranscript =
+        !isReady && !previouslySavedSession.transcriptText.isEmpty
+        && (previouslySavedSession.status == .ready
+          || previouslySavedSession.latestTranscriptionAttempt != nil
+          || previouslySavedSession.transcriptionEvidence?.disposition == .ready)
+      updatedSession.status = isReady ? .ready : .failed
+      if retainsPriorTranscript {
+        updatedSession.transcriptSegments = previouslySavedSession.transcriptSegments
+        updatedSession.transcriptionEvidence = previouslySavedSession.transcriptionEvidence
+        updatedSession.latestTranscriptionAttempt = result.summary
+        updatedSession.processingError =
+          "The latest attempt needs review. Showing the previously saved transcript. "
+          + (result.summary.issues.first ?? "The recording could not be fully verified.")
+      } else {
+        updatedSession.transcriptSegments = result.transcriptSegments
+        updatedSession.transcriptionEvidence = result.summary
+        updatedSession.latestTranscriptionAttempt = nil
+        updatedSession.processingError = isReady ? nil : result.summary.issues.first
+      }
+      let latestSession = sessions.first { $0.id == sessionID } ?? session
+      updatedSession.titleOrigin = latestSession.titleOrigin
+      updatedSession.title = latestSession.title
+      if latestSession.titleOrigin == .automatic, latestSession.title == session.title {
+        updatedSession.title = inferredSessionTitle(for: updatedSession)
+      }
       upsertSession(updatedSession)
       if result.envelope.run.disposition != .ready {
         recorderErrorMessage =
           result.summary.issues.first
           ?? "The transcript was saved as non-ready because its evidence was incomplete."
       }
-      endTranscription(for: sessionID)
+      endTranscription(for: sessionID, clearSnapshot: true)
       return
     } catch {
       updatedSession.status = .failed
+      updatedSession.processingError = error.localizedDescription
+      if let latestSession = sessions.first(where: { $0.id == sessionID }) {
+        updatedSession.title = latestSession.title
+        updatedSession.titleOrigin = latestSession.titleOrigin
+      }
       upsertSession(updatedSession)
       recorderErrorMessage = error.localizedDescription
     }
@@ -746,19 +873,29 @@ final class LocalSessionAppModel: ObservableObject {
         ]
       )
     case .analyzingSpeech(let chunks, let speechDuration, let skippedSilenceDuration):
-      let speechMinutes = max(1, Int((speechDuration / 60).rounded(.up)))
-      let skippedMinutes = Int((skippedSilenceDuration / 60).rounded())
+      let speechDurationText = LocalSessionTranscriptionDurationFormatter.string(
+        from: speechDuration)
+      let skippedDurationText = LocalSessionTranscriptionDurationFormatter.string(
+        from: skippedSilenceDuration)
+      let skippedDetail =
+        skippedSilenceDuration >= 0.5
+        ? "; skipped about \(skippedDurationText) of silence"
+        : ""
+      var logMessages = [
+        "Mapped \(chunks) optimized chunk\(chunks == 1 ? "" : "s")",
+        "Speech: \(speechDurationText)",
+      ]
+      if skippedSilenceDuration >= 0.5 {
+        logMessages.append("Silence skipped: \(skippedDurationText)")
+      }
       setProcessingSnapshot(
         for: sessionID,
         phase: .transcribing,
         title: "Speech mapped",
         detail:
-          "Processing \(speechMinutes)m of speech in \(chunks) optimized chunk\(chunks == 1 ? "" : "s"); skipped about \(skippedMinutes)m of silence.",
+          "Processing \(speechDurationText) of speech in \(chunks) optimized chunk\(chunks == 1 ? "" : "s")\(skippedDetail).",
         progress: 0.16,
-        logMessages: [
-          "Mapped \(chunks) optimized chunk\(chunks == 1 ? "" : "s")",
-          "Speech: \(speechMinutes)m, silence skipped: \(skippedMinutes)m",
-        ]
+        logMessages: logMessages
       )
     case .transcribing(let percent):
       let normalizedProgress = 0.12 + (Double(percent) / 100.0 * 0.72)
@@ -772,15 +909,20 @@ final class LocalSessionAppModel: ObservableObject {
     case .partialSegments(let partialSegments):
       let mappedSegments = transcriptSegments(from: partialSegments, sessionID: sessionID)
       guard !mappedSegments.isEmpty else { return }
-      _ = mutateSession(id: sessionID) { currentSession in
-        currentSession.status = .transcribing
-        currentSession.transcriptSegments = mappedSegments
+      let preservesSavedTranscript = preservingTranscriptSessionIDs.contains(sessionID)
+      if !preservesSavedTranscript {
+        _ = mutateSession(id: sessionID) { currentSession in
+          currentSession.status = .transcribing
+          currentSession.transcriptSegments = mappedSegments
+        }
       }
       setProcessingSnapshot(
         for: sessionID,
         phase: .transcribing,
         title: "Draft transcript available",
-        detail: "Showing the transcript already captured while the rest keeps processing.",
+        detail: preservesSavedTranscript
+          ? "Keeping the saved transcript visible until this attempt finishes."
+          : "Showing the draft while the rest keeps processing.",
         progress: nil,
         logMessages: [
           "Draft transcript segments available: \(mappedSegments.count)"
@@ -816,6 +958,10 @@ final class LocalSessionAppModel: ObservableObject {
   }
 
   private func beginTranscription(for sessionID: LocalSession.ID) {
+    if let session = sessions.first(where: { $0.id == sessionID }), !session.transcriptText.isEmpty
+    {
+      preservingTranscriptSessionIDs.insert(sessionID)
+    }
     activeImportSessionIDs.remove(sessionID)
     activeTranscriptionSessionIDs.insert(sessionID)
     syncActivityFlags()
@@ -823,6 +969,8 @@ final class LocalSessionAppModel: ObservableObject {
 
   private func endTranscription(for sessionID: LocalSession.ID, clearSnapshot: Bool = false) {
     activeTranscriptionSessionIDs.remove(sessionID)
+    preservingTranscriptSessionIDs.remove(sessionID)
+    transcriptionBaselines.removeValue(forKey: sessionID)
     syncActivityFlags()
     if clearSnapshot {
       removeProcessingSnapshot(for: sessionID)
@@ -996,8 +1144,7 @@ final class LocalSessionAppModel: ObservableObject {
 
     var session = sessions[index]
     mutate(&session)
-    upsertSession(session)
-    return session
+    return upsertSession(session)
   }
 
   private func mergedSession(from incomingSession: LocalSession) -> LocalSession {
@@ -1030,7 +1177,9 @@ final class LocalSessionAppModel: ObservableObject {
       systemFileName: incomingSession.audioArtifacts.systemFileName
         ?? existingSession.audioArtifacts.systemFileName,
       mixedFileName: incomingSession.audioArtifacts.mixedFileName
-        ?? existingSession.audioArtifacts.mixedFileName
+        ?? existingSession.audioArtifacts.mixedFileName,
+      importedFileName: incomingSession.audioArtifacts.importedFileName
+        ?? existingSession.audioArtifacts.importedFileName
     )
     mergedSession.contentClassification =
       incomingSession.contentClassification ?? existingSession.contentClassification
@@ -1086,6 +1235,9 @@ final class LocalSessionAppModel: ObservableObject {
     switch normalizedSession.status {
     case .recording, .transcribing:
       normalizedSession.status = .failed
+      normalizedSession.processingError =
+        normalizedSession.processingError
+        ?? "Processing was interrupted. Retry the transcript using the saved audio."
     case .ready, .failed:
       break
     }
@@ -1191,6 +1343,7 @@ final class LocalSessionAppModel: ObservableObject {
     }
 
     return resolvedAudioURL(for: session)?.lastPathComponent
+      ?? session.audioArtifacts.importedFileName
       ?? session.audioArtifacts.mixedFileName
       ?? session.audioArtifacts.micFileName
       ?? session.audioArtifacts.systemFileName

@@ -8,10 +8,13 @@ final class CepessaSessionsStore {
 
   let model: LocalMeetingAppModel
   let clipModel: LocalClipViewModel
+  let captureLifecycle: LocalCaptureLifecycle
 
   private init() {
-    self.model = LocalMeetingAppModel()
-    self.clipModel = LocalClipViewModel()
+    let lifecycle = LocalCaptureLifecycle()
+    self.captureLifecycle = lifecycle
+    self.model = LocalMeetingAppModel(captureLifecycle: lifecycle)
+    self.clipModel = LocalClipViewModel(captureLifecycle: lifecycle)
   }
 }
 
@@ -39,6 +42,27 @@ enum CepessaSessionFloatingBarPreferences {
   }
 }
 
+enum CepessaSessionCaptureControlPolicy: Equatable {
+  case startSession
+  case cancelSessionStart
+  case stopSession
+  case stopClip
+  case unavailable
+
+  static func resolve(_ phase: LocalCaptureLifecycle.Phase) -> Self {
+    switch phase {
+    case .idle:
+      return .startSession
+    case .starting(let lease):
+      return lease.kind == .session ? .cancelSessionStart : .stopClip
+    case .recording(let lease):
+      return lease.kind == .session ? .stopSession : .stopClip
+    case .stopping:
+      return .unavailable
+    }
+  }
+}
+
 @MainActor
 final class CepessaSessionFloatingBarState: ObservableObject {
   enum NoticeStyle: Equatable {
@@ -51,6 +75,8 @@ final class CepessaSessionFloatingBarState: ObservableObject {
   @Published var isVisible = false
   @Published var isRecording = false
   @Published var isTranscribing = false
+  @Published var capturePhase: LocalCaptureLifecycle.Phase = .idle
+  @Published var clipTimerText = "00:00"
   @Published var isMicrophoneCaptureActive = false
   @Published var isMicrophoneMuted = false
   @Published var isSystemAudioCaptureActive = false
@@ -79,7 +105,49 @@ final class CepessaSessionFloatingBarState: ObservableObject {
   var mode: CepessaSessionFloatingBarMode {
     if interaction.isTrayOpen { return .tray }
     if isRecording { return .recording }
+    if capturePhase != .idle { return .processing }
     return isTranscribing ? .processing : .idle
+  }
+
+  var canActivateSessionTransport: Bool {
+    let policy = CepessaSessionCaptureControlPolicy.resolve(capturePhase)
+    return policy == .startSession || policy == .cancelSessionStart || policy == .stopSession
+  }
+
+  var sessionTransportShowsStop: Bool {
+    capturePhase.lease?.kind == .session
+  }
+
+  var sessionTransportTitle: String {
+    switch capturePhase {
+    case .idle:
+      return "Start recording"
+    case .starting(let lease):
+      return lease.kind == .session ? "Cancel starting recording" : "CLIP capture is starting"
+    case .recording(let lease):
+      return lease.kind == .session ? "Stop recording" : "CLIP capture is active"
+    case .stopping(let lease):
+      return lease.kind == .session ? "Stopping recording" : "CLIP capture is stopping"
+    }
+  }
+
+  var captureAccessibilityLabel: String? {
+    switch capturePhase {
+    case .idle:
+      return nil
+    case .starting(let lease):
+      return lease.kind == .session
+        ? "Cepessa Sessions, starting recording"
+        : "Cepessa Sessions, starting CLIP capture"
+    case .recording(let lease) where lease.kind == .clip:
+      return "Cepessa Sessions, CLIP recording \(clipTimerText)"
+    case .recording:
+      return nil
+    case .stopping(let lease):
+      return lease.kind == .session
+        ? "Cepessa Sessions, stopping recording"
+        : "Cepessa Sessions, stopping CLIP capture"
+    }
   }
 
   var captureHealth: CepessaSessionCaptureHealth {
@@ -118,7 +186,18 @@ final class CepessaSessionFloatingBarState: ObservableObject {
 
   /// The single line the open tray reads out next to the ring.
   var trayStatusText: String {
-    CepessaSessionIndicatorTrayStatus.text(
+    switch capturePhase {
+    case .starting(let lease):
+      return lease.kind == .session ? "Starting recording…" : "Starting CLIP…"
+    case .recording(let lease) where lease.kind == .clip:
+      return "CLIP \(clipTimerText)"
+    case .stopping(let lease):
+      return lease.kind == .session ? "Stopping recording…" : "Stopping CLIP…"
+    case .idle, .recording:
+      break
+    }
+
+    return CepessaSessionIndicatorTrayStatus.text(
       isRecording: isRecording,
       isTranscribing: isTranscribing,
       hasFault: hasFault,
@@ -232,13 +311,40 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   }
 
   func stopRecording() {
-    guard model?.isRecording == true else { return }
+    guard
+      CepessaSessionCaptureControlPolicy.resolve(
+        CepessaSessionsStore.shared.captureLifecycle.phase
+      )
+      .allowsStoppingSession
+    else { return }
     model?.toggleRecording()
   }
 
   func startRecording() {
-    guard model?.isRecording != true else { return }
+    guard
+      CepessaSessionCaptureControlPolicy.resolve(
+        CepessaSessionsStore.shared.captureLifecycle.phase) == .startSession
+    else { return }
     model?.toggleRecording()
+  }
+
+  func toggleSessionRecording() {
+    switch CepessaSessionCaptureControlPolicy.resolve(
+      CepessaSessionsStore.shared.captureLifecycle.phase)
+    {
+    case .startSession, .cancelSessionStart, .stopSession:
+      model?.toggleRecording()
+    case .stopClip, .unavailable:
+      return
+    }
+  }
+
+  func stopClipRecording() {
+    guard
+      CepessaSessionCaptureControlPolicy.resolve(
+        CepessaSessionsStore.shared.captureLifecycle.phase) == .stopClip
+    else { return }
+    CepessaSessionsStore.shared.clipModel.stopClip()
   }
 
   /// Re-shows the indicator after the user hid it.
@@ -325,18 +431,30 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   func showIndicatorContextMenu() {
     let menu = NSMenu()
 
-    if state.isRecording {
+    switch CepessaSessionCaptureControlPolicy.resolve(state.capturePhase) {
+    case .cancelSessionStart, .stopSession:
       let stop = NSMenuItem(
-        title: "Stop Recording", action: #selector(stopMenuItem), keyEquivalent: "")
+        title: state.sessionTransportTitle, action: #selector(stopMenuItem), keyEquivalent: "")
       stop.target = self
       menu.addItem(stop)
 
-      let mute = NSMenuItem(
-        title: state.isMicrophoneMuted ? "Unmute Microphone" : "Mute Microphone",
-        action: #selector(toggleMuteMenuItem), keyEquivalent: "")
-      mute.target = self
-      menu.addItem(mute)
-    } else {
+      if state.isRecording {
+        let mute = NSMenuItem(
+          title: state.isMicrophoneMuted ? "Unmute Microphone" : "Mute Microphone",
+          action: #selector(toggleMuteMenuItem), keyEquivalent: "")
+        mute.target = self
+        menu.addItem(mute)
+      }
+    case .stopClip:
+      let stopClip = NSMenuItem(
+        title: "Stop Clip Recording", action: #selector(stopClipMenuItem), keyEquivalent: "")
+      stopClip.target = self
+      menu.addItem(stopClip)
+    case .unavailable:
+      let stopping = NSMenuItem(title: state.sessionTransportTitle, action: nil, keyEquivalent: "")
+      stopping.isEnabled = false
+      menu.addItem(stopping)
+    case .startSession:
       let record = NSMenuItem(
         title: "Start Recording", action: #selector(startMenuItem), keyEquivalent: "")
       record.target = self
@@ -372,7 +490,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   }
 
   @objc private func openLibraryMenuItem() {
-    CepessaSessionsWindowController.shared.show(destination: .sessions)
+    CepessaSessionsWindowController.shared.showLibrary()
   }
 
   @objc private func openClipsMenuItem() {
@@ -393,6 +511,10 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
 
   @objc private func stopMenuItem() {
     stopRecording()
+  }
+
+  @objc private func stopClipMenuItem() {
+    stopClipRecording()
   }
 
   @objc private func startMenuItem() {
@@ -669,6 +791,22 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
         self?.state.processingProgress = value
       }
       .store(in: &cancellables)
+
+    CepessaSessionsStore.shared.captureLifecycle.$phase
+      .removeDuplicates()
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self] _ in
+        self?.refreshState()
+        self?.syncVisibility()
+      }
+      .store(in: &cancellables)
+
+    CepessaSessionsStore.shared.clipModel.$recordingDurationText
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self] value in
+        self?.state.clipTimerText = value
+      }
+      .store(in: &cancellables)
   }
 
   private func ensurePanel() {
@@ -752,6 +890,8 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
 
     state.isRecording = model.isRecording
     state.isTranscribing = model.isTranscribing
+    state.capturePhase = CepessaSessionsStore.shared.captureLifecycle.phase
+    state.clipTimerText = CepessaSessionsStore.shared.clipModel.recordingDurationText
     state.isMicrophoneCaptureActive = model.isMicrophoneCaptureActive
     state.isMicrophoneMuted = model.isMicrophoneMuted
     state.isSystemAudioCaptureActive = model.isSystemAudioCaptureActive
@@ -1352,6 +1492,12 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   }
 }
 
+extension CepessaSessionCaptureControlPolicy {
+  fileprivate var allowsStoppingSession: Bool {
+    self == .cancelSessionStart || self == .stopSession
+  }
+}
+
 struct CepessaSessionFloatingProcessingItem: Identifiable, Equatable {
   let id: UUID
   let sessionTitle: String
@@ -1498,31 +1644,33 @@ private struct SessionIndicatorLozenge: View {
       .accessibilityElement(children: .ignore)
       .accessibilityAddTraits(.isButton)
       .accessibilityLabel(
-        CepessaSessionIndicatorAccessibility.indicatorLabel(
-          mode: state.mode,
-          isRecording: state.isRecording,
-          health: state.captureHealth,
-          timerText: state.timerText,
-          progress: state.processingProgress
-        )
+        state.captureAccessibilityLabel
+          ?? CepessaSessionIndicatorAccessibility.indicatorLabel(
+            mode: state.mode,
+            isRecording: state.isRecording,
+            health: state.captureHealth,
+            timerText: state.timerText,
+            progress: state.processingProgress
+          )
       )
       .accessibilityValue(
-        CepessaSessionIndicatorAccessibility.indicatorValue(
-          isRecording: state.isRecording,
-          timerText: state.timerText,
-          progress: state.processingProgress
-        )
+        state.captureAccessibilityLabel
+          ?? CepessaSessionIndicatorAccessibility.indicatorValue(
+            isRecording: state.isRecording,
+            timerText: state.timerText,
+            progress: state.processingProgress
+          )
       )
       .accessibilityHint(CepessaSessionIndicatorAccessibility.indicatorHint(isTrayOpen: false))
       // Default activation (VO-Space) opens the tray; the named actions are
       // the rotor entries beside it.
       .accessibilityAction { controller.toggleControlTray() }
       .accessibilityAction(named: "Show Controls", controller.toggleControlTray)
-      .accessibilityAction(named: state.isRecording ? "Stop Recording" : "Start Recording") {
-        if state.isRecording {
-          controller.stopRecording()
-        } else {
-          controller.startRecording()
+      .accessibilityActions {
+        if state.canActivateSessionTransport {
+          Button(state.sessionTransportTitle) {
+            controller.toggleSessionRecording()
+          }
         }
       }
       .accessibilityIdentifier("cepessa.floatingBar.recordingSummary")
@@ -1552,9 +1700,10 @@ private struct SessionIndicatorLozenge: View {
   }
 
   private var restingHelpText: String {
-    state.isRecording
-      ? "Recording \(state.compactTimerText). Click for controls, drag to move."
-      : "Cepessa Sessions. Click for controls, drag to move."
+    if state.capturePhase != .idle {
+      return "\(state.trayStatusText). Click for controls, drag to move."
+    }
+    return "Cepessa Sessions. Click for controls, drag to move."
   }
 }
 
@@ -1701,8 +1850,10 @@ private struct SessionTrayTail: View {
         )
 
         SessionTrayTransportButton(
-          isRecording: state.isRecording,
-          action: state.isRecording ? controller.stopRecording : controller.startRecording
+          showsStop: state.sessionTransportShowsStop,
+          isEnabled: state.canActivateSessionTransport,
+          title: state.sessionTransportTitle,
+          action: controller.toggleSessionRecording
         )
       }
     }
@@ -1800,7 +1951,9 @@ private struct SessionTrayIconButton: View {
 private struct SessionTrayTransportButton: View {
   @State private var isHovered = false
 
-  let isRecording: Bool
+  let showsStop: Bool
+  let isEnabled: Bool
+  let title: String
   let action: () -> Void
 
   var body: some View {
@@ -1808,7 +1961,7 @@ private struct SessionTrayTransportButton: View {
       ZStack {
         Circle().fill(fill)
 
-        if isRecording {
+        if showsStop {
           // White on `systemRed` is the platform's own stop-button pairing and
           // is the only fixed foreground left in the app; the fill beneath it
           // is a fixed hue in both appearances, so a semantic label colour
@@ -1826,20 +1979,21 @@ private struct SessionTrayTransportButton: View {
       .contentShape(Circle())
     }
     .buttonStyle(CepessaPressStyle(scale: 0.92, pressedBrightness: -0.05))
+    .disabled(!isEnabled)
     .onHover { isHovered = $0 }
-    .help(isRecording ? "Stop recording" : "Start a new recording session")
-    .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
+    .help(title)
+    .accessibilityLabel(title)
     .accessibilityHint(
-      isRecording
+      showsStop
         ? "Ends capture and begins final transcription."
         : "Begins a new local recording session."
     )
     .accessibilityIdentifier(
-      isRecording ? "cepessa.floatingBar.stop" : "cepessa.floatingBar.record")
+      showsStop ? "cepessa.floatingBar.stop" : "cepessa.floatingBar.record")
   }
 
   private var fill: Color {
-    if isRecording { return CepessaColors.signalRed }
+    if showsStop { return CepessaColors.signalRed }
     return CepessaColors.signalRed.opacity(isHovered ? 0.26 : 0.16)
   }
 }

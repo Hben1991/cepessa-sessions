@@ -24,10 +24,14 @@ Trusted by 300,000+ professionals.
 </p>
 
 ```bash
-git clone https://github.com/Hben1991/cepessa-sessions.git && cd cepessa-sessions/desktop && ./run.sh --yolo
+git clone https://github.com/Hben1991/cepessa-sessions.git
+cd cepessa-sessions/desktop
+./run.sh
 ```
 
-Builds the macOS app, connects to the cloud backend, and launches. No env files, no credentials, no local backend.
+Builds and packages the isolated `Sessions Dev.app` without launching it,
+installing it, starting backend services, or selecting an external endpoint.
+Use `./run.sh --launch` to launch it with the isolated development data root.
 
 > **Requirements:** macOS 14+, [Xcode](https://developer.apple.com/xcode/) (includes Swift & code signing), [Node.js](https://nodejs.org/)
 

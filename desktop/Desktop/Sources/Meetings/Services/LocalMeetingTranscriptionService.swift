@@ -29,6 +29,15 @@ struct LocalSessionTranscriptionProgress: Sendable, Equatable {
   let stage: Stage
 }
 
+enum LocalSessionTranscriptionDurationFormatter {
+  static func string(from duration: TimeInterval) -> String {
+    guard duration.isFinite else { return "0s" }
+    let totalSeconds = max(0, Int(duration.rounded()))
+    guard totalSeconds >= 60 else { return "\(totalSeconds)s" }
+    return String(format: "%d:%02d", totalSeconds / 60, totalSeconds % 60)
+  }
+}
+
 struct LocalSessionTranscriptionWord: Sendable, Codable, Equatable {
   let startTime: TimeInterval
   let endTime: TimeInterval
@@ -162,7 +171,8 @@ enum LocalSessionTranscriptionPostprocessor {
   }
 
   private static func cleanRepeatedCourtesyFillers(in text: String) -> String {
-    let pieces = text
+    let pieces =
+      text
       .components(separatedBy: .newlines)
       .flatMap { $0.components(separatedBy: ".") }
       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -177,7 +187,8 @@ enum LocalSessionTranscriptionPostprocessor {
   }
 
   private static func courtesyFillerKey(for text: String) -> String? {
-    let key = text
+    let key =
+      text
       .trimmingCharacters(in: .whitespacesAndNewlines)
       .replacingOccurrences(of: "\u{200f}", with: "")
       .replacingOccurrences(of: "\u{200e}", with: "")
@@ -214,6 +225,24 @@ enum LocalSessionTranscriptionServiceError: LocalizedError {
       .transcriptionFailed(let message):
       return message
     }
+  }
+}
+
+struct LocalMeetingWhisperLanguageParameters: Equatable {
+  let languageCode: String?
+  let detectLanguageOnly: Bool
+
+  init(requestedLanguage: String) {
+    let normalized = requestedLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    if normalized.isEmpty || normalized == "auto" {
+      languageCode = nil
+    } else {
+      languageCode = normalized == "hebrew" ? "he" : normalized
+    }
+    // In whisper.cpp, detect_language is a diagnostic mode that returns before
+    // decoding. A nil language already requests automatic language selection.
+    detectLanguageOnly = false
   }
 }
 
@@ -604,7 +633,6 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
       context: context,
       modelURL: modelURL,
       language: normalizedLanguage,
-      shouldDetectLanguage: shouldDetectLanguage,
       prompt: prompt,
       translateToEnglish: translateToEnglish,
       noTimestamps: false,
@@ -623,7 +651,6 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
           context: context,
           modelURL: modelURL,
           language: fallbackLanguage,
-          shouldDetectLanguage: false,
           prompt: nil,
           translateToEnglish: translateToEnglish,
           noTimestamps: false,
@@ -642,7 +669,6 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
       context: context,
       modelURL: modelURL,
       language: normalizedLanguage,
-      shouldDetectLanguage: shouldDetectLanguage,
       prompt: nil,
       translateToEnglish: translateToEnglish,
       noTimestamps: true,
@@ -657,7 +683,6 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
     context: OpaquePointer,
     modelURL: URL,
     language: String,
-    shouldDetectLanguage: Bool,
     prompt: String?,
     translateToEnglish: Bool,
     noTimestamps: Bool,
@@ -677,16 +702,15 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
     params.suppress_blank = suppressBlank
     params.n_threads = Int32(max(1, ProcessInfo.processInfo.activeProcessorCount))
 
+    let languageParameters = LocalMeetingWhisperLanguageParameters(requestedLanguage: language)
     var languagePointer: UnsafeMutablePointer<CChar>?
-    if shouldDetectLanguage {
-      params.detect_language = true
-      params.language = nil
-    } else {
-      let languageCode = language == "hebrew" ? "he" : language
+    if let languageCode = languageParameters.languageCode {
       languagePointer = strdup(languageCode)
-      params.detect_language = false
       params.language = UnsafePointer(languagePointer)
+    } else {
+      params.language = nil
     }
+    params.detect_language = languageParameters.detectLanguageOnly
     defer {
       if let languagePointer {
         free(languagePointer)
@@ -905,31 +929,40 @@ enum LocalSessionWhisperKitModelInspector {
       "TextDecoder.mlmodelc",
       "MelSpectrogram.mlmodelc",
     ]
-    if requiredComponents.allSatisfy({
-      fileManager.fileExists(atPath: url.appendingPathComponent($0, isDirectory: true).path)
-    }) {
-      return true
+    return requiredComponents.allSatisfy { componentName in
+      compiledModelComponentHasContent(
+        url.appendingPathComponent(componentName, isDirectory: true),
+        fileManager: fileManager
+      )
     }
+  }
 
-    guard
+  private static func compiledModelComponentHasContent(
+    _ url: URL,
+    fileManager: FileManager
+  ) -> Bool {
+    var isDirectory: ObjCBool = false
+    guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
+      isDirectory.boolValue,
       let enumerator = fileManager.enumerator(
         at: url,
-        includingPropertiesForKeys: [.isDirectoryKey],
+        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
         options: [.skipsHiddenFiles]
       )
     else {
       return false
     }
 
-    var modelComponentCount = 0
     for case let fileURL as URL in enumerator {
-      guard fileURL.pathExtension == "mlmodelc" else { continue }
-      modelComponentCount += 1
-      if modelComponentCount >= 2 {
-        return true
+      guard
+        let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+        values.isRegularFile == true,
+        (values.fileSize ?? 0) > 0
+      else {
+        continue
       }
+      return true
     }
-
     return false
   }
 }
@@ -1241,7 +1274,9 @@ struct LocalMeetingMetalResourceLocator {
     _ directory: URL,
     fileManager: FileManager
   ) -> Bool {
-    if fileManager.fileExists(atPath: directory.appendingPathComponent(defaultMetalLibraryFileName).path) {
+    if fileManager.fileExists(
+      atPath: directory.appendingPathComponent(defaultMetalLibraryFileName).path)
+    {
       return true
     }
 
@@ -1268,9 +1303,12 @@ struct LocalMeetingMetalResourceLocator {
       return sourceDirectory
     }
 
-    let preparedRoot = writableDirectory ?? fileManager.temporaryDirectory
+    let preparedRoot =
+      writableDirectory
+      ?? fileManager.temporaryDirectory
       .appendingPathComponent("CepessaSessions-GGMLMetalResources", isDirectory: true)
-    let preparedDirectory = preparedRoot
+    let preparedDirectory =
+      preparedRoot
       .appendingPathComponent(safeDirectoryName(for: sourceDirectory), isDirectory: true)
     let preparedSourceURL = preparedDirectory.appendingPathComponent(metalSourceFileName)
     let preparedHeaderURL = preparedDirectory.appendingPathComponent(commonHeaderFileName)
@@ -1333,7 +1371,8 @@ struct LocalMeetingMetalResourceLocator {
 
   private static func developmentResourceDirectories(fileManager: FileManager) -> [URL] {
     let homeDirectory = fileManager.homeDirectoryForCurrentUser
-    let userTypeWhisperHelperResources = homeDirectory
+    let userTypeWhisperHelperResources =
+      homeDirectory
       .appendingPathComponent(
         "Applications/TypeWhisper.app/Contents/PlugIns/IvritASRPlugin.bundle/Contents/Resources/Helpers",
         isDirectory: true)

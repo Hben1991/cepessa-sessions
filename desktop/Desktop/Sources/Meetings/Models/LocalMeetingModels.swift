@@ -94,6 +94,7 @@ struct LocalSessionAudioArtifacts: Codable, Equatable, Sendable {
   var micTranscriptFileName: String? = nil
   var systemFileName: String?
   var mixedFileName: String?
+  var importedFileName: String? = nil
 
   static let empty = LocalSessionAudioArtifacts(
     micFileName: nil,
@@ -566,9 +567,17 @@ struct LocalSessionTranscriptTimelineItem: Identifiable, Equatable, Sendable {
   var captureArtifacts: [LocalSessionCaptureArtifact]
 }
 
+enum LocalSessionTitleOrigin: String, Codable, Equatable, Sendable {
+  case automatic
+  case user
+  case imported
+}
+
 struct LocalSession: Identifiable, Codable, Equatable, Sendable {
   let id: UUID
   var title: String
+  var titleOrigin: LocalSessionTitleOrigin
+  var processingError: String?
   var startedAt: Date
   var status: LocalSessionStatus
   var transcriptSegments: [LocalSessionTranscriptSegment]
@@ -578,6 +587,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
   var audioArtifacts: LocalSessionAudioArtifacts
   var contentClassification: LocalSessionContentClassification?
   var transcriptionEvidence: LocalSessionTranscriptionEvidenceSummary?
+  var latestTranscriptionAttempt: LocalSessionTranscriptionEvidenceSummary?
   var documentMarkdown: String?
   var documentChat: LocalSessionDocumentChat
 
@@ -603,10 +613,15 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     contentClassification: LocalSessionContentClassification? = nil,
     transcriptionEvidence: LocalSessionTranscriptionEvidenceSummary? = nil,
     documentMarkdown: String? = nil,
-    documentChat: LocalSessionDocumentChat = .empty
+    documentChat: LocalSessionDocumentChat = .empty,
+    titleOrigin: LocalSessionTitleOrigin = .user,
+    processingError: String? = nil,
+    latestTranscriptionAttempt: LocalSessionTranscriptionEvidenceSummary? = nil
   ) {
     self.id = id
     self.title = title
+    self.titleOrigin = titleOrigin
+    self.processingError = processingError
     self.startedAt = startedAt
     self.status = status
     self.transcriptSegments = transcriptSegments
@@ -616,6 +631,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     self.audioArtifacts = audioArtifacts
     self.contentClassification = contentClassification
     self.transcriptionEvidence = transcriptionEvidence
+    self.latestTranscriptionAttempt = latestTranscriptionAttempt
     self.documentMarkdown = documentMarkdown
     self.documentChat = documentChat
   }
@@ -623,6 +639,8 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
   enum CodingKeys: String, CodingKey {
     case id
     case title
+    case titleOrigin
+    case processingError
     case startedAt
     case status
     case transcriptSegments
@@ -633,6 +651,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     case audioArtifacts
     case contentClassification
     case transcriptionEvidence
+    case latestTranscriptionAttempt
     case documentMarkdown
     case documentChat
   }
@@ -641,6 +660,10 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     id = try container.decode(UUID.self, forKey: .id)
     title = try container.decode(String.self, forKey: .title)
+    // Older records have no provenance. Preserve their titles conservatively.
+    titleOrigin =
+      try container.decodeIfPresent(LocalSessionTitleOrigin.self, forKey: .titleOrigin) ?? .user
+    processingError = try container.decodeIfPresent(String.self, forKey: .processingError)
     startedAt = try container.decode(Date.self, forKey: .startedAt)
     status = try container.decode(LocalSessionStatus.self, forKey: .status)
     transcriptSegments =
@@ -663,6 +686,8 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     transcriptionEvidence =
       try container.decodeIfPresent(
         LocalSessionTranscriptionEvidenceSummary.self, forKey: .transcriptionEvidence)
+    latestTranscriptionAttempt = try container.decodeIfPresent(
+      LocalSessionTranscriptionEvidenceSummary.self, forKey: .latestTranscriptionAttempt)
     documentMarkdown = try container.decodeIfPresent(String.self, forKey: .documentMarkdown)
     documentChat =
       try container.decodeIfPresent(LocalSessionDocumentChat.self, forKey: .documentChat)
@@ -673,6 +698,8 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(id, forKey: .id)
     try container.encode(title, forKey: .title)
+    try container.encode(titleOrigin, forKey: .titleOrigin)
+    try container.encodeIfPresent(processingError, forKey: .processingError)
     try container.encode(startedAt, forKey: .startedAt)
     try container.encode(status, forKey: .status)
     try container.encode(transcriptSegments, forKey: .transcriptSegments)
@@ -683,6 +710,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     try container.encode(audioArtifacts, forKey: .audioArtifacts)
     try container.encodeIfPresent(contentClassification, forKey: .contentClassification)
     try container.encodeIfPresent(transcriptionEvidence, forKey: .transcriptionEvidence)
+    try container.encodeIfPresent(latestTranscriptionAttempt, forKey: .latestTranscriptionAttempt)
     try container.encodeIfPresent(documentMarkdown, forKey: .documentMarkdown)
     try container.encode(documentChat, forKey: .documentChat)
   }

@@ -1,3 +1,4 @@
+import AVKit
 import AppKit
 import SwiftUI
 
@@ -8,7 +9,8 @@ import SwiftUI
 /// decoration around three controls that already explain themselves.
 struct LocalClipsPage: View {
   @StateObject private var model = CepessaSessionsStore.shared.clipModel
-  @ObservedObject private var sessionModel = CepessaSessionsStore.shared.model
+  @ObservedObject private var captureLifecycle = CepessaSessionsStore.shared.captureLifecycle
+  @State private var hasScreenRecordingAccess = CGPreflightScreenCaptureAccess()
 
   var body: some View {
     NavigationSplitView {
@@ -16,6 +18,10 @@ struct LocalClipsPage: View {
         .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
     } detail: {
       detail
+    }
+    .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification))
+    { _ in
+      hasScreenRecordingAccess = CGPreflightScreenCaptureAccess()
     }
   }
 
@@ -75,7 +81,9 @@ struct LocalClipsPage: View {
           .font(.caption2)
           .foregroundStyle(.tertiary)
 
-        if status != .ready {
+        if model.isValidating(clip.id) {
+          Text("Checking recording…").font(.caption2).foregroundStyle(.secondary)
+        } else if status != .ready {
           CepessaStatusLabel(style: status, font: .caption2)
         }
       }
@@ -93,10 +101,16 @@ struct LocalClipsPage: View {
       Divider()
 
       VStack(spacing: CepessaChrome.Space.xs) {
-        HStack(spacing: CepessaChrome.Space.s) {
-          TextField("Clip title", text: $model.titleDraft)
-            .textFieldStyle(.roundedBorder)
-            .disabled(model.isRecording)
+        HStack(alignment: .bottom, spacing: CepessaChrome.Space.s) {
+          VStack(alignment: .leading, spacing: CepessaChrome.Space.xxs) {
+            Text("Title")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+
+            TextField("Optional name", text: $model.newClipTitleDraft)
+              .textFieldStyle(.roundedBorder)
+              .disabled(model.isRecording || model.isCaptureTransitioning)
+          }
 
           if model.isRecording {
             HStack(spacing: CepessaChrome.Space.xs) {
@@ -115,7 +129,8 @@ struct LocalClipsPage: View {
             model.isRecording ? model.stopClip() : model.startClip()
           } label: {
             Label(
-              model.isRecording ? "Stop" : "Record",
+              model.isCaptureTransitioning
+                ? "Please wait…" : (model.isRecording ? "Stop" : "Record"),
               systemImage: model.isRecording ? "stop.fill" : "record.circle"
             )
           }
@@ -127,21 +142,37 @@ struct LocalClipsPage: View {
           .accessibilityLabel(model.isRecording ? "Stop recording" : "Record clip")
         }
 
-        TextField("Agent focus (optional)", text: $model.intentDraft)
-          .textFieldStyle(.roundedBorder)
-          .disabled(model.isRecording)
-          .accessibilityLabel("Agent focus")
+        VStack(alignment: .leading, spacing: CepessaChrome.Space.xxs) {
+          Text("Agent focus")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+          TextField("Optional guidance", text: $model.newClipIntentDraft)
+            .textFieldStyle(.roundedBorder)
+            .disabled(model.isRecording || model.isCaptureTransitioning)
+            .accessibilityLabel("Agent focus")
+        }
       }
       .padding(.horizontal, CepessaChrome.Space.m)
 
       if let blocker = recorderBlockerMessage {
-        Label(blocker, systemImage: "exclamationmark.triangle.fill")
-          .labelStyle(.titleAndIcon)
-          .font(.caption)
-          .foregroundStyle(CepessaColors.textSecondary)
-          .lineLimit(2)
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .padding(.horizontal, CepessaChrome.Space.m)
+        VStack(alignment: .leading, spacing: CepessaChrome.Space.xxs) {
+          Label(blocker, systemImage: "exclamationmark.triangle.fill")
+            .labelStyle(.titleAndIcon)
+            .font(.caption)
+            .foregroundStyle(CepessaColors.textSecondary)
+            .lineLimit(2)
+
+          if !hasScreenRecordingAccess, !isSessionBusy {
+            Button("Open Screen Recording Settings") {
+              openScreenRecordingSettings()
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+          }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, CepessaChrome.Space.m)
       } else if let status = model.statusMessage {
         Text(status)
           .font(.caption)
@@ -156,24 +187,18 @@ struct LocalClipsPage: View {
   }
 
   private var isSessionBusy: Bool {
-    sessionModel.isRecording || sessionModel.isTranscribing
+    captureLifecycle.activeKind == .session
   }
 
   private var isRecordBlocked: Bool {
-    !model.isRecording && (isSessionBusy || !hasScreenRecordingAccess)
-  }
-
-  /// A clip is a screen recording; without that permission the capture would
-  /// start and immediately produce an empty file. Saying so up front is more
-  /// honest than letting it fail.
-  private var hasScreenRecordingAccess: Bool {
-    CGPreflightScreenCaptureAccess()
+    model.isCaptureTransitioning
+      || (!model.isRecording && (captureLifecycle.isBusy || !hasScreenRecordingAccess))
   }
 
   private var recorderBlockerMessage: String? {
     guard !model.isRecording else { return nil }
     if isSessionBusy {
-      return "Finish the active session recording or transcription before starting a clip."
+      return "Stop the active session recording before starting a clip."
     }
     if !hasScreenRecordingAccess {
       return "Screen Recording access is needed to capture a clip. Grant it in Settings."
@@ -193,12 +218,16 @@ struct LocalClipsPage: View {
             LabeledContent("Length", value: durationText(clip.duration))
           }
           LabeledContent("Status") {
-            CepessaStatusLabel(
-              style: CepessaStatusStyle.resolve(clip.status),
-              detail: clip.errorMessage,
-              font: .body
-            )
-            .multilineTextAlignment(.trailing)
+            if model.isValidating(clip.id) {
+              ProgressView("Checking recording…").controlSize(.small)
+            } else {
+              CepessaStatusLabel(
+                style: CepessaStatusStyle.resolve(clip.status),
+                detail: clip.errorMessage,
+                font: .body
+              )
+              .multilineTextAlignment(.trailing)
+            }
           }
           LabeledContent(
             "Transcript",
@@ -206,46 +235,86 @@ struct LocalClipsPage: View {
               ? "Not available"
               : "\(clip.transcriptSegments.count) segments"
           )
-          LabeledContent("Clip ID") {
-            Text(clip.id.uuidString)
-              .font(.caption.monospaced())
-              .textSelection(.enabled)
-          }
         } header: {
           Text(clip.title)
         }
 
+        if clip.status != .recording, !model.isValidating(clip.id),
+          let videoURL = model.videoPlaybackURL(for: clip.id),
+          let audioURL = model.audioPlaybackURL(for: clip.id)
+        {
+          Section("Recording") {
+            LocalClipPlaybackView(
+              videoURL: videoURL,
+              audioURL: audioURL
+            )
+            .id(clip.id)
+          }
+        }
+
         Section("Notes") {
-          TextField("Agent focus", text: $model.intentDraft)
+          TextField("Title", text: $model.selectedClipTitleDraft)
+            .accessibilityLabel("Selected clip title")
+
+          TextField("Agent focus", text: $model.selectedClipIntentDraft)
             .accessibilityLabel("What the agent should understand from this clip")
 
-          TextEditor(text: $model.postNotesDraft)
+          TextEditor(text: $model.selectedClipPostNotesDraft)
             .font(.body)
             .frame(minHeight: 96)
             .accessibilityLabel("Post-recording notes")
 
-          Button("Save Context") { model.saveSelectedNotes() }
+          HStack(spacing: CepessaChrome.Space.s) {
+            Button("Save Context") { model.saveSelectedNotes() }
+
+            if let feedback = model.selectedClipContextSaveFeedback {
+              switch feedback {
+              case .success(let message):
+                Label(message, systemImage: "checkmark.circle.fill")
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              case .failure(let message):
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                  .font(.caption)
+                  .foregroundStyle(CepessaColors.signalRed)
+                  .lineLimit(2)
+              }
+            }
+          }
         }
 
         // Only shown when there is a transcript to show. This is the clip's
         // own recorded text, read-only — the editable fields stay in Notes.
         if !clip.transcriptSegments.isEmpty {
           Section("Transcript") {
-            Text(clip.transcriptText)
+            Text(LocalTranscriptTextDirection.displayText(clip.transcriptText))
               .font(.callout)
               .foregroundStyle(CepessaColors.textPrimary)
               .textSelection(.enabled)
-              .frame(maxWidth: .infinity, alignment: .leading)
+              .multilineTextAlignment(
+                LocalTranscriptTextDirection.isRightToLeft(clip.transcriptText)
+                  ? .trailing : .leading
+              )
+              .frame(
+                maxWidth: .infinity,
+                alignment: LocalTranscriptTextDirection.isRightToLeft(clip.transcriptText)
+                  ? .trailing : .leading
+              )
               .accessibilityLabel("Clip transcript")
           }
         }
 
         Section {
+          if model.canRetryTranscription(for: clip.id) {
+            Button("Retry Transcript") { model.retryTranscription(for: clip.id) }
+          }
+
           Button {
             model.copyAgentPrompt(for: clip.id)
           } label: {
             Label("Copy Agent Prompt", systemImage: "doc.on.doc")
           }
+          .disabled(!model.canCopyAgentPrompt(for: clip.id))
 
           Button {
             if let url = model.clipDirectoryURL(for: clip.id) {
@@ -263,7 +332,7 @@ struct LocalClipsPage: View {
         } header: {
           Text("Handoff")
         } footer: {
-          Text("The prompt points an agent at this clip's video and transcript through MCP.")
+          Text("Review the recording and notes before copying the handoff.")
         }
       }
       .formStyle(.grouped)
@@ -271,7 +340,7 @@ struct LocalClipsPage: View {
       ContentUnavailableView {
         Label("No Clip Selected", systemImage: "shippingbox")
       } description: {
-        Text("Select a clip to copy its agent prompt.")
+        Text("Select a clip to review its recording, transcript, and notes.")
       }
     }
   }
@@ -284,6 +353,81 @@ struct LocalClipsPage: View {
     return hours > 0
       ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
       : String(format: "%d:%02d", minutes, seconds)
+  }
+
+  private func openScreenRecordingSettings() {
+    guard
+      let url = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+      )
+    else { return }
+    NSWorkspace.shared.open(url)
+  }
+}
+
+private struct LocalClipPlaybackView: View {
+  let videoURL: URL
+  let audioURL: URL
+  @State private var player: AVPlayer?
+  @State private var errorMessage: String?
+
+  var body: some View {
+    Group {
+      if let player {
+        VideoPlayer(player: player)
+          .aspectRatio(16.0 / 9.0, contentMode: .fit)
+          .accessibilityLabel("Clip recording player")
+      } else if let errorMessage {
+        Label(errorMessage, systemImage: "exclamationmark.triangle")
+          .font(.callout)
+      } else {
+        ProgressView("Opening recording…")
+      }
+    }
+    .task(id: videoURL) { await loadRecording() }
+    .onDisappear { player?.pause() }
+  }
+
+  private func loadRecording() async {
+    player?.pause()
+    player = nil
+    errorMessage = nil
+    do {
+      let video = AVURLAsset(url: videoURL)
+      let composition = AVMutableComposition()
+      let videoTracks = try await video.loadTracks(withMediaType: .video)
+      guard let sourceVideo = videoTracks.first,
+        let videoTrack = composition.addMutableTrack(
+          withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
+      else { throw CocoaError(.fileReadCorruptFile) }
+      let duration = try await video.load(.duration)
+      guard duration.seconds.isFinite, duration.seconds > 0 else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      try videoTrack.insertTimeRange(
+        CMTimeRange(start: .zero, duration: duration), of: sourceVideo, at: .zero)
+      videoTrack.preferredTransform = try await sourceVideo.load(.preferredTransform)
+      if FileManager.default.fileExists(atPath: audioURL.path) {
+        let audio = AVURLAsset(url: audioURL)
+        let audioTracks = try await audio.loadTracks(withMediaType: .audio)
+        if let sourceAudio = audioTracks.first,
+          let audioTrack = composition.addMutableTrack(
+            withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+        {
+          let audioDuration = try await audio.load(.duration)
+          try audioTrack.insertTimeRange(
+            CMTimeRange(start: .zero, duration: CMTimeMinimum(duration, audioDuration)),
+            of: sourceAudio, at: .zero)
+        }
+      }
+      try Task.checkCancellation()
+      player = AVPlayer(playerItem: AVPlayerItem(asset: composition))
+    } catch is CancellationError {
+      return
+    } catch {
+      errorMessage =
+        "This recording could not be opened. Use Reveal in Finder to inspect the saved files."
+    }
   }
 }
 

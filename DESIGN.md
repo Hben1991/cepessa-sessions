@@ -1,33 +1,94 @@
-# Cepessa Sessions (desktop) — Design System
+# Cepessa Sessions desktop design
 
-Target: the 2026-07 "floating-bar-first" distillation. Swift files: `desktop/Desktop/Sources/Theme/`.
+This document describes the current native macOS interface. The source of
+truth is `desktop/Desktop/Sources`, especially `Theme`, the session reader,
+Clips, Settings, and the floating session bar.
 
-## Surfaces (exactly two treatments)
-1. **Bar surface** — the floating pill and status-bar popover replacements. One capsule/rounded rect, near-solid light fill (`paper` at ~0.97 over `.ultraThinMaterial` on pre-26, single `.glassEffect` on macOS 26+), ONE hairline stroke (`hairline` at 0.5 opacity), ONE shadow (y:6 r:14, ~0.10). No gradient stacks, no white top-glow shadows, no double strokes.
-2. **Window surface** — the session window and settings. Plain `backgroundPrimary` window background, content separated by whitespace and 1px hairlines only. Cards only for the transcript speaker bubbles; nothing else gets a card.
+## Product shape
 
-Delete/stop using: `cepessaGlassPanel`, `cepessaCanvas`, `cepessaPaper`, `cepessaInstrumentStrip`, the two floating-toolbar gradient modifiers, `CepessaStatusSkeuomorphicButtonStyle`.
+Cepessa Sessions is an accessory app. It has no Dock icon and opens no main
+window at launch. The menu bar item is its persistent entry point; the floating
+recording indicator is optional. Sessions, Clips, and Settings open on demand.
 
-## Radii (collapse 9 tokens → 3)
-- `bar` = capsule (999)
-- `panel` = 14 (windows, popovers, sheets, transcript bubbles)
-- `control` = 8 (buttons, fields, chips)
+The application menu also exposes the core destinations through native
+commands:
 
-## Color — Restrained strategy
-Tinted neutrals + one state accent, nothing else.
-- Neutrals: keep `paper 0xFFFFFF`→ retint to 0xFEFEFD; `paperDeep 0xFAFAF9`; `ink 0x1D1D1F`; text secondary `0x636366`; tertiary `0x8E8E93`; hairline `0xE8E8EA`.
-- **Recording red `0xE5484D`** is the only saturated color and appears only while recording (record dot, stop button, status-bar icon tint, timer text).
-- Processing/progress: `ink` at reduced opacity, no color.
-- Success/warning/error keep system values but appear only in transient notices.
-- Remove: `purple*` aliases, `purpleGradient`, `speakerColors` array (speakers differentiate by weight/initials, not six grays), `moss/copper` poetic names → plain semantic names.
+- Browse All Sessions: `Command-O`
+- Import Audio: `Shift-Command-I`
+- Show Clips: `Shift-Command-L`
+- Settings: `Command-,`
 
-## Typography
-System font only. Four sizes: 11 (caption), 13 (body/controls), 15 (section title), 22 (timer, monospaced digits, medium). Weights: regular, medium, semibold. Keep `scaledFont` infrastructure.
+## Native windows
+
+The session reader is a quiet, opaque document surface. Long-form transcript
+text uses the semantic text background, a centered reading column, native text
+selection, and a native window toolbar for the current session, import,
+transcription, and export. Source audio, evidence warnings, and attachments sit
+with the transcript because they explain what the reader can trust.
+
+Clips is a native two-pane `NavigationSplitView`: recordings in the sidebar,
+the selected clip in the detail pane, and one capture bar anchored below the
+list. It should continue to behave like a document browser rather than a
+dashboard.
+
+Settings is a grouped macOS `Form` with native sections, pickers, toggles,
+progress, permission rows, and destructive confirmation. Do not replace it
+with a custom settings canvas. The application shortcut and floating controls
+must open this same settings window rather than separate SwiftUI and AppKit
+variants.
+
+## Surfaces and material
+
+Readable window content is opaque. Separation comes from native lists, forms,
+dividers, spacing, and semantic raised controls. Glass is reserved for the
+floating session indicator, its expanded controls, and transient floating
+menus. Never place transcript text or other long-form content on glass.
+
+The floating surface uses one native glass or material fill, a lit rim, and two
+shadows: a tight contact shadow and a wider ambient shadow. Its borderless host
+panel includes transparent bleed derived from the ambient shadow radius and
+offset. Preserve that bleed; clipping it creates a hard rectangular edge and
+can hide the collapsed indicator.
+
+On macOS 26 and later the floating surface uses Liquid Glass. Earlier systems
+use regular material. Reduce Transparency switches it to an opaque semantic
+surface, and Increase Contrast strengthens the rim.
+
+## Color and type
+
+`CepessaColors` resolves surfaces, labels, separators, and the accent through
+semantic AppKit colors. This is what supports light mode, dark mode, vibrancy,
+and Increase Contrast. The user's system accent marks ordinary selection and
+action. System red means active capture or error; system orange means warning;
+green is reserved for verified ready or success states.
+
+Use system typography and native control metrics. Long-form text may scale
+through the existing reader zoom and `scaledFont` infrastructure. Avoid fixed
+display typography where a native title, label, or section header already
+communicates hierarchy.
 
 ## Motion
-One curve everywhere: `.timingCurve(0.23, 1, 0.32, 1, duration: 0.22)` (already used by the bar). Keep `CepessaPressStyle` (scale 0.975). No move+opacity+scale combos; pick one transition per element. Respect Reduce Motion (already wired).
 
-## Layout
-- Floating bar: 8pt internal gaps, 10pt padding, height 44 idle / 52 recording.
-- Session window: single column, max content width 720, 24pt outer padding, no sidebars or rails.
-- Menus: native `NSMenu`/SwiftUI `Menu` everywhere; the custom `CepessaToolbarMenu` popover is retired.
+The floating indicator is one continuous lozenge across idle, recording, and
+expanded states. Its container changes geometry with the shared spring while
+contents leave and enter on shorter opacity curves. The state ring stays at the
+leading edge, so it travels with the capsule instead of jumping between views.
+
+Hover changes lighting without changing geometry. Smaller state changes use a
+short ease-out. Reduce Motion removes the spring and spatial offsets while
+preserving state changes and readable opacity transitions. The panel expands
+before its contents and shrinks only after outgoing content clears, which keeps
+the glass and its controls inside the host bounds.
+
+## Change rules
+
+- Preserve the native reader, two-pane Clips browser, and grouped Settings
+  structure unless a tested workflow requires a different hierarchy.
+- Keep persistent content opaque and reserve glass for floating chrome.
+- Use semantic colors and system controls before adding fixed visual tokens.
+- Treat evidence, capture, processing, and conflict states truthfully; absence
+  of a warning must not stand in for verified readiness.
+- Test light and dark appearances, Increase Contrast, Reduce Transparency, and
+  Reduce Motion when changing shared theme or floating-bar behavior.
+- Avoid blanket theme rewrites. Change the smallest shared token or component
+  that expresses the intended behavior.

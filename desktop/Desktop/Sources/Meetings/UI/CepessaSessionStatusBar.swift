@@ -49,7 +49,32 @@ struct CepessaSessionStatusBarSnapshot: Equatable {
 
   @MainActor
   static func make(from model: LocalMeetingAppModel, clipModel: LocalClipViewModel) -> Self {
-    if clipModel.isRecording {
+    switch model.captureLifecycle.phase {
+    case .starting(let lease):
+      return CepessaSessionStatusBarSnapshot(
+        mode: .transcribing,
+        title: lease.kind == .session ? "Starting recording…" : "Starting CLIP…",
+        detail:
+          lease.kind == .session
+          ? "Preparing microphone and system audio capture."
+          : "Preparing screen and local audio capture.",
+        progress: nil,
+        canRetryLocal: false,
+        queueCount: model.processingQueue.count
+      )
+    case .stopping(let lease):
+      return CepessaSessionStatusBarSnapshot(
+        mode: .transcribing,
+        title: lease.kind == .session ? "Stopping recording…" : "Stopping CLIP…",
+        detail:
+          lease.kind == .session
+          ? "Finalizing local audio before transcription starts."
+          : "Finalizing screen and audio files before transcription starts.",
+        progress: nil,
+        canRetryLocal: false,
+        queueCount: model.processingQueue.count
+      )
+    case .recording(let lease) where lease.kind == .clip:
       return CepessaSessionStatusBarSnapshot(
         mode: .recording,
         title: "Clip recording \(clipModel.recordingDurationText)",
@@ -58,10 +83,18 @@ struct CepessaSessionStatusBarSnapshot: Equatable {
         canRetryLocal: false,
         queueCount: model.processingQueue.count
       )
+    case .idle, .recording:
+      break
     }
 
+    let lifecycleSessionIsRecording: Bool
+    if case .recording(let lease) = model.captureLifecycle.phase {
+      lifecycleSessionIsRecording = lease.kind == .session
+    } else {
+      lifecycleSessionIsRecording = false
+    }
     let resolvedMode = CepessaSessionStatusBarMode.resolve(
-      isRecording: model.isRecording,
+      isRecording: model.isRecording || lifecycleSessionIsRecording,
       hasFault: model.recorderErrorMessage?.isEmpty == false,
       isTranscribing: model.isTranscribing
     )
@@ -108,6 +141,17 @@ struct CepessaSessionStatusBarSnapshot: Equatable {
       )
     }
 
+    if clipModel.isProcessing {
+      return CepessaSessionStatusBarSnapshot(
+        mode: .transcribing,
+        title: "Processing CLIP transcript",
+        detail: clipModel.statusMessage ?? "Preparing the local CLIP transcript.",
+        progress: nil,
+        canRetryLocal: false,
+        queueCount: model.processingQueue.count
+      )
+    }
+
     return .idle
   }
 }
@@ -126,6 +170,9 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
   private var clipModel: LocalClipViewModel {
     CepessaSessionsStore.shared.clipModel
   }
+  private var captureLifecycle: LocalCaptureLifecycle {
+    CepessaSessionsStore.shared.captureLifecycle
+  }
 
   func connect(model: LocalMeetingAppModel) {
     if self.model !== model {
@@ -137,16 +184,23 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
   }
 
   func toggleRecording() {
-    guard !clipModel.isRecording else { return }
-    model?.toggleRecording()
+    switch CepessaSessionCaptureControlPolicy.resolve(captureLifecycle.phase) {
+    case .startSession, .cancelSessionStart, .stopSession:
+      model?.toggleRecording()
+    case .stopClip, .unavailable:
+      return
+    }
   }
 
   func stopClipRecording() {
+    guard CepessaSessionCaptureControlPolicy.resolve(captureLifecycle.phase) == .stopClip else {
+      return
+    }
     clipModel.stopClip()
   }
 
   func openMainWindow() {
-    CepessaSessionsWindowController.shared.show(destination: .sessions)
+    CepessaSessionsWindowController.shared.showLibrary()
   }
 
   func retryLocalTranscription() {
@@ -174,6 +228,8 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
       clipModel.$isRecording.map { _ in () }.eraseToAnyPublisher(),
       clipModel.$recordingDurationText.map { _ in () }.eraseToAnyPublisher(),
       clipModel.$statusMessage.map { _ in () }.eraseToAnyPublisher(),
+      clipModel.$clips.map { _ in () }.eraseToAnyPublisher(),
+      captureLifecycle.$phase.map { _ in () }.eraseToAnyPublisher(),
     ]
 
     Publishers.MergeMany(publishers)
@@ -207,16 +263,39 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
   /// including when the floating indicator has been hidden mid-recording — so
   /// it has to speak the full situation, and the way back, on its own.
   private func applyAccessibility(to button: NSStatusBarButton, model: LocalMeetingAppModel) {
-    if clipModel.isRecording {
-      let label = "Cepessa Sessions, clip recording"
+    switch captureLifecycle.phase {
+    case .starting(let lease):
+      let label =
+        lease.kind == .session
+        ? "Cepessa Sessions, starting recording"
+        : "Cepessa Sessions, starting CLIP capture"
+      button.setAccessibilityLabel(label)
+      button.setAccessibilityTitle(label)
+      button.setAccessibilityValue(snapshot.detail)
+      button.setAccessibilityHelp(CepessaSessionIndicatorAccessibility.statusItemAction)
+      return
+    case .recording(let lease) where lease.kind == .clip:
+      let label = "Cepessa Sessions, CLIP recording"
       button.setAccessibilityLabel(label)
       button.setAccessibilityTitle(label)
       button.setAccessibilityValue(
-        "Clip recording "
+        "CLIP recording "
           + CepessaSessionIndicatorAccessibility.compactSpokenTimer(
             clipModel.recordingDurationText))
       button.setAccessibilityHelp(CepessaSessionIndicatorAccessibility.statusItemAction)
       return
+    case .stopping(let lease):
+      let label =
+        lease.kind == .session
+        ? "Cepessa Sessions, stopping recording"
+        : "Cepessa Sessions, stopping CLIP capture"
+      button.setAccessibilityLabel(label)
+      button.setAccessibilityTitle(label)
+      button.setAccessibilityValue(snapshot.detail)
+      button.setAccessibilityHelp(CepessaSessionIndicatorAccessibility.statusItemAction)
+      return
+    case .idle, .recording:
+      break
     }
 
     let hasFault = model.recorderErrorMessage?.isEmpty == false
@@ -263,7 +342,6 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
     menu.addItem(.separator())
 
     let isRecording = model?.isRecording == true
-    let isClipRecording = clipModel.isRecording
 
     // A hidden indicator must never become a dead end: while capture is live
     // the way back sits at the top of the menu, not buried under it.
@@ -278,7 +356,8 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
       menu.addItem(.separator())
     }
 
-    if isClipRecording {
+    switch CepessaSessionCaptureControlPolicy.resolve(captureLifecycle.phase) {
+    case .stopClip:
       let stopClip = NSMenuItem(
         title: "Stop Clip Recording",
         action: #selector(stopClipMenuItem),
@@ -286,9 +365,35 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
       )
       stopClip.target = self
       menu.addItem(stopClip)
-    } else {
+    case .cancelSessionStart:
       let record = NSMenuItem(
-        title: isRecording ? "Stop Recording" : "Start Recording",
+        title: "Cancel Starting Recording",
+        action: #selector(recordMenuItem),
+        keyEquivalent: ""
+      )
+      record.target = self
+      menu.addItem(record)
+    case .stopSession:
+      let record = NSMenuItem(
+        title: "Stop Recording",
+        action: #selector(recordMenuItem),
+        keyEquivalent: ""
+      )
+      record.target = self
+      menu.addItem(record)
+    case .unavailable:
+      let stopping = NSMenuItem(
+        title:
+          captureLifecycle.phase.lease?.kind == .session
+          ? "Stopping Recording…" : "Stopping Clip Recording…",
+        action: nil,
+        keyEquivalent: ""
+      )
+      stopping.isEnabled = false
+      menu.addItem(stopping)
+    case .startSession:
+      let record = NSMenuItem(
+        title: "Start Recording",
         action: #selector(recordMenuItem),
         keyEquivalent: ""
       )
@@ -382,7 +487,7 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
   }
 
   @objc private func openWindowMenuItem() {
-    CepessaSessionsWindowController.shared.show(destination: .sessions)
+    CepessaSessionsWindowController.shared.showLibrary()
   }
 
   @objc private func openClipsMenuItem() {

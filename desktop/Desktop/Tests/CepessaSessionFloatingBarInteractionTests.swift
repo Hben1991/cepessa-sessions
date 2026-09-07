@@ -232,6 +232,41 @@ final class CepessaSessionFloatingBarInteractionTests: XCTestCase {
     )
   }
 
+  @MainActor
+  func testCaptureControlPolicyCancelsOnlyAStartingSession() throws {
+    let lifecycle = LocalCaptureLifecycle()
+
+    let sessionLease = try lifecycle.beginCapture(.session)
+    XCTAssertEqual(
+      CepessaSessionCaptureControlPolicy.resolve(lifecycle.phase),
+      .cancelSessionStart
+    )
+    XCTAssertTrue(lifecycle.finishCapture(sessionLease))
+
+    let clipLease = try lifecycle.beginCapture(.clip)
+    XCTAssertEqual(
+      CepessaSessionCaptureControlPolicy.resolve(lifecycle.phase),
+      .stopClip
+    )
+    XCTAssertNotEqual(
+      CepessaSessionCaptureControlPolicy.resolve(lifecycle.phase),
+      .cancelSessionStart
+    )
+    XCTAssertTrue(lifecycle.finishCapture(clipLease))
+  }
+
+  @MainActor
+  func testCaptureControlPolicyDisablesActionsWhileStopping() throws {
+    let lifecycle = LocalCaptureLifecycle()
+    let lease = try lifecycle.beginCapture(.session)
+
+    XCTAssertTrue(lifecycle.beginStopping(lease))
+    XCTAssertEqual(
+      CepessaSessionCaptureControlPolicy.resolve(lifecycle.phase),
+      .unavailable
+    )
+  }
+
   // MARK: - Interaction reducer
 
   func testHoverNeverChangesGeometry() {

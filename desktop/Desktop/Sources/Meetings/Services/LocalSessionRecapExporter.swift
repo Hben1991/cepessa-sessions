@@ -85,6 +85,17 @@ struct LocalSessionRecapExporter {
     let baseName = sanitizedFileName("\(title) Transcript")
     let url = directory.appendingPathComponent(
       "\(baseName.isEmpty ? "session-transcript" : baseName).md")
+    return try exportTranscriptMarkdown(session: session, toFile: url, fileManager: fileManager)
+  }
+
+  /// Save-panel approval applies to this exact URL, including the chosen filename.
+  func exportTranscriptMarkdown(
+    session: LocalSession,
+    toFile url: URL,
+    fileManager: FileManager = .default
+  ) throws -> URL {
+    try fileManager.createDirectory(
+      at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     try transcriptMarkdown(for: session).write(to: url, atomically: true, encoding: .utf8)
     return url
   }
@@ -128,6 +139,14 @@ struct LocalSessionRecapExporter {
       )
     )
     lines.append("")
+    if session.status == .failed || session.transcriptionEvidence?.disposition == .degraded {
+      lines.append(
+        "> Transcript needs review. This text may be incomplete; check the original recording.")
+      if let detail = session.processingError ?? session.transcriptionEvidence?.issues.first {
+        lines.append("> " + detail.replacingOccurrences(of: "\n", with: " "))
+      }
+      lines.append("")
+    }
     lines.append("## Transcript")
     lines.append("")
 
@@ -162,13 +181,15 @@ struct LocalSessionRecapExporter {
 
   private func imageMarkdownLine(for attachment: LocalSessionAttachment) -> String? {
     guard attachment.kind == .image || attachment.kind == .capture else { return nil }
-    guard let urlString = attachment.urlString, !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    guard let urlString = attachment.urlString,
+      !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     else {
       return nil
     }
 
     let fileURL = URL(fileURLWithPath: urlString)
-    let title = attachment.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let title =
+      attachment.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       ? "Image"
       : attachment.title
     let stamp = attachment.sessionOffset.map(timeString(for:)) ?? "00:00"

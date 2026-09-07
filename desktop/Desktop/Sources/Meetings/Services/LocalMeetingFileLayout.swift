@@ -69,6 +69,12 @@ struct LocalSessionFileLayout {
   static let defaultWhisperKitHebrewModelID = "ivrit-ai_whisper-large-v3-turbo"
   static let defaultHebrewModelID = "ivrit-ai_whisper-large-v3-turbo-ggml"
   private static let defaultHebrewModelFileName = "ggml-model.bin"
+  private static let typeWhisperPluginModelsPath = [
+    "TypeWhisper",
+    "PluginData",
+    "com.typewhisper.ivrit-asr",
+    "models",
+  ]
   private static let legacyRootName = "Cepessa Legacy"
   private static let legacySessionsRootName = "Meetings"
   private static let currentRootName = "Cepessa"
@@ -131,9 +137,11 @@ struct LocalSessionFileLayout {
 
   let baseDirectory: URL
   private let resolvedLegacyRootDirectory: URL
+  private let compatibleModelSearchRootsOverride: [URL]?
 
-  init(baseDirectory: URL) {
+  init(baseDirectory: URL, compatibleModelSearchRoots: [URL]? = nil) {
     self.baseDirectory = baseDirectory
+    compatibleModelSearchRootsOverride = compatibleModelSearchRoots
 
     let standardizedCurrent = baseDirectory.standardizedFileURL.path
     let standardizedDefault = Self.currentBaseDirectory.standardizedFileURL.path
@@ -353,12 +361,17 @@ struct LocalSessionFileLayout {
     sessionDirectory(for: sessionID).appendingPathComponent("mixed.wav", isDirectory: false)
   }
 
+  func importedAudioURL(for sessionID: UUID) -> URL {
+    sessionDirectory(for: sessionID).appendingPathComponent("imported.wav", isDirectory: false)
+  }
+
   func existingAudioURL(
     for sessionID: UUID,
     artifacts: LocalSessionAudioArtifacts,
     fileManager: FileManager = .default
   ) -> URL? {
     let orderedFileNames = [
+      artifacts.importedFileName,
       artifacts.mixedFileName,
       artifacts.micFileName,
       artifacts.systemFileName,
@@ -377,7 +390,7 @@ struct LocalSessionFileLayout {
     for root in roots {
       for fileName in candidateFileNames {
         let candidate = root.appendingPathComponent(fileName, isDirectory: false)
-        if fileManager.fileExists(atPath: candidate.path) {
+        if isUsableWaveAudio(at: candidate, fileManager: fileManager) {
           return candidate
         }
       }
@@ -411,7 +424,7 @@ struct LocalSessionFileLayout {
   ) -> URL? {
     for modelID in Self.modelIDs(for: speedMode) {
       let candidate = resolvedModelURL(for: modelID, fileManager: fileManager)
-      if fileManager.fileExists(atPath: candidate.path) {
+      if isValidGGMLModelFile(candidate, fileManager: fileManager) {
         return candidate
       }
     }
@@ -433,9 +446,11 @@ struct LocalSessionFileLayout {
         let modelID = directoryURL.lastPathComponent.lowercased()
         guard !modelID.contains(Self.defaultHebrewModelID.lowercased()) else { continue }
 
-        let candidate = directoryURL.appendingPathComponent(
-          Self.defaultHebrewModelFileName, isDirectory: false)
-        if fileManager.fileExists(atPath: candidate.path) {
+        if let candidate = resolvedGGMLModelURL(
+          in: directoryURL,
+          modelID: directoryURL.lastPathComponent,
+          fileManager: fileManager)
+        {
           return candidate
         }
       }
@@ -471,7 +486,10 @@ struct LocalSessionFileLayout {
         let modelID = directoryURL.lastPathComponent.lowercased()
         guard modelID.contains("whisper") || modelID.contains("openai") else { continue }
         guard !modelID.contains("ggml"), !modelID.contains("ivrit-ai") else { continue }
-        if isWhisperKitModelDirectory(directoryURL, fileManager: fileManager) {
+        if LocalSessionWhisperKitModelInspector.isWhisperKitModelDirectory(
+          directoryURL,
+          fileManager: fileManager)
+        {
           return directoryURL
         }
       }
@@ -521,25 +539,30 @@ struct LocalSessionFileLayout {
   }
 
   private func resolvedModelURL(for modelID: String, fileManager: FileManager) -> URL {
-    let installedModelURL = modelURL(for: modelID)
-    if fileManager.fileExists(atPath: installedModelURL.path) {
-      return installedModelURL
+    let modelDirectories =
+      [
+        modelDirectory(for: modelID),
+        legacyModelDirectory(for: modelID),
+      ]
+      + compatibleModelRoots().map {
+        $0.appendingPathComponent(modelID, isDirectory: true)
+      } + [
+        URL(
+          fileURLWithPath: "/Users/ben/Documents/App/General/__MODELS__/\(modelID)",
+          isDirectory: true)
+      ]
+
+    for directory in modelDirectories {
+      if let modelURL = resolvedGGMLModelURL(
+        in: directory,
+        modelID: modelID,
+        fileManager: fileManager)
+      {
+        return modelURL
+      }
     }
 
-    let legacyModelURL = legacyModelURL(for: modelID)
-    if fileManager.fileExists(atPath: legacyModelURL.path) {
-      return legacyModelURL
-    }
-
-    let developmentModelURL = URL(
-      fileURLWithPath:
-        "/Users/ben/Documents/App/General/__MODELS__/\(modelID)/\(Self.defaultHebrewModelFileName)"
-    )
-    if fileManager.fileExists(atPath: developmentModelURL.path) {
-      return developmentModelURL
-    }
-
-    return installedModelURL
+    return modelURL(for: modelID)
   }
 
   private func resolvedWhisperKitModelURL(for modelID: String, fileManager: FileManager) -> URL? {
@@ -552,60 +575,164 @@ struct LocalSessionFileLayout {
     ]
 
     for candidate in candidates
-    where isWhisperKitModelDirectory(candidate, fileManager: fileManager) {
+    where LocalSessionWhisperKitModelInspector.isWhisperKitModelDirectory(
+      candidate,
+      fileManager: fileManager)
+    {
       return candidate
     }
 
     return nil
   }
 
-  private func isWhisperKitModelDirectory(_ url: URL, fileManager: FileManager) -> Bool {
-    var isDirectory: ObjCBool = false
-    guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
-      isDirectory.boolValue
-    else {
-      return false
-    }
-
-    let requiredComponents = [
-      "AudioEncoder.mlmodelc",
-      "TextDecoder.mlmodelc",
-      "MelSpectrogram.mlmodelc",
-    ]
-    if requiredComponents.allSatisfy({
-      fileManager.fileExists(atPath: url.appendingPathComponent($0, isDirectory: true).path)
-    }) {
-      return true
-    }
-
-    guard
-      let enumerator = fileManager.enumerator(
-        at: url,
-        includingPropertiesForKeys: [.isDirectoryKey],
-        options: [.skipsHiddenFiles]
-      )
-    else {
-      return false
-    }
-
-    var modelComponentCount = 0
-    for case let fileURL as URL in enumerator {
-      guard fileURL.pathExtension == "mlmodelc" else { continue }
-      modelComponentCount += 1
-      if modelComponentCount >= 2 {
-        return true
-      }
-    }
-
-    return false
-  }
-
   private func modelSearchRoots() -> [URL] {
-    [
+    var roots = [
       modelsDirectory,
       legacyModelsDirectory,
       URL(fileURLWithPath: "/Users/ben/Documents/App/General/__MODELS__", isDirectory: true),
     ]
+    roots.append(contentsOf: compatibleModelRoots())
+    return roots
+  }
+
+  private func compatibleModelRoots() -> [URL] {
+    if let compatibleModelSearchRootsOverride {
+      return deduplicatedModelRoots(compatibleModelSearchRootsOverride)
+    }
+
+    let relativeApplicationSupportDirectory = baseDirectory.deletingLastPathComponent()
+    let userApplicationSupportDirectory = FileManager.default.urls(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask
+    )[0]
+    return deduplicatedModelRoots(
+      [relativeApplicationSupportDirectory, userApplicationSupportDirectory].map {
+        Self.typeWhisperPluginModelsPath.reduce($0) { partialURL, pathComponent in
+          partialURL.appendingPathComponent(pathComponent, isDirectory: true)
+        }
+      })
+  }
+
+  private func deduplicatedModelRoots(_ roots: [URL]) -> [URL] {
+    var seenPaths: Set<String> = []
+    return roots.filter { seenPaths.insert($0.standardizedFileURL.path).inserted }
+  }
+
+  private func resolvedGGMLModelURL(
+    in directory: URL,
+    modelID: String,
+    fileManager: FileManager
+  ) -> URL? {
+    var candidateNames = [Self.defaultHebrewModelFileName, "\(modelID).bin"]
+    let normalizedModelID =
+      modelID
+      .replacingOccurrences(of: "openai_whisper-", with: "")
+      .replacingOccurrences(of: "-ggml", with: "")
+    candidateNames.append("ggml-\(normalizedModelID).bin")
+
+    var seenNames: Set<String> = []
+    for name in candidateNames where seenNames.insert(name).inserted {
+      let candidate = directory.appendingPathComponent(name, isDirectory: false)
+      if isValidGGMLModelFile(candidate, fileManager: fileManager) {
+        return candidate
+      }
+    }
+
+    guard
+      let contents = try? fileManager.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: [.skipsHiddenFiles]
+      )
+    else {
+      return nil
+    }
+    let validGGMLFiles =
+      contents
+      .filter { $0.pathExtension.lowercased() == "bin" && $0.lastPathComponent.hasPrefix("ggml-") }
+      .filter { isValidGGMLModelFile($0, fileManager: fileManager) }
+      .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    return validGGMLFiles.count == 1 ? validGGMLFiles[0] : nil
+  }
+
+  private func isValidGGMLModelFile(_ url: URL, fileManager: FileManager) -> Bool {
+    guard
+      let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+      values.isRegularFile == true,
+      (values.fileSize ?? 0) >= 4,
+      let handle = try? FileHandle(forReadingFrom: url)
+    else {
+      return false
+    }
+    defer { try? handle.close() }
+    guard
+      let magic = try? handle.read(upToCount: 4),
+      magic.count == 4
+    else {
+      return false
+    }
+    return magic == Data([0x6c, 0x6d, 0x67, 0x67])
+  }
+
+  private func isUsableWaveAudio(at url: URL, fileManager: FileManager) -> Bool {
+    guard
+      let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+      values.isRegularFile == true,
+      let fileSize = values.fileSize,
+      fileSize >= 44,
+      let handle = try? FileHandle(forReadingFrom: url)
+    else {
+      return false
+    }
+    defer { try? handle.close() }
+
+    guard
+      let header = try? handle.read(upToCount: 12),
+      header.count == 12,
+      String(data: header[0..<4], encoding: .ascii) == "RIFF",
+      String(data: header[8..<12], encoding: .ascii) == "WAVE"
+    else {
+      return false
+    }
+    let declaredSize = UInt64(Self.readUInt32(header, offset: 4)) + 8
+    guard declaredSize <= UInt64(fileSize) else { return false }
+
+    var byteRate: UInt32?
+    var offset: UInt64 = 12
+    while offset + 8 <= declaredSize {
+      do {
+        try handle.seek(toOffset: offset)
+        guard let chunkHeader = try handle.read(upToCount: 8), chunkHeader.count == 8 else {
+          return false
+        }
+        let chunkName = String(data: chunkHeader[0..<4], encoding: .ascii)
+        let chunkLength = UInt64(Self.readUInt32(chunkHeader, offset: 4))
+        let dataOffset = offset + 8
+        guard dataOffset + chunkLength <= declaredSize else { return false }
+
+        if chunkName == "fmt ", chunkLength >= 16 {
+          guard let formatData = try handle.read(upToCount: 16), formatData.count == 16 else {
+            return false
+          }
+          byteRate = Self.readUInt32(formatData, offset: 8)
+        } else if chunkName == "data" {
+          guard chunkLength > 0, let byteRate, byteRate > 0 else { return false }
+          return Double(chunkLength) / Double(byteRate) > 0
+        }
+
+        offset = dataOffset + chunkLength + (chunkLength % 2)
+      } catch {
+        return false
+      }
+    }
+    return false
+  }
+
+  private static func readUInt32(_ data: Data, offset: Int) -> UInt32 {
+    guard offset + 4 <= data.count else { return 0 }
+    return data[offset..<(offset + 4)].enumerated().reduce(0) {
+      $0 | (UInt32($1.element) << UInt32($1.offset * 8))
+    }
   }
 }
 

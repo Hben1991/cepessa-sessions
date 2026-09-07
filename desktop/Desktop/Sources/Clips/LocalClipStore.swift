@@ -6,7 +6,8 @@ final class LocalClipStore {
   private let encoder: JSONEncoder
   private let decoder: JSONDecoder
 
-  init(fileLayout: LocalClipFileLayout = LocalClipFileLayout(), fileManager: FileManager = .default) {
+  init(fileLayout: LocalClipFileLayout = LocalClipFileLayout(), fileManager: FileManager = .default)
+  {
     self.fileLayout = fileLayout
     self.fileManager = fileManager
 
@@ -41,22 +42,29 @@ final class LocalClipStore {
           let data = try Data(contentsOf: manifestURL)
           return try decoder.decode(LocalClipManifest.self, from: data)
         } catch {
-          NSLog("LocalClipStore: Skipping corrupt clip at %@ (%@)", directory.path, error.localizedDescription)
+          NSLog(
+            "LocalClipStore: Skipping corrupt clip at %@ (%@)", directory.path,
+            error.localizedDescription)
           return nil
         }
       }
       .sorted { $0.startedAt > $1.startedAt }
     } catch {
-      NSLog("LocalClipStore: Failed to read clips directory %@ (%@)", fileLayout.baseDirectory.path, error.localizedDescription)
+      NSLog(
+        "LocalClipStore: Failed to read clips directory %@ (%@)", fileLayout.baseDirectory.path,
+        error.localizedDescription)
       return []
     }
   }
 
   func save(_ clip: LocalClipManifest) throws {
     try fileLayout.ensureDirectories(fileManager: fileManager, for: clip.id)
-    try encoder.encode(clip).write(to: fileLayout.manifestURL(for: clip.id), options: .atomic)
+    // Ancillary artifacts may be replaced independently, but the manifest is the durable
+    // commit point. A reader must never observe `ready` until transcript and notes exist.
     try writeTranscript(for: clip)
-    try clip.postNotes.write(to: fileLayout.notesURL(for: clip.id), atomically: true, encoding: .utf8)
+    try clip.postNotes.write(
+      to: fileLayout.notesURL(for: clip.id), atomically: true, encoding: .utf8)
+    try encoder.encode(clip).write(to: fileLayout.manifestURL(for: clip.id), options: .atomic)
   }
 
   func clipDirectory(for clipID: UUID) -> URL {
@@ -85,7 +93,8 @@ final class LocalClipStore {
       },
       "text": clip.transcriptText,
     ]
-    let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+    let data = try JSONSerialization.data(
+      withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
     try data.write(to: fileLayout.transcriptURL(for: clip.id), options: .atomic)
   }
 

@@ -7,10 +7,10 @@ let package = Package(
     .macOS("14.0")
   ],
   dependencies: [
-    .package(path: "../../../typewhisper-mac/Vendor/whisper.spm"),
+    .package(path: "Vendor/whisper.spm"),
     .package(
       url: "https://github.com/argmaxinc/argmax-oss-swift.git", exact: "0.18.0"),
-    .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.8943.0")),
+    .package(url: "https://github.com/mattt/llama.swift", exact: "2.10549.0"),
   ],
   targets: [
     .executableTarget(
@@ -23,6 +23,10 @@ let package = Package(
       path: "Sources",
       resources: [
         .process("Resources")
+      ],
+      linkerSettings: [
+        // SwiftUI's VideoPlayer resolves AVPlayerView dynamically at runtime.
+        .linkedFramework("AVKit")
       ]
     ),
     .executableTarget(
@@ -31,6 +35,10 @@ let package = Package(
         .product(name: "LlamaSwift", package: "llama.swift")
       ],
       path: "LocalModelRunner"
+    ),
+    .executableTarget(
+      name: "CepessaMicrophoneCaptureHelper",
+      path: "MicrophoneCaptureHelper"
     ),
     .testTarget(
       name: "CepessaSessionsTests",

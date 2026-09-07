@@ -28,6 +28,55 @@ enum LocalMeetingMicrophoneRoute: Equatable {
   }
 }
 
+struct LocalMeetingRecorderCaptureState: Equatable {
+  enum Phase: Equatable {
+    case idle
+    case starting(UUID)
+    case recording(UUID)
+    case stopping(UUID)
+  }
+
+  private(set) var phase: Phase = .idle
+
+  mutating func beginStart() -> UUID? {
+    guard phase == .idle else { return nil }
+    let token = UUID()
+    phase = .starting(token)
+    return token
+  }
+
+  mutating func markRecording(_ token: UUID) -> Bool {
+    guard phase == .starting(token) else { return false }
+    phase = .recording(token)
+    return true
+  }
+
+  mutating func beginStop() -> UUID? {
+    switch phase {
+    case .starting(let token), .recording(let token):
+      phase = .stopping(token)
+      return token
+    case .idle, .stopping:
+      return nil
+    }
+  }
+
+  mutating func finish(_ token: UUID) -> Bool {
+    switch phase {
+    case .starting(let activeToken), .recording(let activeToken), .stopping(let activeToken):
+      guard activeToken == token else { return false }
+      phase = .idle
+      return true
+    default:
+      return false
+    }
+  }
+
+  func isStarting(_ token: UUID) -> Bool {
+    phase == .starting(token)
+  }
+}
+
 @MainActor
 final class LocalMeetingRecorder: ObservableObject {
   private enum MixMode {
@@ -40,6 +89,7 @@ final class LocalMeetingRecorder: ObservableObject {
     case microphonePermissionDenied
     case systemAudioUnsupported
     case setupFailed(String)
+    case startCancelled
 
     var errorDescription: String? {
       switch self {
@@ -49,6 +99,8 @@ final class LocalMeetingRecorder: ObservableObject {
         return "System audio capture requires macOS 14.4 or later."
       case .setupFailed(let message):
         return message
+      case .startCancelled:
+        return "Recording start was cancelled."
       }
     }
   }
@@ -77,6 +129,7 @@ final class LocalMeetingRecorder: ObservableObject {
   nonisolated(unsafe) private var isCaptureGateOpen = false
   private var currentSession: LocalSession?
   private var hasPerformedSilentMicFallback = false
+  private var captureState = LocalMeetingRecorderCaptureState()
 
   init(fileLayout: LocalSessionFileLayout) {
     self.fileLayout = fileLayout
@@ -87,8 +140,13 @@ final class LocalMeetingRecorder: ObservableObject {
   }
 
   func startRecording(title: String? = nil) async throws -> LocalSession {
-    guard !isRecording else {
+    guard let captureToken = captureState.beginStart() else {
       throw RecorderError.setupFailed("A recording is already in progress.")
+    }
+    defer {
+      if captureState.isStarting(captureToken) {
+        _ = captureState.finish(captureToken)
+      }
     }
 
     let hasMicrophonePermission = LocalMeetingAudioCaptureService.checkPermission()
@@ -96,6 +154,9 @@ final class LocalMeetingRecorder: ObservableObject {
       hasMicrophonePermission ? true : await LocalMeetingAudioCaptureService.requestPermission()
     guard isMicrophonePermissionGranted else {
       throw RecorderError.microphonePermissionDenied
+    }
+    guard captureState.isStarting(captureToken) else {
+      throw RecorderError.startCancelled
     }
 
     let session = LocalSession(
@@ -112,7 +173,8 @@ final class LocalMeetingRecorder: ObservableObject {
         micTranscriptFileName: "mic-transcript.wav",
         systemFileName: "system.wav",
         mixedFileName: "mixed.wav"
-      )
+      ),
+      titleOrigin: title == nil ? .automatic : .user
     )
 
     do {
@@ -125,6 +187,9 @@ final class LocalMeetingRecorder: ObservableObject {
       mixedWriter = try LocalMeetingWaveFileWriter(
         fileURL: fileLayout.mixedAudioURL(for: session.id))
     } catch {
+      ioQueue.sync {
+        closeWriters()
+      }
       throw RecorderError.setupFailed("Failed to prepare recording files.")
     }
 
@@ -139,6 +204,9 @@ final class LocalMeetingRecorder: ObservableObject {
 
     do {
       try await startMicrophoneCapture(route: .initialRoute())
+      guard captureState.isStarting(captureToken) else {
+        throw RecorderError.startCancelled
+      }
 
       if #available(macOS 14.4, *) {
         let systemCapture = LocalMeetingSystemAudioCaptureService()
@@ -170,8 +238,12 @@ final class LocalMeetingRecorder: ObservableObject {
         )
       }
     } catch {
-      stopCaptureServices()
-      closeWriters()
+      await stopCaptureServicesAndWait()
+      ioQueue.sync {
+        isCaptureGateOpen = false
+        closeWriters()
+        synchronizedPCM.reset()
+      }
       currentSession = nil
       throw RecorderError.setupFailed(error.localizedDescription)
     }
@@ -181,6 +253,16 @@ final class LocalMeetingRecorder: ObservableObject {
     // otherwise mixed.wav and speaker attribution can be shifted by many seconds.
     ioQueue.sync {
       isCaptureGateOpen = true
+    }
+    guard captureState.markRecording(captureToken) else {
+      await stopCaptureServicesAndWait()
+      ioQueue.sync {
+        isCaptureGateOpen = false
+        closeWriters()
+        synchronizedPCM.reset()
+      }
+      currentSession = nil
+      throw RecorderError.startCancelled
     }
     isRecording = true
     timer.restart()
@@ -198,6 +280,20 @@ final class LocalMeetingRecorder: ObservableObject {
     micCapture.onSilentMicDetected = { [weak self] in
       Task { @MainActor in
         await self?.handleSilentMicFallback()
+      }
+    }
+    micCapture.onCaptureFailure = { [weak self] error in
+      Task { @MainActor in
+        guard let self, self.currentSession != nil else { return }
+        self.isMicrophoneCaptureActive = false
+        self.micLevel = 0
+        self.lastErrorMessage = error.localizedDescription
+        self.ioQueue.sync {
+          if self.mixMode == .synchronizedSources {
+            self.flushPendingMixedAudio()
+            self.mixMode = .systemOnly
+          }
+        }
       }
     }
 
@@ -244,20 +340,22 @@ final class LocalMeetingRecorder: ObservableObject {
   }
 
   func stopRecording() async -> LocalSession? {
-    guard var session = currentSession else { return nil }
+    guard let captureToken = captureState.beginStop() else { return nil }
+    timer.stop()
+
+    await stopCaptureServicesAndWait()
 
     ioQueue.sync {
       isCaptureGateOpen = false
-    }
-    stopCaptureServices()
-    timer.stop()
-
-    ioQueue.sync {
       flushPendingMixedAudio()
       closeWriters()
       synchronizedPCM.reset()
     }
 
+    guard var session = currentSession else {
+      _ = captureState.finish(captureToken)
+      return nil
+    }
     session.status = .transcribing
     currentSession = nil
     hasPerformedSilentMicFallback = false
@@ -268,6 +366,7 @@ final class LocalMeetingRecorder: ObservableObject {
     micLevel = 0
     systemLevel = 0
     mixModeBeforeMute = nil
+    _ = captureState.finish(captureToken)
     return session
   }
 
@@ -281,6 +380,25 @@ final class LocalMeetingRecorder: ObservableObject {
     }
     systemCaptureService = nil
     isSystemAudioCaptureActive = false
+  }
+
+  private func stopCaptureServicesAndWait() async {
+    let microphoneCapture = micCaptureService
+    micCaptureService = nil
+    isMicrophoneCaptureActive = false
+
+    async let stopMicrophone: Void = microphoneCapture?.stopCaptureAndWait() ?? ()
+    if #available(macOS 14.4, *) {
+      let systemCapture = systemCaptureService as? LocalMeetingSystemAudioCaptureService
+      systemCaptureService = nil
+      isSystemAudioCaptureActive = false
+      async let stopSystem: Void = systemCapture?.stopCaptureAndWait() ?? ()
+      _ = await (stopMicrophone, stopSystem)
+    } else {
+      systemCaptureService = nil
+      isSystemAudioCaptureActive = false
+      _ = await stopMicrophone
+    }
   }
 
   nonisolated private func handleMicChunk(_ data: Data) {

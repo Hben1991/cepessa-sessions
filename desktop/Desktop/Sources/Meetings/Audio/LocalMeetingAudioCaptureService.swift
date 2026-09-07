@@ -1,57 +1,73 @@
-import Foundation
 import AVFoundation
 import CoreAudio
+import Foundation
 
 final class LocalMeetingAudioCaptureService: @unchecked Sendable {
-    typealias AudioChunkHandler = AudioCaptureService.AudioChunkHandler
-    typealias AudioLevelHandler = AudioCaptureService.AudioLevelHandler
-    typealias AudioCaptureError = AudioCaptureService.AudioCaptureError
+  typealias AudioChunkHandler = AudioCaptureService.AudioChunkHandler
+  typealias AudioLevelHandler = AudioCaptureService.AudioLevelHandler
+  typealias AudioCaptureError = AudioCaptureService.AudioCaptureError
 
-    private let base: AudioCaptureService
+  private let base: AudioCaptureService
 
-    var onSilentMicDetected: (() -> Void)? {
-        didSet {
-            base.onSilentMicDetected = onSilentMicDetected
-        }
+  var onSilentMicDetected: (() -> Void)? {
+    didSet {
+      base.onSilentMicDetected = onSilentMicDetected
     }
+  }
 
-    init() {
-        self.base = AudioCaptureService()
+  var onCaptureFailure: ((AudioCaptureError) -> Void)? {
+    didSet {
+      base.onCaptureFailure = onCaptureFailure
     }
+  }
 
-    init(overrideDeviceID: AudioDeviceID) {
-        self.base = AudioCaptureService(overrideDeviceID: overrideDeviceID)
-    }
+  init() {
+    self.base = AudioCaptureService()
+  }
 
-    static func checkPermission() -> Bool {
-        AudioCaptureService.checkPermission()
-    }
+  init(overrideDeviceID: AudioDeviceID) {
+    self.base = AudioCaptureService(overrideDeviceID: overrideDeviceID)
+  }
 
-    static func isPermissionDenied() -> Bool {
-        AudioCaptureService.isPermissionDenied()
-    }
+  static func checkPermission() -> Bool {
+    AudioCaptureService.checkPermission()
+  }
 
-    static func authorizationStatus() -> AVAuthorizationStatus {
-        AudioCaptureService.authorizationStatus()
-    }
+  static func isPermissionDenied() -> Bool {
+    AudioCaptureService.isPermissionDenied()
+  }
 
-    static func requestPermission() async -> Bool {
-        await AudioCaptureService.requestPermission()
-    }
+  static func authorizationStatus() -> AVAuthorizationStatus {
+    AudioCaptureService.authorizationStatus()
+  }
 
-    static func isBluetoothTransport(deviceID: AudioDeviceID) -> Bool {
-        AudioCaptureService.isBluetoothTransport(deviceID: deviceID)
-    }
+  static func requestPermission() async -> Bool {
+    await AudioCaptureService.requestPermission()
+  }
 
-    static func findBuiltInMicDeviceID() -> AudioDeviceID? {
-        AudioCaptureService.findBuiltInMicDeviceID()
-    }
+  static func isBluetoothTransport(deviceID: AudioDeviceID) -> Bool {
+    AudioCaptureService.isBluetoothTransport(deviceID: deviceID)
+  }
 
-    func startCapture(onAudioChunk: @escaping AudioChunkHandler, onAudioLevel: AudioLevelHandler? = nil) async throws {
-        try await base.startCapture(onAudioChunk: onAudioChunk, onAudioLevel: onAudioLevel)
-    }
+  static func findBuiltInMicDeviceID() -> AudioDeviceID? {
+    AudioCaptureService.findBuiltInMicDeviceID()
+  }
 
-    func stopCapture() {
-        base.stopCapture()
-    }
+  func startCapture(
+    onAudioChunk: @escaping AudioChunkHandler, onAudioLevel: AudioLevelHandler? = nil
+  ) async throws {
+    try await base.startCapture(onAudioChunk: onAudioChunk, onAudioLevel: onAudioLevel)
+  }
+
+  func stopCapture() {
+    base.stopCapture()
+  }
+
+  func stopCaptureAndWait() async {
+    await base.stopCaptureAndWait()
+  }
+
+  var capturing: Bool {
+    base.capturing
+  }
 }
