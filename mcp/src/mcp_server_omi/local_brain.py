@@ -712,6 +712,7 @@ class MeetingBrainIndex:
     def _latest_global_envelope(
         self,
         session_id: str,
+        expected_outbox_file_name: Optional[str] = None,
     ) -> Optional[tuple[str, bytes, os.stat_result, dict[str, Any]]]:
         outbox_path = (
             self.sessions_root.resolve(strict=False).parent / "MeetingEvidenceOutbox"
@@ -728,28 +729,47 @@ class MeetingBrainIndex:
                     "The global meeting evidence outbox is too large."
                 )
             matching: list[tuple[str, bytes, os.stat_result, dict[str, Any]]] = []
+            expected_artifact_found = expected_outbox_file_name is None
             for name in names:
                 if not ARTIFACT_FILE_PATTERN.fullmatch(name):
                     continue
-                raw, source_stat = self._read_regular_file_at(
-                    outbox_fd,
-                    name,
-                    maximum_bytes=MAX_ENVELOPE_BYTES,
-                )
-                envelope = self._decode_json_object(raw, "Meeting evidence envelope")
-                envelope_session = envelope.get("session")
-                if not isinstance(envelope_session, dict):
-                    raise MeetingBrainError(
-                        "Meeting evidence session metadata is invalid."
+                try:
+                    raw, source_stat = self._read_regular_file_at(
+                        outbox_fd,
+                        name,
+                        maximum_bytes=MAX_ENVELOPE_BYTES,
                     )
-                candidate_id = _canonical_uuid(
-                    envelope_session.get("id"), "Meeting evidence session identifier"
-                )
+                    envelope = self._decode_json_object(
+                        raw, "Meeting evidence envelope"
+                    )
+                    envelope_session = envelope.get("session")
+                    if not isinstance(envelope_session, dict):
+                        raise MeetingBrainError(
+                            "Meeting evidence session metadata is invalid."
+                        )
+                    candidate_id = _canonical_uuid(
+                        envelope_session.get("id"),
+                        "Meeting evidence session identifier",
+                    )
+                except MeetingBrainError:
+                    if name == expected_outbox_file_name:
+                        raise
+                    continue
                 if candidate_id == session_id.lower():
                     matching.append((name, raw, source_stat, envelope))
+                    if name == expected_outbox_file_name:
+                        expected_artifact_found = True
+                elif name == expected_outbox_file_name:
+                    raise MeetingBrainError(
+                        "Meeting evidence outbox does not match its session."
+                    )
         finally:
             os.close(outbox_fd)
             os.close(base_fd)
+        if not expected_artifact_found:
+            raise MeetingBrainError(
+                "Transcription evidence is missing from the global outbox."
+            )
         if not matching:
             return None
         by_revision: dict[int, tuple[str, bytes, os.stat_result, dict[str, Any]]] = {}
@@ -777,6 +797,7 @@ class MeetingBrainIndex:
         session_id: str,
         session_raw: bytes,
         session_stat: os.stat_result,
+        session_title: Optional[str],
         session_fd: int,
         artifact: tuple[str, bytes, os.stat_result, dict[str, Any]],
     ) -> IndexedSession:
@@ -867,7 +888,9 @@ class MeetingBrainIndex:
         fingerprint = hashlib.sha256(session_raw + b"\0" + envelope_raw).hexdigest()
         return IndexedSession(
             session_id=session_id,
-            title=_clean_string(
+            title=session_title
+            if session_title is not None
+            else _clean_string(
                 envelope_session.get("title") or "Untitled session", 500
             ),
             started_at=_clean_string(envelope_session.get("startedAt"), 80),
@@ -932,22 +955,67 @@ class MeetingBrainIndex:
     def _read_indexable_session(self, session_id: str) -> IndexedSession:
         root_fd, session_fd = self._open_session_directory(session_id)
         try:
-            artifact = self._latest_global_envelope(session_id)
+            session_raw: Optional[bytes]
+            session_stat: os.stat_result
+            session: Optional[dict[str, Any]]
+            try:
+                session_raw, session_stat = self._read_regular_file_at(
+                    session_fd, "session.json"
+                )
+            except PathSecurityError:
+                try:
+                    os.stat("session.json", dir_fd=session_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    session_raw = None
+                    session_stat = os.fstat(session_fd)
+                    session = None
+                else:
+                    raise
+            else:
+                session = self._decode_json_object(session_raw, "Session metadata")
+
+            expected_outbox_file_name = None
+            session_title = None
+            if session is not None:
+                stored_id = _clean_string(session.get("id"), 128)
+                if stored_id and stored_id.casefold() != session_id.casefold():
+                    raise MeetingBrainError(
+                        "Session identity does not match its directory."
+                    )
+                raw_title = session.get("title")
+                if raw_title is not None and not isinstance(raw_title, str):
+                    raise MeetingBrainError("Session title is invalid.")
+                session_title = _clean_string(raw_title or "Untitled session", 500)
+                summary = session.get("transcriptionEvidence")
+                if isinstance(summary, dict):
+                    outbox_name = summary.get("outboxFileName")
+                    if not isinstance(
+                        outbox_name, str
+                    ) or not ARTIFACT_FILE_PATTERN.fullmatch(outbox_name):
+                        raise MeetingBrainError(
+                            "Transcription evidence outbox reference is invalid."
+                        )
+                    expected_outbox_file_name = outbox_name
+                elif "transcriptionEvidence" in session and summary is not None:
+                    raise MeetingBrainError(
+                        "Transcription evidence summary is invalid."
+                    )
+
+            artifact = self._latest_global_envelope(
+                session_id,
+                expected_outbox_file_name=expected_outbox_file_name,
+            )
             if artifact is not None:
                 return self._read_envelope_session(
                     session_id=session_id,
-                    session_raw=b"",
-                    session_stat=os.fstat(session_fd),
+                    session_raw=session_raw or b"",
+                    session_stat=session_stat,
+                    session_title=session_title,
                     session_fd=session_fd,
                     artifact=artifact,
                 )
-            raw, session_stat = self._read_regular_file_at(session_fd, "session.json")
-            session = self._decode_json_object(raw, "Session metadata")
-            stored_id = _clean_string(session.get("id"), 128)
-            if stored_id and stored_id.casefold() != session_id.casefold():
-                raise MeetingBrainError(
-                    "Session identity does not match its directory."
-                )
+            if session is None or session_raw is None:
+                raise MeetingBrainError("Session metadata is missing.")
             summary = session.get("transcriptionEvidence")
             if isinstance(summary, dict):
                 raise MeetingBrainError(
@@ -960,7 +1028,7 @@ class MeetingBrainIndex:
             os.close(root_fd)
         if _clean_string(session.get("status"), 40).lower() != "ready":
             raise EvidenceNotReady("The legacy session is not ready.")
-        content_hash = hashlib.sha256(raw).hexdigest()
+        content_hash = hashlib.sha256(session_raw).hexdigest()
         revision = f"legacy:{content_hash[:16]}"
         normalized_segments = tuple(
             normalized
@@ -995,7 +1063,7 @@ class MeetingBrainIndex:
             segments=normalized_segments,
             content_hash=content_hash,
             modified_at_ns=session_stat.st_mtime_ns,
-            byte_count=session_stat.st_size,
+            byte_count=len(session_raw),
         )
 
     def _candidate_session_ids(self) -> tuple[list[str], int]:

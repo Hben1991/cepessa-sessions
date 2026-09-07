@@ -393,6 +393,54 @@ def test_unrelated_failed_envelope_is_quarantined_without_blocking_ready_meeting
     assert index.search("failed unrelated evidence")["matches"] == []
 
 
+def test_truncated_required_outbox_withdraws_only_its_session(tmp_path):
+    index = index_for(tmp_path)
+    ready = write_ready_envelope(
+        index.sessions_root,
+        active_text="reliable alpha evidence",
+    )
+    truncated = write_ready_envelope(
+        index.sessions_root,
+        session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        run_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        event_id="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        active_text="beta evidence must be withdrawn",
+    )
+    assert index.refresh()["sessions"] == 2
+
+    truncated["outbox_path"].write_bytes(b'{"schemaVersion":')
+    status = index.refresh()
+
+    assert status["sessions"] == 1
+    assert status["withdrawn"] == 1
+    assert status["corrupt_or_unreadable"] == 1
+    assert index.search("reliable alpha")["citation_count"] == 1
+    assert index.search("beta evidence")["matches"] == []
+    assert ready["outbox_path"].exists()
+
+
+def test_ready_envelope_uses_current_mutable_session_title(tmp_path):
+    index = index_for(tmp_path)
+    fixture = write_ready_envelope(index.sessions_root)
+
+    first = index.search("roadmap")
+    assert first["matches"][0]["session_title"] == "Mutable title"
+
+    session = json.loads(fixture["session_path"].read_text(encoding="utf-8"))
+    session["title"] = "Renamed after capture"
+    fixture["session_path"].write_text(
+        json.dumps(session, ensure_ascii=False), encoding="utf-8"
+    )
+
+    status = index.refresh()
+    renamed = index.search("roadmap")
+
+    assert status["indexed"] == 1
+    assert status["unchanged"] == 0
+    assert renamed["matches"][0]["session_title"] == "Renamed after capture"
+    assert renamed["matches"][0]["citation"]["content_hash"] == fixture["content_hash"]
+
+
 def test_invalid_new_revision_withdraws_existing_ready_evidence(tmp_path):
     index = index_for(tmp_path)
     first = write_ready_envelope(
