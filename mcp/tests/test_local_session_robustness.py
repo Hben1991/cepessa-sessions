@@ -394,6 +394,64 @@ def test_title_update_marks_user_origin_only_after_validating_candidate(tmp_path
     assert stored["titleOrigin"] == "user"
 
 
+def test_imported_audio_and_source_decode_and_title_update(tmp_path):
+    payload = session_payload()
+    payload["titleOrigin"] = "imported"
+    payload["audioArtifacts"] = {
+        "micFileName": None,
+        "micTranscriptFileName": None,
+        "systemFileName": None,
+        "mixedFileName": None,
+        "importedFileName": "imported.wav",
+    }
+    payload["transcriptSegments"][0]["source"] = "imported"
+    path = write_manifest(tmp_path, payload=payload)
+
+    loaded = get_local_session_data(SESSION_ID, str(tmp_path))["session"]
+    assert loaded["audioArtifacts"]["importedFileName"] == "imported.wav"
+    assert loaded["transcriptSegments"][0]["source"] == "imported"
+
+    update_local_session_title(SESSION_ID, "Imported recording", str(tmp_path))
+
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["title"] == "Imported recording"
+    assert stored["titleOrigin"] == "user"
+    assert stored["audioArtifacts"]["importedFileName"] == "imported.wav"
+    assert stored["transcriptSegments"][0]["source"] == "imported"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_fragment"),
+    [
+        (
+            "audioArtifacts",
+            {"importedFileName": 42},
+            "audioArtifacts.importedFileName",
+        ),
+        (
+            "audioArtifacts",
+            {"importedFileName": "../imported.wav"},
+            "audioArtifacts.importedFileName",
+        ),
+        (
+            "transcriptSegments",
+            [{**session_payload()["transcriptSegments"][0], "source": "import"}],
+            r"transcriptSegments\[0\]\.source",
+        ),
+    ],
+)
+def test_invalid_imported_audio_metadata_is_rejected_before_write(
+    tmp_path, field, value, error_fragment
+):
+    path = write_manifest(tmp_path)
+    before = read_bytes(path)
+
+    with pytest.raises(LocalSessionValidationError, match=error_fragment):
+        update_local_session_fields(SESSION_ID, {field: value}, str(tmp_path))
+
+    assert read_bytes(path) == before
+
+
 def test_session_updates_invalidate_only_generated_package_caches(tmp_path):
     path = write_manifest(tmp_path)
     exports = path.parent / "Exports"

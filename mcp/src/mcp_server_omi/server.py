@@ -95,7 +95,7 @@ SWIFT_ISO8601_PATTERN = re.compile(
 )
 SESSION_STATUS_VALUES = {"recording", "transcribing", "ready", "failed"}
 SESSION_TITLE_ORIGIN_VALUES = {"automatic", "user", "imported"}
-SESSION_SOURCE_VALUES = {"microphone", "system", "mixed"}
+SESSION_SOURCE_VALUES = {"microphone", "system", "mixed", "imported"}
 SESSION_IDENTITY_VALUES = {"anonymous", "confirmed", "unavailable"}
 SESSION_CONTENT_TYPE_VALUES = {
     "meeting",
@@ -1027,6 +1027,8 @@ def _validate_audio_artifacts(audio: Any, path: str) -> None:
     ):
         if _optional(audio, key, path) is not None:
             _expect_string(audio[key], f"{path}.{key}")
+    if _optional(audio, "importedFileName", path) is not None:
+        _safe_bundle_filename(audio["importedFileName"], f"{path}.importedFileName")
 
 
 def _validate_content_classification(classification: Any, path: str) -> None:
