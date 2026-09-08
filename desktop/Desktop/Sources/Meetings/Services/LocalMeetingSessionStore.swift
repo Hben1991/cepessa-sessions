@@ -202,6 +202,10 @@ final class LocalSessionStore {
     return try body()
   }
 
+  func refreshPromptPackage(for sessionID: UUID) throws {
+    _ = try repairCurrentPackage(for: sessionID)
+  }
+
   private func repairCurrentPackage(for sessionID: UUID) throws -> LocalSession {
     try withSessionLock(for: sessionID) {
       let metadataURL = fileLayout.metadataURL(for: sessionID)

@@ -225,6 +225,14 @@ final class LocalSessionAppModel: ObservableObject {
         displayName: displayName
       )
       sessions[index] = annotationStore.applyingAnnotations(to: sessions[index])
+      do {
+        try store?.refreshPromptPackage(for: resolvedSessionID)
+      } catch {
+        recorderErrorMessage =
+          "The speaker name was saved, but the handoff package could not be refreshed. \(error.localizedDescription)"
+        return false
+      }
+      recorderErrorMessage = nil
       return true
     } catch {
       recorderErrorMessage = "Failed to save the speaker name. \(error.localizedDescription)"
@@ -263,6 +271,14 @@ final class LocalSessionAppModel: ObservableObject {
       sessions[index] = annotationStore.applyingAnnotations(
         to: normalizedStoredSession(rawSession)
       )
+      do {
+        try store?.refreshPromptPackage(for: resolvedSessionID)
+      } catch {
+        recorderErrorMessage =
+          "The speaker correction was undone, but the handoff package could not be refreshed. \(error.localizedDescription)"
+        return false
+      }
+      recorderErrorMessage = nil
       return true
     } catch {
       recorderErrorMessage = "Failed to undo the speaker name. \(error.localizedDescription)"

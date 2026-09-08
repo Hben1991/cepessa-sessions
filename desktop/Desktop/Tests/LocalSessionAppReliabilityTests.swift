@@ -170,6 +170,89 @@ final class LocalSessionAppReliabilityTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: path), before)
   }
 
+  func testSpeakerRenameAndUndoRefreshBothHandoffsWithoutChangingSourceEvidence() throws {
+    let (layout, store, session) = try speakerFixture()
+    let model = LocalMeetingAppModel(store: store, fileLayout: layout)
+    let metadataBefore = try Data(contentsOf: layout.metadataURL(for: session.id))
+    let audioBefore = try Data(contentsOf: layout.mixedAudioURL(for: session.id))
+    let markdownURL = layout.promptPackageMarkdownURL(for: session.id)
+    let jsonURL = layout.promptPackageJSONURL(for: session.id)
+
+    XCTAssertTrue(model.renameSpeaker(speakerID: "speaker-a", to: "Maya", in: session.id))
+    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Maya")
+    XCTAssertTrue(
+      try String(contentsOf: markdownURL, encoding: .utf8).contains("Maya: Original saved words"))
+    let renamedPackage =
+      try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as? [String: Any]
+    let renamedSegments = try XCTUnwrap(renamedPackage?["transcriptSegments"] as? [[String: Any]])
+    XCTAssertEqual(renamedSegments.first?["speaker"] as? String, "Maya")
+    XCTAssertEqual(renamedSegments.first?["identityStatus"] as? String, "confirmed")
+
+    // A later library refresh must not replace the annotated handoff with raw labels.
+    _ = store.loadSessions()
+    XCTAssertTrue(
+      try String(contentsOf: markdownURL, encoding: .utf8).contains("Maya: Original saved words"))
+    XCTAssertTrue(model.undoLatestSpeakerRename(speakerID: "speaker-a", in: session.id))
+    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Speaker 1")
+    let undoneMarkdown = try String(contentsOf: markdownURL, encoding: .utf8)
+    XCTAssertTrue(undoneMarkdown.contains("Speaker 1: Original saved words"))
+    XCTAssertFalse(undoneMarkdown.contains("Maya: Original saved words"))
+    let undonePackage =
+      try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as? [String: Any]
+    let undoneSegments = try XCTUnwrap(undonePackage?["transcriptSegments"] as? [[String: Any]])
+    XCTAssertEqual(undoneSegments.first?["speaker"] as? String, "Speaker 1")
+    XCTAssertNotEqual(undoneSegments.first?["identityStatus"] as? String, "confirmed")
+    XCTAssertEqual(try Data(contentsOf: layout.metadataURL(for: session.id)), metadataBefore)
+    XCTAssertEqual(try Data(contentsOf: layout.mixedAudioURL(for: session.id)), audioBefore)
+  }
+
+  func testHandoffRefreshFailurePreservesSpeakerEditsAndReportsPartialSuccess() throws {
+    let (layout, store, session) = try speakerFixture()
+    let model = LocalMeetingAppModel(store: store, fileLayout: layout)
+    let metadataBefore = try Data(contentsOf: layout.metadataURL(for: session.id))
+    let markdownURL = layout.promptPackageMarkdownURL(for: session.id)
+    try FileManager.default.removeItem(at: markdownURL)
+    try FileManager.default.createDirectory(at: markdownURL, withIntermediateDirectories: false)
+    let annotations = LocalSessionSpeakerAnnotationStore(fileLayout: layout)
+
+    XCTAssertFalse(model.renameSpeaker(speakerID: "speaker-a", to: "Maya", in: session.id))
+    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Maya")
+    XCTAssertEqual(
+      annotations.resolvedNames(sessionID: session.id, evidenceContentHash: "hash-a")["speaker-a"],
+      "Maya")
+    XCTAssertTrue(
+      model.recorderErrorMessage?.contains("speaker name was saved, but the handoff package")
+        == true)
+
+    XCTAssertFalse(model.undoLatestSpeakerRename(speakerID: "speaker-a", in: session.id))
+    XCTAssertEqual(model.selectedSession?.transcriptSegments.first?.speaker, "Speaker 1")
+    XCTAssertTrue(
+      annotations.resolvedNames(sessionID: session.id, evidenceContentHash: "hash-a").isEmpty)
+    XCTAssertTrue(
+      model.recorderErrorMessage?.contains("speaker correction was undone, but the handoff package")
+        == true)
+    XCTAssertEqual(try Data(contentsOf: layout.metadataURL(for: session.id)), metadataBefore)
+
+    try FileManager.default.removeItem(at: markdownURL)
+    XCTAssertTrue(model.renameSpeaker(speakerID: "speaker-a", to: "Dana", in: session.id))
+    XCTAssertNil(model.recorderErrorMessage)
+    XCTAssertTrue(
+      try String(contentsOf: markdownURL, encoding: .utf8).contains("Dana: Original saved words"))
+  }
+
+  private func speakerFixture() throws -> (LocalSessionFileLayout, LocalSessionStore, LocalSession)
+  {
+    let (layout, store, original) = try fixture(separated: false)
+    var session = original
+    session.transcriptSegments[0].speakerID = "speaker-a"
+    session.transcriptionEvidence = .init(
+      runID: "annotation-test", revision: 1, disposition: .degraded,
+      contentHash: "hash-a", parentContentHash: nil, runFileName: "run.json",
+      outboxFileName: "event.json", issues: [])
+    try store.save(session)
+    return (layout, store, session)
+  }
+
   private func fixture(separated: Bool) throws -> (
     LocalSessionFileLayout, LocalSessionStore, LocalSession
   ) {

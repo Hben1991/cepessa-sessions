@@ -18,13 +18,16 @@ struct LocalSessionPromptPackageBuilder {
 
   func writePackage(for session: LocalSession) throws {
     try fileLayout.ensureDirectories(fileManager: fileManager, for: session.id)
+    let displayedSession = LocalSessionSpeakerAnnotationStore(
+      fileLayout: fileLayout, fileManager: fileManager
+    ).applyingAnnotations(to: session)
 
     let markdownURL = fileLayout.promptPackageMarkdownURL(for: session.id)
     let jsonURL = fileLayout.promptPackageJSONURL(for: session.id)
 
-    let markdownData = Data(renderMarkdown(for: session).utf8)
+    let markdownData = Data(renderMarkdown(for: displayedSession).utf8)
     try writeIfChanged(markdownData, to: markdownURL)
-    let data = try encoder.encode(packageManifest(for: session))
+    let data = try encoder.encode(packageManifest(for: displayedSession))
     try writeIfChanged(data, to: jsonURL)
   }
 
