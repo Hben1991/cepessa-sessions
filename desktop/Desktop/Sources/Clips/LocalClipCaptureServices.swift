@@ -177,6 +177,9 @@ enum LocalClipVideoValidator {
       return
         "CLIP capture did not produce a video file. Grant Screen Recording access and try again."
     }
+    guard LocalClipFileSafety.isSafeExistingRegularFile(at: url) else {
+      return "CLIP capture produced an unsafe video file. Record the CLIP again."
+    }
     guard
       let attributes = try? fileManager.attributesOfItem(atPath: url.path),
       let size = attributes[.size] as? NSNumber,
@@ -219,33 +222,18 @@ enum LocalClipAudioValidator {
     guard fileManager.fileExists(atPath: url.path) else {
       return "CLIP video was saved, but no audio file was available for transcription."
     }
-    guard
-      let attributes = try? fileManager.attributesOfItem(atPath: url.path),
-      let fileSize = (attributes[.size] as? NSNumber)?.uint64Value,
-      fileSize >= 44,
-      let handle = try? FileHandle(forReadingFrom: url)
-    else {
+    guard let data = try? LocalClipFileSafety.readRegularFile(at: url), data.count >= 44 else {
       return "CLIP video was saved, but its audio file is empty or unreadable."
     }
-    defer { try? handle.close() }
-
-    do {
-      let prefix = try handle.read(upToCount: 12) ?? Data()
-      guard prefix.count == 12,
-        prefix[0..<4] == Data("RIFF".utf8),
-        prefix[8..<12] == Data("WAVE".utf8)
-      else {
-        return "CLIP video was saved, but its audio file is not a valid WAV recording."
-      }
-      return dataChunkFailureReason(handle: handle, fileSize: fileSize)
-    } catch {
-      return "CLIP video was saved, but its audio file could not be validated."
+    guard data[0..<4] == Data("RIFF".utf8), data[8..<12] == Data("WAVE".utf8) else {
+      return "CLIP video was saved, but its audio file is not a valid WAV recording."
     }
+    return dataChunkFailureReason(data: data)
   }
 
   static func duration(for url: URL, fileManager: FileManager = .default) -> TimeInterval? {
     guard failureReason(for: url, fileManager: fileManager) == nil,
-      let data = try? Data(contentsOf: url),
+      let data = try? LocalClipFileSafety.readRegularFile(at: url),
       data.count >= 44
     else {
       return nil
@@ -271,37 +259,31 @@ enum LocalClipAudioValidator {
     return nil
   }
 
-  private static func dataChunkFailureReason(handle: FileHandle, fileSize: UInt64) -> String? {
-    do {
-      try handle.seek(toOffset: 12)
-      var chunksInspected = 0
-      while handle.offsetInFile + 8 <= fileSize, chunksInspected < 64 {
-        guard let chunkHeader = try handle.read(upToCount: 8), chunkHeader.count == 8 else { break }
-        let chunkID = chunkHeader.prefix(4)
-        let chunkSize = chunkHeader[4..<8].withUnsafeBytes {
-          $0.loadUnaligned(as: UInt32.self).littleEndian
-        }
-        let payloadStart = handle.offsetInFile
-        let payloadEnd = payloadStart + UInt64(chunkSize)
-        guard payloadEnd <= fileSize else {
-          return "CLIP video was saved, but its audio file is truncated."
-        }
-        if chunkID == Data("data".utf8) {
-          return chunkSize > 0
-            ? nil
-            : "CLIP video was saved, but its audio recording contains no samples."
-        }
-        let paddedEnd = payloadEnd + (chunkSize.isMultiple(of: 2) ? 0 : 1)
-        guard paddedEnd <= fileSize else {
-          return "CLIP video was saved, but its audio file is truncated."
-        }
-        try handle.seek(toOffset: paddedEnd)
-        chunksInspected += 1
+  private static func dataChunkFailureReason(data: Data) -> String? {
+    var offset = 12
+    var chunksInspected = 0
+    while offset + 8 <= data.count, chunksInspected < 64 {
+      let chunkID = data[offset..<(offset + 4)]
+      let chunkSize = data[(offset + 4)..<(offset + 8)].withUnsafeBytes {
+        $0.loadUnaligned(as: UInt32.self).littleEndian
       }
-      return "CLIP video was saved, but its audio file has no usable sample data."
-    } catch {
-      return "CLIP video was saved, but its audio file could not be validated."
+      let payloadStart = offset + 8
+      guard Int(chunkSize) <= data.count - payloadStart else {
+        return "CLIP video was saved, but its audio file is truncated."
+      }
+      if chunkID == Data("data".utf8) {
+        return chunkSize > 0
+          ? nil
+          : "CLIP video was saved, but its audio recording contains no samples."
+      }
+      let paddedSize = Int(chunkSize) + (chunkSize.isMultiple(of: 2) ? 0 : 1)
+      guard paddedSize <= data.count - payloadStart else {
+        return "CLIP video was saved, but its audio file is truncated."
+      }
+      offset = payloadStart + paddedSize
+      chunksInspected += 1
     }
+    return "CLIP video was saved, but its audio file has no usable sample data."
   }
 }
 

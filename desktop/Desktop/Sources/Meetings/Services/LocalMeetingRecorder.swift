@@ -112,6 +112,7 @@ final class LocalMeetingRecorder: ObservableObject {
   @Published private(set) var micLevel: Double = 0
   @Published private(set) var systemLevel: Double = 0
   @Published private(set) var lastErrorMessage: String?
+  var onRecordingWriteFailure: (() -> Void)?
 
   private let fileLayout: LocalSessionFileLayout
   private let timer = LocalMeetingRecordingTimer.shared
@@ -127,6 +128,8 @@ final class LocalMeetingRecorder: ObservableObject {
   nonisolated(unsafe) private var mixMode: MixMode = .synchronizedSources
   nonisolated(unsafe) private var mixModeBeforeMute: MixMode?
   nonisolated(unsafe) private var isCaptureGateOpen = false
+  nonisolated(unsafe) private var writeSessionID: UUID?
+  nonisolated(unsafe) private var recordingWriteError: String?
   private var currentSession: LocalSession?
   private var hasPerformedSilentMicFallback = false
   private var captureState = LocalMeetingRecorderCaptureState()
@@ -194,6 +197,8 @@ final class LocalMeetingRecorder: ObservableObject {
     }
 
     currentSession = session
+    writeSessionID = session.id
+    recordingWriteError = nil
     synchronizedPCM.reset()
     mixMode = .synchronizedSources
     mixModeBeforeMute = nil
@@ -345,18 +350,20 @@ final class LocalMeetingRecorder: ObservableObject {
 
     await stopCaptureServicesAndWait()
 
-    ioQueue.sync {
+    let writeError = ioQueue.sync {
       isCaptureGateOpen = false
       flushPendingMixedAudio()
       closeWriters()
       synchronizedPCM.reset()
+      return recordingWriteError
     }
 
     guard var session = currentSession else {
       _ = captureState.finish(captureToken)
       return nil
     }
-    session.status = .transcribing
+    session.processingError = writeError ?? session.processingError
+    session.status = session.processingError == nil ? .transcribing : .failed
     currentSession = nil
     hasPerformedSilentMicFallback = false
     isRecording = false
@@ -410,18 +417,17 @@ final class LocalMeetingRecorder: ObservableObject {
           self.mixMode == .systemOnly ? Data(repeating: 0, count: data.count) : data
         try self.micTranscriptWriter?.append(pcm16Data: transcriptData)
       } catch {
-        Task { @MainActor in
-          self.lastErrorMessage = error.localizedDescription
-        }
+        self.handleWriteFailure(error)
+        return
       }
       switch self.mixMode {
       case .microphoneOnly:
-        try? self.mixedWriter?.append(pcm16Data: data)
+        self.appendMixedAudio(data)
       case .systemOnly:
         break
       case .synchronizedSources:
         self.synchronizedPCM.appendMic(data) { mixed in
-          try? self.mixedWriter?.append(pcm16Data: mixed)
+          self.appendMixedAudio(mixed)
         }
       }
     }
@@ -433,13 +439,12 @@ final class LocalMeetingRecorder: ObservableObject {
       do {
         try self.systemWriter?.append(pcm16Data: data)
       } catch {
-        Task { @MainActor in
-          self.lastErrorMessage = error.localizedDescription
-        }
+        self.handleWriteFailure(error)
+        return
       }
       switch self.mixMode {
       case .systemOnly:
-        try? self.mixedWriter?.append(pcm16Data: data)
+        self.appendMixedAudio(data)
         return
       case .microphoneOnly:
         return
@@ -447,8 +452,26 @@ final class LocalMeetingRecorder: ObservableObject {
         break
       }
       self.synchronizedPCM.appendSystem(data) { mixed in
-        try? self.mixedWriter?.append(pcm16Data: mixed)
+        self.appendMixedAudio(mixed)
       }
+    }
+  }
+
+  nonisolated private func appendMixedAudio(_ data: Data) {
+    do { try mixedWriter?.append(pcm16Data: data) } catch { handleWriteFailure(error) }
+  }
+
+  /// Called only on ioQueue. Close the gate immediately, then finish the matching capture.
+  nonisolated private func handleWriteFailure(_ error: Error) {
+    guard isCaptureGateOpen, let sessionID = writeSessionID else { return }
+    isCaptureGateOpen = false
+    let message = error.localizedDescription
+    recordingWriteError = message
+    Task { @MainActor [weak self] in
+      guard let self, self.currentSession?.id == sessionID else { return }
+      self.currentSession?.processingError = message
+      self.lastErrorMessage = message
+      self.onRecordingWriteFailure?()
     }
   }
 

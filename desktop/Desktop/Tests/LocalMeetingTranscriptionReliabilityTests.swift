@@ -217,6 +217,66 @@ final class LocalMeetingTranscriptionReliabilityTests: XCTestCase {
     XCTAssertEqual(status, .endOfStream)
   }
 
+  func testAudioImportWrapsInvalidSourceWithoutExposingAVFoundationError() async throws {
+    let sourceURL = tempRoot.appendingPathComponent("invalid-audio.wav")
+    let destinationURL = tempRoot.appendingPathComponent("imported.wav")
+    try Data(repeating: 0x41, count: 67).write(to: sourceURL)
+
+    do {
+      try await LocalSessionAudioImportService().importAudio(
+        from: sourceURL,
+        to: destinationURL
+      )
+      XCTFail("Invalid audio must not import successfully.")
+    } catch let error as LocalSessionAudioImportError {
+      guard case .unsupportedSource(let message) = error else {
+        return XCTFail("Expected unsupportedSource, received \(error).")
+      }
+      XCTAssertEqual(
+        message,
+        "Sessions could not open this audio file. It may be damaged or use an unsupported format. Import another WAV, MP3, or M4A file."
+      )
+      XCTAssertFalse(message.contains("com.apple"))
+      XCTAssertFalse(message.contains("1954115647"))
+    } catch {
+      XCTFail("Expected a stable audio import error, received \(error).")
+    }
+    XCTAssertFalse(fileManager.fileExists(atPath: destinationURL.path))
+  }
+
+  func testAudioImportPCMConversionClampsFiniteSamplesAndRejectsNonfiniteSamples() throws {
+    let format = try XCTUnwrap(
+      AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: 16_000,
+        channels: 1,
+        interleaved: false
+      )
+    )
+    let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 5))
+    buffer.frameLength = 5
+    let channel = try XCTUnwrap(buffer.floatChannelData?[0])
+    channel[0] = Float.greatestFiniteMagnitude
+    channel[1] = -Float.greatestFiniteMagnitude
+    channel[2] = 1.5
+    channel[3] = -1.5
+    channel[4] = 0.5
+
+    XCTAssertEqual(
+      try LocalSessionAudioImportService().pcm16Samples(from: buffer),
+      [32_767, -32_767, 32_767, -32_767, 16_384]
+    )
+
+    channel[0] = .nan
+    XCTAssertThrowsError(try LocalSessionAudioImportService().pcm16Samples(from: buffer)) {
+      error in
+      guard case LocalSessionAudioImportError.conversionFailed(let message) = error else {
+        return XCTFail("Expected conversionFailed, received \(error).")
+      }
+      XCTAssertTrue(message.contains("invalid sample data"))
+    }
+  }
+
   private func writeGGMLModel(to url: URL) throws {
     try fileManager.createDirectory(
       at: url.deletingLastPathComponent(),

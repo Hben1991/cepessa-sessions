@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct LocalSessionPromptPackageBuilder {
@@ -28,9 +29,25 @@ struct LocalSessionPromptPackageBuilder {
   }
 
   private func writeIfChanged(_ data: Data, to url: URL) throws {
-    if (try? Data(contentsOf: url)) != data {
-      try data.write(to: url, options: .atomic)
+    var original = stat()
+    if lstat(url.path, &original) == 0 {
+      guard (original.st_mode & S_IFMT) == S_IFREG, original.st_nlink == 1 else {
+        throw CocoaError(.fileReadInvalidFileName)
+      }
+      let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+      guard descriptor >= 0 else { throw CocoaError(.fileReadNoPermission) }
+      let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+      defer { try? handle.close() }
+      var opened = stat()
+      guard fstat(descriptor, &opened) == 0, opened.st_dev == original.st_dev,
+        opened.st_ino == original.st_ino, opened.st_nlink == 1,
+        (opened.st_mode & S_IFMT) == S_IFREG
+      else { throw CocoaError(.fileReadInvalidFileName) }
+      if try handle.readToEnd() == data { return }
+    } else if errno != ENOENT {
+      throw CocoaError(.fileReadNoPermission)
     }
+    try data.write(to: url, options: .atomic)
   }
 
   private func renderMarkdown(for session: LocalSession) -> String {
@@ -87,6 +104,9 @@ struct LocalSessionPromptPackageBuilder {
       ## Reusable AI Prompt
       Use the transcript, recap, attachments, and source audio references below as context for downstream AI work. Keep mixed Hebrew/English phrasing when it reflects the original session.
 
+      ## Transcript Evidence
+      \(evidenceLines(for: session))
+
       ## Recap Overview
       \(recapOverview)
 
@@ -110,6 +130,12 @@ struct LocalSessionPromptPackageBuilder {
       title: session.displayTitle,
       startedAt: session.startedAt,
       status: session.status.rawValue,
+      transcriptNotice: LocalSessionReadingNotice.resolve(session),
+      evidenceOrigin: session.transcriptionEvidence == nil
+        ? "legacy-session-json" : "transcription-run-reference",
+      transcriptionEvidence: session.transcriptionEvidence,
+      latestTranscriptionAttempt: session.latestTranscriptionAttempt,
+      processingError: session.processingError,
       contentClassification: session.contentClassification,
       transcriptText: session.transcriptText,
       transcriptSegments: session.transcriptSegments,
@@ -131,6 +157,9 @@ struct LocalSessionPromptPackageBuilder {
       },
       captureArtifacts: session.captureArtifacts,
       audioFiles: [
+        packageFile(
+          named: session.audioArtifacts.importedFileName, for: session,
+          defaultURL: fileLayout.importedAudioURL(for: session.id)),
         packageFile(
           named: session.audioArtifacts.micFileName, for: session,
           defaultURL: fileLayout.micAudioURL(for: session.id)),
@@ -158,6 +187,10 @@ struct LocalSessionPromptPackageBuilder {
 
   private func audioLines(for session: LocalSession) -> String {
     let audioFiles = [
+      (
+        "Imported", session.audioArtifacts.importedFileName,
+        fileLayout.importedAudioURL(for: session.id)
+      ),
       ("Mic", session.audioArtifacts.micFileName, fileLayout.micAudioURL(for: session.id)),
       ("System", session.audioArtifacts.systemFileName, fileLayout.systemAudioURL(for: session.id)),
       ("Mixed", session.audioArtifacts.mixedFileName, fileLayout.mixedAudioURL(for: session.id)),
@@ -169,6 +202,41 @@ struct LocalSessionPromptPackageBuilder {
       }
       return "- \(label): Not retained"
     }.joined(separator: "\n")
+  }
+
+  private func evidenceLines(for session: LocalSession) -> String {
+    let notice = LocalSessionReadingNotice.resolve(session)
+    var lines = ["\(notice.title). \(notice.detail)"]
+    if let evidence = session.transcriptionEvidence {
+      lines += summaryLines(evidence)
+    } else {
+      lines.append("- Evidence origin: legacy-session-json; no transcription run is referenced.")
+    }
+    if let latest = session.latestTranscriptionAttempt {
+      lines += ["", "### Latest transcription attempt"] + summaryLines(latest)
+    }
+    if let error = session.processingError, !error.isEmpty {
+      lines.append("- Processing warning: \(error)")
+    }
+    lines.append(
+      "Timing and speech coverage checks do not verify every recognized word. Use the source audio to review wording."
+    )
+    return lines.joined(separator: "\n")
+  }
+
+  private func summaryLines(_ summary: LocalSessionTranscriptionEvidenceSummary) -> [String] {
+    let coverage =
+      summary.speechCoverage.flatMap { value in
+        value.isFinite ? String(format: "%.2f%%", value * 100) : nil
+      } ?? "Unknown"
+    return [
+      "- Disposition: \(summary.disposition.rawValue)",
+      "- Complete: \(summary.isComplete.map { $0 ? "Yes" : "No" } ?? "Unknown")",
+      "- Detected speech coverage: \(coverage)",
+      "- Verifiable timestamps: \(summary.hasVerifiableTimestamps.map { $0 ? "Yes" : "No" } ?? "Unknown")",
+      "- Run: \(summary.runFileName) (revision \(summary.revision))",
+      "- Content hash: \(summary.contentHash)",
+    ] + summary.issues.map { "- Issue: \($0)" }
   }
 
   private func contentTypeLine(for session: LocalSession) -> String {
@@ -244,6 +312,11 @@ private struct LocalSessionPromptPackageManifest: Codable {
   let title: String
   let startedAt: Date
   let status: String
+  let transcriptNotice: LocalSessionReadingNotice
+  let evidenceOrigin: String
+  let transcriptionEvidence: LocalSessionTranscriptionEvidenceSummary?
+  let latestTranscriptionAttempt: LocalSessionTranscriptionEvidenceSummary?
+  let processingError: String?
   let contentClassification: LocalSessionContentClassification?
   let transcriptText: String
   let transcriptSegments: [LocalSessionTranscriptSegment]

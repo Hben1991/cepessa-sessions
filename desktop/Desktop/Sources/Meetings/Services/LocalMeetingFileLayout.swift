@@ -1,4 +1,13 @@
+import Darwin
 import Foundation
+
+enum LocalSessionFileLayoutError: LocalizedError, Equatable {
+  case unsafeDirectory(URL)
+
+  var errorDescription: String? {
+    "The session storage directory is unavailable or unsafe."
+  }
+}
 
 enum LocalSessionTranscriptionEngineKind: String, Codable, Equatable, Sendable {
   case whisperKit
@@ -390,8 +399,8 @@ struct LocalSessionFileLayout {
     for root in roots {
       for fileName in candidateFileNames {
         let candidate = root.appendingPathComponent(fileName, isDirectory: false)
-        if isUsableWaveAudio(at: candidate, fileManager: fileManager) {
-          return candidate
+        if let validatedURL = validatedAudioURL(for: candidate, fileManager: fileManager) {
+          return validatedURL
         }
       }
     }
@@ -399,22 +408,183 @@ struct LocalSessionFileLayout {
     return nil
   }
 
-  func ensureDirectories(fileManager: FileManager = .default, for sessionID: UUID? = nil) throws {
-    try fileManager.createDirectory(at: sessionsDirectory, withIntermediateDirectories: true)
-    try fileManager.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
-    try fileManager.createDirectory(at: modelDirectory(), withIntermediateDirectories: true)
-    try fileManager.createDirectory(
-      at: meetingEvidenceOutboxDirectory, withIntermediateDirectories: true)
+  /// Returns an audio URL only when it is a direct file in a known session directory.
+  ///
+  /// This is shared by playback and transcription retry callers. Every existing path
+  /// component is checked with `lstat`, and the final file is opened with `O_NOFOLLOW`.
+  /// Existing symlinks, hard links, and paths outside this layout are rejected before
+  /// header inspection. Consumers that reopen the returned path must still handle replacement.
+  func validatedAudioURL(for url: URL, fileManager: FileManager = .default) -> URL? {
+    guard isSafeDirectSessionAudioFile(url, fileManager: fileManager) else {
+      return nil
+    }
+    return isUsableWaveAudio(at: url, fileManager: fileManager) ? url : nil
+  }
 
+  /// Checks only path and file safety. It deliberately does not inspect the file contents,
+  /// allowing transcription evidence code to distinguish an unsafe file from a malformed WAV.
+  func isSafeDirectSessionAudioFile(
+    _ url: URL,
+    fileManager _: FileManager = .default
+  ) -> Bool {
+    guard let standardizedURL = LocalStoragePath.checkedFileURL(url) else {
+      return false
+    }
+
+    let parentComponents = standardizedURL.deletingLastPathComponent().pathComponents
+    let roots = [sessionsDirectory, legacySessionsDirectory].compactMap {
+      LocalStoragePath.checkedFileURL($0)
+    }
+    guard
+      roots.contains(where: { root in
+        let rootComponents = root.pathComponents
+        guard parentComponents.count == rootComponents.count + 1,
+          Array(parentComponents.prefix(rootComponents.count)) == rootComponents,
+          let sessionComponent = parentComponents.last,
+          UUID(uuidString: sessionComponent) != nil
+        else {
+          return false
+        }
+        return true
+      })
+    else {
+      return false
+    }
+
+    var currentURL = URL(fileURLWithPath: "/", isDirectory: true)
+    for component in standardizedURL.pathComponents.dropLast() {
+      currentURL.appendPathComponent(component, isDirectory: true)
+      var status = stat()
+      guard lstat(currentURL.path, &status) == 0,
+        (status.st_mode & S_IFMT) == S_IFDIR
+      else {
+        return false
+      }
+    }
+
+    var pathStatus = stat()
+    guard
+      lstat(standardizedURL.path, &pathStatus) == 0,
+      (pathStatus.st_mode & S_IFMT) == S_IFREG,
+      pathStatus.st_nlink == 1
+    else {
+      return false
+    }
+
+    let descriptor = open(standardizedURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else { return false }
+    defer { close(descriptor) }
+
+    var openedStatus = stat()
+    guard
+      fstat(descriptor, &openedStatus) == 0,
+      (openedStatus.st_mode & S_IFMT) == S_IFREG,
+      openedStatus.st_nlink == 1,
+      sameFile(pathStatus, openedStatus)
+    else {
+      return false
+    }
+
+    var finalPathStatus = stat()
+    return
+      lstat(standardizedURL.path, &finalPathStatus) == 0
+      && (finalPathStatus.st_mode & S_IFMT) == S_IFREG
+      && finalPathStatus.st_nlink == 1
+      && sameFile(openedStatus, finalPathStatus)
+  }
+
+  func ensureDirectories(fileManager: FileManager = .default, for sessionID: UUID? = nil) throws {
+    var directories = [
+      sessionsDirectory,
+      modelsDirectory,
+      modelDirectory(),
+      meetingEvidenceOutboxDirectory,
+    ]
     if let sessionID {
-      try fileManager.createDirectory(
-        at: sessionDirectory(for: sessionID), withIntermediateDirectories: true)
-      try fileManager.createDirectory(
-        at: attachmentsDirectory(for: sessionID), withIntermediateDirectories: true)
-      try fileManager.createDirectory(
-        at: exportsDirectory(for: sessionID), withIntermediateDirectories: true)
-      try fileManager.createDirectory(
-        at: transcriptionRunsDirectory(for: sessionID), withIntermediateDirectories: true)
+      directories += [
+        sessionDirectory(for: sessionID),
+        attachmentsDirectory(for: sessionID),
+        exportsDirectory(for: sessionID),
+        transcriptionRunsDirectory(for: sessionID),
+      ]
+    }
+
+    // Validate every existing component before creating any missing descendant. This prevents
+    // a later unsafe session or managed directory from causing writes through an earlier one.
+    for directory in directories {
+      try validateExistingDirectoryComponents(at: directory)
+    }
+    for directory in directories {
+      try ensureDirectoryStepwise(at: directory, fileManager: fileManager)
+    }
+  }
+
+  private func validateExistingDirectoryComponents(at url: URL) throws {
+    guard let standardizedURL = LocalStoragePath.checkedFileURL(url) else {
+      throw LocalSessionFileLayoutError.unsafeDirectory(url)
+    }
+    let components = standardizedURL.pathComponents
+    guard components.first == "/" else {
+      throw LocalSessionFileLayoutError.unsafeDirectory(url)
+    }
+
+    var currentURL = URL(fileURLWithPath: "/", isDirectory: true)
+    for component in components.dropFirst() {
+      currentURL.appendPathComponent(component, isDirectory: true)
+      var status = stat()
+      guard lstat(currentURL.path, &status) == 0 else {
+        let errorNumber = errno
+        if errorNumber == ENOENT {
+          return
+        }
+        throw LocalSessionFileLayoutError.unsafeDirectory(currentURL)
+      }
+      guard (status.st_mode & S_IFMT) == S_IFDIR else {
+        throw LocalSessionFileLayoutError.unsafeDirectory(currentURL)
+      }
+    }
+  }
+
+  private func ensureDirectoryStepwise(at url: URL, fileManager: FileManager) throws {
+    guard let standardizedURL = LocalStoragePath.checkedFileURL(url) else {
+      throw LocalSessionFileLayoutError.unsafeDirectory(url)
+    }
+    let components = standardizedURL.pathComponents
+    guard components.first == "/" else {
+      throw LocalSessionFileLayoutError.unsafeDirectory(url)
+    }
+
+    var currentURL = URL(fileURLWithPath: "/", isDirectory: true)
+    for component in components.dropFirst() {
+      currentURL.appendPathComponent(component, isDirectory: true)
+      var status = stat()
+      if lstat(currentURL.path, &status) == 0 {
+        guard (status.st_mode & S_IFMT) == S_IFDIR else {
+          throw LocalSessionFileLayoutError.unsafeDirectory(currentURL)
+        }
+        continue
+      }
+
+      let errorNumber = errno
+      guard errorNumber == ENOENT else {
+        throw LocalSessionFileLayoutError.unsafeDirectory(currentURL)
+      }
+      do {
+        try fileManager.createDirectory(at: currentURL, withIntermediateDirectories: false)
+      } catch {
+        var racedStatus = stat()
+        guard lstat(currentURL.path, &racedStatus) == 0,
+          (racedStatus.st_mode & S_IFMT) == S_IFDIR
+        else {
+          throw error
+        }
+      }
+      var createdStatus = stat()
+      guard lstat(currentURL.path, &createdStatus) == 0,
+        (createdStatus.st_mode & S_IFMT) == S_IFDIR
+      else {
+        throw LocalSessionFileLayoutError.unsafeDirectory(currentURL)
+      }
     }
   }
 
@@ -674,17 +844,43 @@ struct LocalSessionFileLayout {
     return magic == Data([0x6c, 0x6d, 0x67, 0x67])
   }
 
-  private func isUsableWaveAudio(at url: URL, fileManager: FileManager) -> Bool {
+  private func isUsableWaveAudio(at url: URL, fileManager _: FileManager) -> Bool {
+    var pathStatus = stat()
     guard
-      let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-      values.isRegularFile == true,
-      let fileSize = values.fileSize,
-      fileSize >= 44,
-      let handle = try? FileHandle(forReadingFrom: url)
+      lstat(url.path, &pathStatus) == 0,
+      (pathStatus.st_mode & S_IFMT) == S_IFREG,
+      pathStatus.st_nlink == 1
     else {
       return false
     }
-    defer { try? handle.close() }
+
+    let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else { return false }
+    defer { close(descriptor) }
+
+    var openedStatus = stat()
+    guard
+      fstat(descriptor, &openedStatus) == 0,
+      (openedStatus.st_mode & S_IFMT) == S_IFREG,
+      openedStatus.st_nlink == 1,
+      sameFile(pathStatus, openedStatus),
+      openedStatus.st_size >= 44
+    else {
+      return false
+    }
+
+    var finalPathStatus = stat()
+    guard
+      lstat(url.path, &finalPathStatus) == 0,
+      (finalPathStatus.st_mode & S_IFMT) == S_IFREG,
+      finalPathStatus.st_nlink == 1,
+      sameFile(openedStatus, finalPathStatus)
+    else {
+      return false
+    }
+
+    let fileSize = openedStatus.st_size
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
 
     guard
       let header = try? handle.read(upToCount: 12),
@@ -726,6 +922,10 @@ struct LocalSessionFileLayout {
       }
     }
     return false
+  }
+
+  private func sameFile(_ lhs: stat, _ rhs: stat) -> Bool {
+    lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino
   }
 
   private static func readUInt32(_ data: Data, offset: Int) -> UInt32 {

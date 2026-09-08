@@ -3,44 +3,6 @@ import AVKit
 import AppKit
 import SwiftUI
 
-struct LocalSessionReadingNotice: Equatable {
-  let title: String
-  let detail: String
-  let needsReview: Bool
-
-  static func resolve(_ session: LocalSession) -> Self {
-    let hasText = !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    if session.status == .recording {
-      return .init(
-        title: "Recording", detail: "The transcript will follow when recording stops.",
-        needsReview: false)
-    }
-    if session.status == .transcribing {
-      return .init(
-        title: "Transcribing", detail: "Processing the recording on this Mac.", needsReview: false)
-    }
-    if session.status == .failed || session.transcriptionEvidence?.isComplete == false || !hasText {
-      return .init(
-        title: hasText ? "Transcript needs review" : "Transcript not ready",
-        detail: session.processingError ?? session.transcriptionEvidence?.issues.first
-          ?? (hasText
-            ? "Some of the recording may be missing. Listen to the audio before relying on this text."
-            : "Use Transcribe to try the saved audio again."),
-        needsReview: true)
-    }
-    if session.transcriptionEvidence?.isComplete != true {
-      return .init(
-        title: "Saved transcript",
-        detail:
-          "This older transcript has no completeness check. The audio is the source of truth.",
-        needsReview: false)
-    }
-    return .init(
-      title: "Transcript ready", detail: "Source timing and detected speech coverage were checked.",
-      needsReview: false)
-  }
-}
-
 /// A compact audio transport keeps the recording next to the words it produced.
 @MainActor
 final class LocalSessionAudioPlayback: ObservableObject {
@@ -199,18 +161,7 @@ struct LocalSessionAttachmentsView: View {
   }
 
   private func localURL(for attachment: LocalSessionAttachment) -> URL? {
-    if let name = attachment.fileName, name == URL(fileURLWithPath: name).lastPathComponent,
-      let folder
-    {
-      let url = folder.appendingPathComponent("Attachments").appendingPathComponent(name)
-      if FileManager.default.fileExists(atPath: url.path) { return url }
-      let lowercaseURL = folder.appendingPathComponent("attachments").appendingPathComponent(name)
-      if FileManager.default.fileExists(atPath: lowercaseURL.path) { return lowercaseURL }
-    }
-    guard let path = attachment.urlString else { return nil }
-    if path.hasPrefix("/") { return URL(fileURLWithPath: path) }
-    if let url = URL(string: path), url.isFileURL { return url }
-    return nil
+    LocalSessionAttachmentResolver.localURL(for: attachment, in: folder)
   }
 }
 

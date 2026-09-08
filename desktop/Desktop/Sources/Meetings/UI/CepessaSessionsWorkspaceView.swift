@@ -115,11 +115,14 @@ struct CepessaSessionsWorkspaceView: View {
       Button("OK") {
         exportAlertMessage = nil
       }
-        } message: {
-          Text(exportAlertMessage ?? "")
-        }
+    } message: {
+      Text(exportAlertMessage ?? "")
+    }
     .sheet(item: $selectedAttachmentPreview) { attachment in
-      CepessaSessionAttachmentPreviewView(attachment: attachment)
+      CepessaSessionAttachmentPreviewView(
+        attachment: attachment,
+        sessionFolderURL: model.sessionFolderURL()
+      )
     }
   }
 }
@@ -1284,9 +1287,9 @@ extension CepessaSessionsWorkspaceView {
 
   fileprivate func floatingDocumentToolbar(for layout: WorkspaceLayoutMode) -> some View {
     floatingDocumentToolbarCoreControls(for: layout, includeDocumentActions: true)
-    .padding(.horizontal, 10)
-    .padding(.vertical, 8)
-    .cepessaFloatingToolbarSurface()
+      .padding(.horizontal, 10)
+      .padding(.vertical, 8)
+      .cepessaFloatingToolbarSurface()
   }
 
   fileprivate func floatingDocumentToolbarCoreControls(
@@ -1917,7 +1920,7 @@ extension CepessaSessionsWorkspaceView {
       if !item.attachments.isEmpty {
         HStack(spacing: -10) {
           ForEach(item.attachments.prefix(3)) { attachment in
-            timelineAttachmentThumbnail(attachment)
+            timelineAttachmentThumbnail(attachment, in: session)
           }
         }
         .padding(.top, 2)
@@ -1946,16 +1949,22 @@ extension CepessaSessionsWorkspaceView {
       }
   }
 
-  fileprivate func timelineAttachmentThumbnail(_ attachment: LocalMeetingAttachment) -> some View {
-    Button {
-      guard attachmentImage(for: attachment) != nil else { return }
+  fileprivate func timelineAttachmentThumbnail(
+    _ attachment: LocalMeetingAttachment,
+    in session: LocalMeetingSession
+  ) -> some View {
+    let sessionFolderURL = model.sessionFolderURL(for: session.id)
+    return Button {
+      guard attachmentImage(for: attachment, sessionFolderURL: sessionFolderURL) != nil else {
+        return
+      }
       selectedAttachmentPreview = attachment
     } label: {
       ZStack {
         RoundedRectangle(cornerRadius: 12, style: .continuous)
           .fill(Color.white.opacity(0.72))
 
-        if let image = attachmentImage(for: attachment) {
+        if let image = attachmentImage(for: attachment, sessionFolderURL: sessionFolderURL) {
           Image(nsImage: image)
             .resizable()
             .scaledToFill()
@@ -1974,7 +1983,10 @@ extension CepessaSessionsWorkspaceView {
       .shadow(color: CepessaColors.warmShadow.opacity(0.11), radius: 12, x: 0, y: 5)
     }
     .buttonStyle(.plain)
-    .help(attachmentImage(for: attachment) != nil ? "Open image preview" : "Attachment")
+    .help(
+      attachmentImage(for: attachment, sessionFolderURL: sessionFolderURL) != nil
+        ? "Open image preview" : "Attachment"
+    )
   }
 
   fileprivate func transcriptWaveformGlyph(tint: Color) -> some View {
@@ -2018,20 +2030,18 @@ extension CepessaSessionsWorkspaceView {
     return "\(timeString(from: start)) -> \(timeString(from: end))"
   }
 
-  fileprivate func attachmentImage(for attachment: LocalMeetingAttachment) -> NSImage? {
+  fileprivate func attachmentImage(
+    for attachment: LocalMeetingAttachment,
+    sessionFolderURL: URL?
+  ) -> NSImage? {
     guard attachment.kind == .image || attachment.kind == .capture else { return nil }
-
-    if let urlString = attachment.urlString {
-      if urlString.hasPrefix("/") {
-        return NSImage(contentsOfFile: urlString)
-      }
-
-      if let url = URL(string: urlString), url.isFileURL {
-        return NSImage(contentsOf: url)
-      }
-    }
-
-    return nil
+    guard
+      let url = LocalSessionAttachmentResolver.localURL(
+        for: attachment,
+        in: sessionFolderURL
+      )
+    else { return nil }
+    return NSImage(contentsOf: url)
   }
 
   fileprivate func speakerIcon(for speaker: String) -> String {
@@ -2172,7 +2182,8 @@ extension CepessaSessionsWorkspaceView {
                 title: attachmentTitle(for: attachment),
                 icon: icon(for: attachment),
                 fileName: attachmentSubtitle(for: attachment),
-                attachment: attachment
+                attachment: attachment,
+                sessionFolderURL: model.sessionFolderURL(for: session.id)
               )
             }
           }
@@ -2305,7 +2316,9 @@ extension CepessaSessionsWorkspaceView {
       hoveredSessionID = isInside ? session.id : nil
     }
     .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(documentTitle(for: session)), \(statusLabel(displayStatus(for: session)))")
+    .accessibilityLabel(
+      "\(documentTitle(for: session)), \(statusLabel(displayStatus(for: session)))"
+    )
     .accessibilityHint("Opens this session in the workspace.")
     .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
     .accessibilityAction {
@@ -2400,10 +2413,13 @@ extension CepessaSessionsWorkspaceView {
     icon: String,
     fileName: String?,
     showsStatusBadge: Bool = true,
-    attachment: LocalMeetingAttachment? = nil
+    attachment: LocalMeetingAttachment? = nil,
+    sessionFolderURL: URL? = nil
   ) -> some View {
     HStack(alignment: .top, spacing: 10) {
-      if let attachment, attachmentImage(for: attachment) != nil {
+      if let attachment,
+        attachmentImage(for: attachment, sessionFolderURL: sessionFolderURL) != nil
+      {
         Button {
           selectedAttachmentPreview = attachment
         } label: {
@@ -2412,7 +2428,10 @@ extension CepessaSessionsWorkspaceView {
               .fill(CepessaColors.backgroundRaised.opacity(0.88))
               .frame(width: 30, height: 30)
 
-            if let image = attachmentImage(for: attachment) {
+            if let image = attachmentImage(
+              for: attachment,
+              sessionFolderURL: sessionFolderURL
+            ) {
               Image(nsImage: image)
                 .resizable()
                 .scaledToFill()
@@ -3214,7 +3233,8 @@ extension CepessaSessionsWorkspaceView {
     guard let session = model.sessions.first(where: { $0.id == sessionID }) else { return }
     guard session.title != trimmedTitle else { return }
 
-    if model.updateSessionTitle(trimmedTitle, for: sessionID), model.selectedSessionID == sessionID {
+    if model.updateSessionTitle(trimmedTitle, for: sessionID), model.selectedSessionID == sessionID
+    {
       sessionTitleDraft = model.selectedSession?.title ?? trimmedTitle
       sessionTitleDraftSessionID = sessionID
     }
@@ -3637,18 +3657,21 @@ extension CepessaSessionsWorkspaceView {
 
   @ViewBuilder
   fileprivate func sessionTitleEditor(for session: LocalMeetingSession) -> some View {
-    TextField("Session title", text: Binding(
-      get: {
-        if sessionTitleDraftSessionID == session.id {
-          return sessionTitleDraft
+    TextField(
+      "Session title",
+      text: Binding(
+        get: {
+          if sessionTitleDraftSessionID == session.id {
+            return sessionTitleDraft
+          }
+          return session.title
+        },
+        set: { newValue in
+          sessionTitleDraftSessionID = session.id
+          sessionTitleDraft = newValue
         }
-        return session.title
-      },
-      set: { newValue in
-        sessionTitleDraftSessionID = session.id
-        sessionTitleDraft = newValue
-      }
-    ))
+      )
+    )
     .textFieldStyle(.plain)
     .scaledFont(size: 14, weight: .semibold, design: .rounded)
     .foregroundColor(CepessaColors.textPrimary)
@@ -3932,12 +3955,12 @@ private struct WorkspaceFloatingChatProposalStrip: View {
           proposalSummary,
           systemImage: proposal.operation == .delete ? "trash.fill" : "doc.badge.gearshape"
         )
-          .scaledFont(size: 11.5, weight: .semibold)
-          .foregroundStyle(
-            proposal.operation == .delete ? CepessaColors.error : CepessaColors.textPrimary
-          )
-          .lineLimit(2)
-          .fixedSize(horizontal: false, vertical: true)
+        .scaledFont(size: 11.5, weight: .semibold)
+        .foregroundStyle(
+          proposal.operation == .delete ? CepessaColors.error : CepessaColors.textPrimary
+        )
+        .lineLimit(2)
+        .fixedSize(horizontal: false, vertical: true)
 
         Spacer(minLength: 8)
 
@@ -4058,7 +4081,8 @@ private struct WorkspaceFloatingChatProposalStrip: View {
     var lines: [(title: String, body: String)] = []
 
     if proposal.operation == .delete {
-      lines.append(("Delete", "This will remove the generated document content for the selected session."))
+      lines.append(
+        ("Delete", "This will remove the generated document content for the selected session."))
     }
 
     if let title = proposal.sessionTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -4072,7 +4096,8 @@ private struct WorkspaceFloatingChatProposalStrip: View {
       lines.append(("Markdown document", preview.isEmpty ? "The document will be blank." : preview))
     }
 
-    if let overview = proposal.recapPatch?.overview?.trimmingCharacters(in: .whitespacesAndNewlines),
+    if let overview = proposal.recapPatch?.overview?.trimmingCharacters(
+      in: .whitespacesAndNewlines),
       !overview.isEmpty
     {
       lines.append(("Overview", overview))

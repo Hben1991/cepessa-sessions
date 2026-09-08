@@ -95,20 +95,19 @@ final class LocalClipViewModel: ObservableObject {
 
   func videoPlaybackURL(for clipID: LocalClipManifest.ID? = nil) -> URL? {
     guard let clipID = clipID ?? selectedClipID else { return nil }
-    let url = clipFileLayout.videoURL(for: clipID)
-    return fileManager.fileExists(atPath: url.path) ? url : nil
+    return clipFileLayout.safeExistingVideoURL(for: clipID)
   }
 
   func audioPlaybackURL(for clipID: LocalClipManifest.ID? = nil) -> URL? {
     guard let clipID = clipID ?? selectedClipID else { return nil }
-    let url = clipFileLayout.audioURL(for: clipID)
-    return fileManager.fileExists(atPath: url.path) ? url : nil
+    return clipFileLayout.safeExistingAudioURL(for: clipID)
   }
 
   func loadClips() {
     validatedReadyClipIDs = []
     validatingClipIDs = []
-    clips = store.loadClips().map { storedClip in
+    let storedClips = store.loadClips()
+    clips = storedClips.map { storedClip in
       guard storedClip.status == .recording || storedClip.status == .processing else {
         return storedClip
       }
@@ -126,6 +125,9 @@ final class LocalClipViewModel: ObservableObject {
     }
     syncSelectedClipDrafts()
     validateStoredReadyClips()
+    if let warning = store.loadWarnings.last {
+      statusMessage = warning
+    }
   }
 
   private func validateStoredReadyClips() {
@@ -252,8 +254,8 @@ final class LocalClipViewModel: ObservableObject {
 
   func canRetryTranscription(for clipID: LocalClipManifest.ID) -> Bool {
     guard let clip = clip(for: clipID), clip.status == .failed else { return false }
-    return fileManager.fileExists(atPath: clipFileLayout.videoURL(for: clipID).path)
-      && fileManager.fileExists(atPath: clipFileLayout.audioURL(for: clipID).path)
+    return clipFileLayout.safeExistingVideoURL(for: clipID) != nil
+      && clipFileLayout.safeExistingAudioURL(for: clipID) != nil
       && !processingClipIDs.contains(clipID)
   }
 
@@ -277,6 +279,7 @@ final class LocalClipViewModel: ObservableObject {
   func canCopyAgentPrompt(for clipID: LocalClipManifest.ID) -> Bool {
     guard let clip = clip(for: clipID) else { return false }
     return isReadyForDisplay(clipID)
+      && clipFileLayout.safeExistingVideoURL(for: clipID) != nil
       && LocalClipAudioValidator.duration(
         for: clipFileLayout.audioURL(for: clipID),
         fileManager: fileManager

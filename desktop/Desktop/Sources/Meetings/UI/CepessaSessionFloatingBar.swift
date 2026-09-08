@@ -904,7 +904,10 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
 
     if let session = activeSession() {
       state.title = session.title
-      state.attachmentDeck = CepessaSessionFloatingAttachmentDeck.build(from: session)
+      state.attachmentDeck = CepessaSessionFloatingAttachmentDeck.build(
+        from: session,
+        sessionFolderURL: model.sessionFolderURL(for: session.id)
+      )
       switch session.status {
       case .recording:
         state.statusMessage =
@@ -922,7 +925,10 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
       state.title = model.processingStatusTitle ?? "Processing session"
       state.statusMessage = model.processingStatusDetail ?? "Finishing the local transcript."
       if let lastSession = model.sessions.first(where: { $0.status == .transcribing }) {
-        state.attachmentDeck = CepessaSessionFloatingAttachmentDeck.build(from: lastSession)
+        state.attachmentDeck = CepessaSessionFloatingAttachmentDeck.build(
+          from: lastSession,
+          sessionFolderURL: model.sessionFolderURL(for: lastSession.id)
+        )
       } else {
         state.attachmentDeck = .empty
       }
@@ -1262,13 +1268,8 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     throws -> URL
   {
     let fileLayout = LocalMeetingFileLayout(baseDirectory: defaultBaseDirectory())
-    let attachmentsDirectory =
-      fileLayout
-      .sessionDirectory(for: sessionID)
-      .appendingPathComponent(Constants.attachmentsFolder, isDirectory: true)
-
-    try FileManager.default.createDirectory(
-      at: attachmentsDirectory, withIntermediateDirectories: true)
+    try fileLayout.ensureDirectories(for: sessionID)
+    let attachmentsDirectory = fileLayout.attachmentsDirectory(for: sessionID)
 
     if let preferredName {
       return uniqueURL(in: attachmentsDirectory, preferredName: preferredName)

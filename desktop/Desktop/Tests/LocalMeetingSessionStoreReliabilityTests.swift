@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import XCTest
+
 @testable import CepessaSessions
 
 final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
@@ -9,7 +10,8 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
 
   override func setUpWithError() throws {
     rootURL = fileManager.temporaryDirectory
-      .appendingPathComponent("LocalMeetingSessionStoreReliability-\(UUID().uuidString)", isDirectory: true)
+      .appendingPathComponent(
+        "LocalMeetingSessionStoreReliability-\(UUID().uuidString)", isDirectory: true)
     try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
   }
 
@@ -20,7 +22,8 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
   }
 
   func testMergePreservesDifferentRemoteTopLevelChanges() throws {
-    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
     let base = makeSession()
     try store.save(base)
@@ -39,7 +42,8 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
   }
 
   func testMergeRaisesExplicitConflictForSameTopLevelField() throws {
-    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
     let base = makeSession()
     try store.save(base)
@@ -63,7 +67,8 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
   }
 
   func testMergePreservesUnknownCurrentTopLevelFields() throws {
-    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
     let base = makeSession()
     try store.save(base)
@@ -86,13 +91,15 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
     XCTAssertEqual((mergedObject["futureExtension"] as? [String: Any])?["enabled"] as? Bool, true)
     let payload = try XCTUnwrap((mergedObject["futureExtension"] as? [String: Any])?["payload"])
     XCTAssertEqual(
-      try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .fragmentsAllowed]),
+      try JSONSerialization.data(
+        withJSONObject: payload, options: [.sortedKeys, .fragmentsAllowed]),
       Data("[\"keep\",2]".utf8)
     )
   }
 
   func testLoadRepairsGeneratedPackagesFromLatestMetadata() throws {
-    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
     let base = makeSession()
     try store.save(base)
@@ -120,7 +127,8 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
   }
 
   func testLoadKeepsSessionWhenGeneratedPackageRepairFails() throws {
-    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
     let base = makeSession()
     try store.save(base)
@@ -139,7 +147,8 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
   }
 
   func testBulkLoadSkipsUnsafeAndMismatchedEntriesWithoutTouchingHealthySibling() throws {
-    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
     let healthy = makeSession()
     try store.save(healthy)
@@ -147,28 +156,45 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
     let sessionsDirectory = layout.sessionsDirectory
     let symlinkEntryID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
     let symlinkTargetID = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
-    let symlinkTargetDirectory = rootURL.appendingPathComponent("outside-symlink", isDirectory: true)
+    let symlinkTargetDirectory = rootURL.appendingPathComponent(
+      "outside-symlink", isDirectory: true)
     try fileManager.createDirectory(at: symlinkTargetDirectory, withIntermediateDirectories: true)
-    let symlinkTargetMetadata = symlinkTargetDirectory.appendingPathComponent("session.json", isDirectory: false)
+    let symlinkTargetMetadata = symlinkTargetDirectory.appendingPathComponent(
+      "session.json", isDirectory: false)
     try encodedSessionData(makeSession(id: symlinkTargetID)).write(to: symlinkTargetMetadata)
-    let symlinkEntry = sessionsDirectory.appendingPathComponent(symlinkEntryID.uuidString, isDirectory: true)
+    let symlinkEntry = sessionsDirectory.appendingPathComponent(
+      symlinkEntryID.uuidString, isDirectory: true)
     try fileManager.createSymbolicLink(at: symlinkEntry, withDestinationURL: symlinkTargetDirectory)
 
     let hardlinkEntryID = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
     let hardlinkTargetID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
-    let hardlinkTargetMetadata = rootURL.appendingPathComponent("outside-hardlink.json", isDirectory: false)
+    let hardlinkTargetMetadata = rootURL.appendingPathComponent(
+      "outside-hardlink.json", isDirectory: false)
     try encodedSessionData(makeSession(id: hardlinkTargetID)).write(to: hardlinkTargetMetadata)
-    let hardlinkDirectory = sessionsDirectory.appendingPathComponent(hardlinkEntryID.uuidString, isDirectory: true)
+    let hardlinkDirectory = sessionsDirectory.appendingPathComponent(
+      hardlinkEntryID.uuidString, isDirectory: true)
     try fileManager.createDirectory(at: hardlinkDirectory, withIntermediateDirectories: true)
-    let hardlinkEntryMetadata = hardlinkDirectory.appendingPathComponent("session.json", isDirectory: false)
+    let hardlinkEntryMetadata = hardlinkDirectory.appendingPathComponent(
+      "session.json", isDirectory: false)
     XCTAssertEqual(Darwin.link(hardlinkTargetMetadata.path, hardlinkEntryMetadata.path), 0)
 
     let mismatchedEntryID = UUID(uuidString: "55555555-5555-4555-8555-555555555555")!
     let mismatchedPayloadID = UUID(uuidString: "66666666-6666-4666-8666-666666666666")!
-    let mismatchedDirectory = sessionsDirectory.appendingPathComponent(mismatchedEntryID.uuidString, isDirectory: true)
+    let mismatchedDirectory = sessionsDirectory.appendingPathComponent(
+      mismatchedEntryID.uuidString, isDirectory: true)
     try fileManager.createDirectory(at: mismatchedDirectory, withIntermediateDirectories: true)
-    let mismatchedMetadata = mismatchedDirectory.appendingPathComponent("session.json", isDirectory: false)
+    let mismatchedMetadata = mismatchedDirectory.appendingPathComponent(
+      "session.json", isDirectory: false)
     try encodedSessionData(makeSession(id: mismatchedPayloadID)).write(to: mismatchedMetadata)
+
+    let manifestSymlinkEntryID = UUID(uuidString: "77777777-7777-4777-8777-777777777777")!
+    let manifestSymlinkDirectory = sessionsDirectory.appendingPathComponent(
+      manifestSymlinkEntryID.uuidString, isDirectory: true)
+    try fileManager.createDirectory(at: manifestSymlinkDirectory, withIntermediateDirectories: true)
+    let manifestSymlinkMetadata = manifestSymlinkDirectory.appendingPathComponent(
+      "session.json", isDirectory: false)
+    try fileManager.createSymbolicLink(
+      at: manifestSymlinkMetadata, withDestinationURL: symlinkTargetMetadata)
 
     let symlinkTargetBefore = try Data(contentsOf: symlinkTargetMetadata)
     let hardlinkTargetBefore = try Data(contentsOf: hardlinkTargetMetadata)
@@ -182,8 +208,219 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: mismatchedMetadata), mismatchedBefore)
   }
 
+  func testSaveAndSingleLoadRejectSymlinkedSessionWithoutTouchingOutsideTree() throws {
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    try layout.ensureDirectories(fileManager: fileManager)
+
+    let session = makeSession()
+    let outsideDirectory = rootURL.appendingPathComponent("outside-session", isDirectory: true)
+    try fileManager.createDirectory(at: outsideDirectory, withIntermediateDirectories: true)
+    let outsideMetadata = outsideDirectory.appendingPathComponent(
+      "session.json", isDirectory: false)
+    try encodedSessionData(session).write(to: outsideMetadata)
+    let outsideBefore = try Data(contentsOf: outsideMetadata)
+    let sessionDirectory = layout.sessionDirectory(for: session.id)
+    try fileManager.createSymbolicLink(at: sessionDirectory, withDestinationURL: outsideDirectory)
+
+    XCTAssertThrowsError(try store.save(session))
+    XCTAssertNil(store.loadSession(id: session.id))
+    XCTAssertEqual(try Data(contentsOf: outsideMetadata), outsideBefore)
+    XCTAssertFalse(
+      fileManager.fileExists(
+        atPath: outsideDirectory.appendingPathComponent("Attachments", isDirectory: true).path))
+    XCTAssertFalse(
+      fileManager.fileExists(
+        atPath: outsideDirectory.appendingPathComponent("Exports", isDirectory: true).path))
+    XCTAssertFalse(
+      fileManager.fileExists(
+        atPath: outsideDirectory.appendingPathComponent("TranscriptionEvidence", isDirectory: true)
+          .path))
+  }
+
+  func testSaveRejectsSymlinkedSessionsRootWithoutTouchingOutsideTree() throws {
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    try fileManager.createDirectory(at: layout.baseDirectory, withIntermediateDirectories: true)
+
+    let session = makeSession()
+    let outsideDirectory = rootURL.appendingPathComponent("outside-sessions", isDirectory: true)
+    try fileManager.createDirectory(at: outsideDirectory, withIntermediateDirectories: true)
+    let outsideSessionDirectory = outsideDirectory.appendingPathComponent(
+      session.id.uuidString, isDirectory: true)
+    try fileManager.createDirectory(at: outsideSessionDirectory, withIntermediateDirectories: true)
+    try encodedSessionData(session).write(
+      to: outsideSessionDirectory.appendingPathComponent("session.json", isDirectory: false))
+    let marker = outsideDirectory.appendingPathComponent("marker.txt", isDirectory: false)
+    try Data("outside".utf8).write(to: marker)
+    let outsideBefore = try fileManager.subpathsOfDirectory(atPath: outsideDirectory.path)
+    try fileManager.createSymbolicLink(
+      at: layout.sessionsDirectory, withDestinationURL: outsideDirectory)
+
+    XCTAssertThrowsError(try store.save(session))
+    XCTAssertNil(store.loadSession(id: session.id))
+    XCTAssertEqual(
+      try fileManager.subpathsOfDirectory(atPath: outsideDirectory.path), outsideBefore)
+    XCTAssertEqual(try Data(contentsOf: marker), Data("outside".utf8))
+  }
+
+  func testSaveRejectsSymlinkedManagedDirectoryBeforeDescendantWrites() throws {
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let store = LocalMeetingSessionStore(fileLayout: layout)
+    try layout.ensureDirectories(fileManager: fileManager)
+
+    let sessionIDs = [
+      UUID(uuidString: "77777777-7777-4777-8777-777777777777")!,
+      UUID(uuidString: "88888888-8888-4888-8888-888888888888")!,
+      UUID(uuidString: "99999999-9999-4999-8999-999999999999")!,
+    ]
+    let managedDirectories: [(UUID) -> URL] = [
+      layout.attachmentsDirectory(for:),
+      layout.exportsDirectory(for:),
+      layout.transcriptionEvidenceDirectory(for:),
+    ]
+
+    for (index, sessionID) in sessionIDs.enumerated() {
+      let sessionDirectory = layout.sessionDirectory(for: sessionID)
+      try fileManager.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
+      let outsideDirectory = rootURL.appendingPathComponent(
+        "outside-managed-\(index)", isDirectory: true)
+      try fileManager.createDirectory(at: outsideDirectory, withIntermediateDirectories: true)
+      let marker = outsideDirectory.appendingPathComponent("marker.txt", isDirectory: false)
+      try Data("outside".utf8).write(to: marker)
+      let outsideBefore = try fileManager.subpathsOfDirectory(atPath: outsideDirectory.path)
+      let managedDirectory = managedDirectories[index](sessionID)
+      try fileManager.createSymbolicLink(at: managedDirectory, withDestinationURL: outsideDirectory)
+
+      XCTAssertThrowsError(try store.save(makeSession(id: sessionID)))
+      XCTAssertEqual(
+        try fileManager.subpathsOfDirectory(atPath: outsideDirectory.path), outsideBefore)
+      XCTAssertEqual(try Data(contentsOf: marker), Data("outside".utf8))
+    }
+  }
+
+  func testValidatedAudioURLRejectsSymlinkAndHardlinkWithoutReadingOutside() throws {
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let sessionID = UUID(uuidString: "A1B2C3D4-E5F6-4789-ABCD-001122334455")!
+    try layout.ensureDirectories(fileManager: fileManager, for: sessionID)
+
+    let outsideURL = rootURL.appendingPathComponent("outside-audio.wav", isDirectory: false)
+    let outsideData = validWaveData()
+    try outsideData.write(to: outsideURL)
+    let importedURL = layout.importedAudioURL(for: sessionID)
+    let artifacts = LocalSessionAudioArtifacts(
+      micFileName: nil,
+      systemFileName: nil,
+      mixedFileName: nil,
+      importedFileName: "imported.wav"
+    )
+
+    try fileManager.createSymbolicLink(at: importedURL, withDestinationURL: outsideURL)
+    XCTAssertNil(layout.validatedAudioURL(for: importedURL, fileManager: fileManager))
+    XCTAssertNil(
+      layout.existingAudioURL(for: sessionID, artifacts: artifacts, fileManager: fileManager))
+    XCTAssertEqual(try Data(contentsOf: outsideURL), outsideData)
+
+    try fileManager.removeItem(at: importedURL)
+    XCTAssertEqual(Darwin.link(outsideURL.path, importedURL.path), 0)
+    XCTAssertNil(layout.validatedAudioURL(for: importedURL, fileManager: fileManager))
+    XCTAssertNil(
+      layout.existingAudioURL(for: sessionID, artifacts: artifacts, fileManager: fileManager))
+    XCTAssertEqual(try Data(contentsOf: outsideURL), outsideData)
+
+    let safeMalformedURL = layout.sessionDirectory(for: sessionID)
+      .appendingPathComponent("malformed.wav", isDirectory: false)
+    try Data("not a wave".utf8).write(to: safeMalformedURL)
+    XCTAssertTrue(layout.isSafeDirectSessionAudioFile(safeMalformedURL, fileManager: fileManager))
+    XCTAssertNil(layout.validatedAudioURL(for: safeMalformedURL, fileManager: fileManager))
+  }
+
+  func testValidatedAudioURLRejectsLinkedSessionAndSessionsRoot() throws {
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("SessionLink", isDirectory: true))
+    let sessionID = UUID(uuidString: "B1C2D3E4-F5A6-4789-ABCD-001122334455")!
+    try layout.ensureDirectories(fileManager: fileManager, for: sessionID)
+
+    let outsideSessionDirectory = rootURL.appendingPathComponent(
+      "outside-linked-session", isDirectory: true)
+    try fileManager.createDirectory(at: outsideSessionDirectory, withIntermediateDirectories: true)
+    let outsideAudioURL = outsideSessionDirectory.appendingPathComponent(
+      "imported.wav", isDirectory: false)
+    let outsideAudioData = validWaveData()
+    try outsideAudioData.write(to: outsideAudioURL)
+    let outsideBefore = try Data(contentsOf: outsideAudioURL)
+    let sessionDirectory = layout.sessionDirectory(for: sessionID)
+    let redirectURL = sessionDirectory.appendingPathComponent("redirect", isDirectory: true)
+    try fileManager.createSymbolicLink(at: redirectURL, withDestinationURL: outsideSessionDirectory)
+    let traversedURL =
+      redirectURL
+      .appendingPathComponent("..", isDirectory: true)
+      .appendingPathComponent("imported.wav", isDirectory: false)
+    XCTAssertNil(layout.validatedAudioURL(for: traversedURL, fileManager: fileManager))
+    try fileManager.removeItem(at: redirectURL)
+    try fileManager.removeItem(at: sessionDirectory)
+    try fileManager.createSymbolicLink(
+      at: sessionDirectory, withDestinationURL: outsideSessionDirectory)
+
+    let linkedSessionAudioURL = layout.importedAudioURL(for: sessionID)
+    XCTAssertNil(layout.validatedAudioURL(for: linkedSessionAudioURL, fileManager: fileManager))
+    XCTAssertNil(
+      layout.existingAudioURL(
+        for: sessionID,
+        artifacts: .init(
+          micFileName: nil,
+          systemFileName: nil,
+          mixedFileName: nil,
+          importedFileName: "imported.wav"
+        ),
+        fileManager: fileManager
+      )
+    )
+    XCTAssertEqual(try Data(contentsOf: outsideAudioURL), outsideBefore)
+
+    let rootLinkedLayout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("SessionsRootLink", isDirectory: true))
+    try rootLinkedLayout.ensureDirectories(fileManager: fileManager)
+    let outsideSessionsDirectory = rootURL.appendingPathComponent(
+      "outside-linked-sessions", isDirectory: true)
+    try fileManager.createDirectory(at: outsideSessionsDirectory, withIntermediateDirectories: true)
+    let outsideRootSessionDirectory = outsideSessionsDirectory.appendingPathComponent(
+      sessionID.uuidString, isDirectory: true)
+    try fileManager.createDirectory(
+      at: outsideRootSessionDirectory, withIntermediateDirectories: true)
+    let outsideRootAudioURL = outsideRootSessionDirectory.appendingPathComponent(
+      "imported.wav", isDirectory: false)
+    try outsideAudioData.write(to: outsideRootAudioURL)
+    let outsideRootBefore = try Data(contentsOf: outsideRootAudioURL)
+    try fileManager.removeItem(at: rootLinkedLayout.sessionsDirectory)
+    try fileManager.createSymbolicLink(
+      at: rootLinkedLayout.sessionsDirectory, withDestinationURL: outsideSessionsDirectory)
+
+    let linkedRootAudioURL = rootLinkedLayout.importedAudioURL(for: sessionID)
+    XCTAssertNil(
+      rootLinkedLayout.validatedAudioURL(for: linkedRootAudioURL, fileManager: fileManager))
+    XCTAssertNil(
+      rootLinkedLayout.existingAudioURL(
+        for: sessionID,
+        artifacts: .init(
+          micFileName: nil,
+          systemFileName: nil,
+          mixedFileName: nil,
+          importedFileName: "imported.wav"
+        ),
+        fileManager: fileManager
+      )
+    )
+    XCTAssertEqual(try Data(contentsOf: outsideRootAudioURL), outsideRootBefore)
+  }
+
   func testBaselineMergePromotesLegacySessionIntoCurrentSessions() throws {
-    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
     let base = makeSession()
     try store.save(base)
@@ -204,7 +441,8 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
   }
 
   func testSessionLockIsCreatedAndRejectsSymlinkAndHardlink() throws {
-    let layout = LocalSessionFileLayout(baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
+    let layout = LocalSessionFileLayout(
+      baseDirectory: rootURL.appendingPathComponent("Cepessa", isDirectory: true))
     let store = LocalMeetingSessionStore(fileLayout: layout)
     let session = makeSession()
     try store.save(session)
@@ -257,5 +495,35 @@ final class LocalMeetingSessionStoreReliabilityTests: XCTestCase {
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     encoder.dateEncodingStrategy = .iso8601
     return try encoder.encode(session)
+  }
+
+  private func validWaveData() -> Data {
+    var data = Data("RIFF".utf8)
+    appendLittleEndian(UInt32(40), to: &data)
+    data.append(contentsOf: Data("WAVE".utf8))
+    data.append(contentsOf: Data("fmt ".utf8))
+    appendLittleEndian(UInt32(16), to: &data)
+    appendLittleEndian(UInt16(1), to: &data)
+    appendLittleEndian(UInt16(1), to: &data)
+    appendLittleEndian(UInt32(16_000), to: &data)
+    appendLittleEndian(UInt32(32_000), to: &data)
+    appendLittleEndian(UInt16(2), to: &data)
+    appendLittleEndian(UInt16(16), to: &data)
+    data.append(contentsOf: Data("data".utf8))
+    appendLittleEndian(UInt32(4), to: &data)
+    data.append(contentsOf: [0, 0, 0, 0])
+    return data
+  }
+
+  private func appendLittleEndian(_ value: UInt16, to data: inout Data) {
+    data.append(UInt8(value & 0xFF))
+    data.append(UInt8((value >> 8) & 0xFF))
+  }
+
+  private func appendLittleEndian(_ value: UInt32, to data: inout Data) {
+    data.append(UInt8(value & 0xFF))
+    data.append(UInt8((value >> 8) & 0xFF))
+    data.append(UInt8((value >> 16) & 0xFF))
+    data.append(UInt8((value >> 24) & 0xFF))
   }
 }

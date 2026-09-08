@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 
@@ -126,6 +127,74 @@ final class LocalMeetingEvidenceReliabilityTests: XCTestCase {
     XCTAssertTrue(
       output.envelope.run.issues.contains { $0.contains("Speech coverage is unknown") }
     )
+  }
+
+  func testWaveEvidenceInspectorRejectsSymlinkAndHardlinkSourcesWithoutReadingTargets() throws {
+    let externalURL = tempRoot.appendingPathComponent("external-audio.wav")
+    try writeWave(to: externalURL, duration: 1)
+    let originalData = try Data(contentsOf: externalURL)
+
+    for usesSymbolicLink in [true, false] {
+      let kind = usesSymbolicLink ? "symlink" : "hardlink"
+      let linkedURL = tempRoot.appendingPathComponent("linked-audio-\(kind).wav")
+      try createUnsafeLink(
+        at: linkedURL,
+        to: externalURL,
+        symbolic: usesSymbolicLink
+      )
+
+      let inspection = LocalSessionWaveEvidenceInspector.inspect(
+        url: linkedURL,
+        fileManager: fileManager
+      )
+
+      XCTAssertEqual(inspection.integrity, .invalid)
+      XCTAssertNil(inspection.duration)
+      XCTAssertNil(inspection.sha256)
+      XCTAssertTrue(inspection.issues.contains { $0.contains("unsafe linked audio") })
+      XCTAssertEqual(try Data(contentsOf: externalURL), originalData)
+      XCTAssertTrue(unsafeLinkEntryExists(at: linkedURL))
+      try fileManager.removeItem(at: linkedURL)
+    }
+  }
+
+  func testLinkedImportedAudioCannotMintTranscriptEvidenceFromExternalBytes() async throws {
+    for usesSymbolicLink in [true, false] {
+      let kind = usesSymbolicLink ? "symlink" : "hardlink"
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRoot.appendingPathComponent("linked-import-\(kind)", isDirectory: true)
+      )
+      let session = makeSession(id: UUID())
+      try layout.ensureDirectories(fileManager: fileManager, for: session.id)
+      let externalURL = tempRoot.appendingPathComponent("external-import-\(kind).wav")
+      try writeWave(to: externalURL, duration: 1)
+      let externalData = try Data(contentsOf: externalURL)
+      let importedURL = layout.importedAudioURL(for: session.id)
+      try createUnsafeLink(
+        at: importedURL,
+        to: externalURL,
+        symbolic: usesSymbolicLink
+      )
+      let transcription = ReliabilityTranscriptionStub(
+        results: ["imported.wav": result(text: "external words", start: 0, end: 1)]
+      )
+      let output = try await LocalSessionEvidenceTranscriptionCoordinator(
+        transcriptionService: transcription,
+        diarizer: ReliabilityDiarizerStub(speechEnd: 1),
+        fileLayout: layout,
+        fileManager: fileManager,
+        now: fixedNow
+      ).transcribe(makeImportedInput(session: session, importedURL: importedURL))
+
+      XCTAssertEqual(output.envelope.run.disposition, .failed)
+      XCTAssertEqual(output.envelope.sources.map(\.integrity), [.invalid])
+      XCTAssertNil(output.envelope.sources.first?.sha256)
+      XCTAssertTrue(output.envelope.segments.isEmpty)
+      let transcriptionCallCount = await transcription.callCount()
+      XCTAssertEqual(transcriptionCallCount, 0)
+      XCTAssertEqual(try Data(contentsOf: externalURL), externalData)
+      XCTAssertTrue(unsafeLinkEntryExists(at: importedURL))
+    }
   }
 
   func testImportedPrimaryCanBeCompleteWithoutFabricatedCaptureSources() async throws {
@@ -389,6 +458,115 @@ final class LocalMeetingEvidenceReliabilityTests: XCTestCase {
     }
   }
 
+  func testRecoveryRejectsSymlinkAndHardlinkRunEntriesWithoutFollowingTargets() async throws {
+    for usesSymbolicLink in [true, false] {
+      let kind = usesSymbolicLink ? "symlink" : "hardlink"
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRoot.appendingPathComponent("unsafe-run-\(kind)", isDirectory: true)
+      )
+      let session = makeSession(id: UUID())
+      try layout.ensureDirectories(fileManager: fileManager, for: session.id)
+      let importedURL = layout.importedAudioURL(for: session.id)
+      try writeWave(to: importedURL, duration: 1)
+      let transcription = ReliabilityTranscriptionStub(
+        results: ["imported.wav": result(text: "imported", start: 0, end: 1)]
+      )
+      let coordinator = LocalSessionEvidenceTranscriptionCoordinator(
+        transcriptionService: transcription,
+        diarizer: ReliabilityDiarizerStub(speechEnd: 1),
+        fileLayout: layout,
+        fileManager: fileManager,
+        now: fixedNow
+      )
+      let input = makeImportedInput(session: session, importedURL: importedURL)
+      let output = try await coordinator.transcribe(input)
+      let runURL = layout.transcriptionRunsDirectory(for: session.id)
+        .appendingPathComponent(output.summary.runFileName)
+      let outboxURL = layout.meetingEvidenceOutboxDirectory
+        .appendingPathComponent(output.summary.outboxFileName)
+      let externalURL = tempRoot.appendingPathComponent("external-run-\(kind).json")
+      let originalData = try Data(contentsOf: runURL)
+      try originalData.write(to: externalURL)
+      try fileManager.removeItem(at: runURL)
+      try fileManager.removeItem(at: outboxURL)
+      try createUnsafeLink(
+        at: runURL,
+        to: externalURL,
+        symbolic: usesSymbolicLink
+      )
+
+      for _ in 0..<2 {
+        do {
+          _ = try await coordinator.transcribe(input)
+          XCTFail("Recovery followed an unsafe \(kind) run entry.")
+        } catch {
+          XCTAssertTrue(error.localizedDescription.contains("single-link file"))
+        }
+      }
+
+      XCTAssertEqual(try Data(contentsOf: externalURL), originalData)
+      XCTAssertTrue(unsafeLinkEntryExists(at: runURL))
+      XCTAssertTrue(
+        try fileManager.contentsOfDirectory(
+          at: layout.meetingEvidenceOutboxDirectory,
+          includingPropertiesForKeys: nil
+        ).isEmpty
+      )
+      let transcriptionCallCount = await transcription.callCount()
+      XCTAssertEqual(transcriptionCallCount, 1)
+    }
+  }
+
+  func testRecoveryRejectsSymlinkAndHardlinkOutboxEntriesWithoutFollowingTargets() async throws {
+    for usesSymbolicLink in [true, false] {
+      let kind = usesSymbolicLink ? "symlink" : "hardlink"
+      let layout = LocalMeetingFileLayout(
+        baseDirectory: tempRoot.appendingPathComponent("unsafe-outbox-\(kind)", isDirectory: true)
+      )
+      let session = makeSession(id: UUID())
+      try layout.ensureDirectories(fileManager: fileManager, for: session.id)
+      let importedURL = layout.importedAudioURL(for: session.id)
+      try writeWave(to: importedURL, duration: 1)
+      let transcription = ReliabilityTranscriptionStub(
+        results: ["imported.wav": result(text: "imported", start: 0, end: 1)]
+      )
+      let coordinator = LocalSessionEvidenceTranscriptionCoordinator(
+        transcriptionService: transcription,
+        diarizer: ReliabilityDiarizerStub(speechEnd: 1),
+        fileLayout: layout,
+        fileManager: fileManager,
+        now: fixedNow
+      )
+      let input = makeImportedInput(session: session, importedURL: importedURL)
+      let output = try await coordinator.transcribe(input)
+      let outboxURL = layout.meetingEvidenceOutboxDirectory
+        .appendingPathComponent(output.summary.outboxFileName)
+      let externalURL = tempRoot.appendingPathComponent("external-outbox-\(kind).json")
+      let originalData = try Data(contentsOf: outboxURL)
+      try originalData.write(to: externalURL)
+      try fileManager.removeItem(at: outboxURL)
+      try createUnsafeLink(
+        at: outboxURL,
+        to: externalURL,
+        symbolic: usesSymbolicLink
+      )
+
+      for _ in 0..<2 {
+        do {
+          _ = try await coordinator.transcribe(input)
+          XCTFail("Recovery followed an unsafe \(kind) outbox entry.")
+        } catch {
+          XCTAssertTrue(error.localizedDescription.contains("single-link file"))
+        }
+      }
+
+      XCTAssertEqual(try Data(contentsOf: externalURL), originalData)
+      XCTAssertTrue(unsafeLinkEntryExists(at: outboxURL))
+      let transcriptionCallCount = await transcription.callCount()
+      XCTAssertEqual(transcriptionCallCount, 1)
+    }
+  }
+
   func testPrimaryProgressCombinesBothSourcesAndNeverMovesBackward() async throws {
     let layout = LocalMeetingFileLayout(baseDirectory: tempRoot)
     let session = makeSession()
@@ -513,6 +691,8 @@ final class LocalMeetingEvidenceReliabilityTests: XCTestCase {
     object["contentHash"] = String(repeating: "0", count: 64)
     let corruptData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     try corruptData.write(to: runURL, options: .atomic)
+    var corruptStatus = stat()
+    XCTAssertEqual(lstat(runURL.path, &corruptStatus), 0)
 
     do {
       _ = try await coordinator.transcribe(makeInput(session: session, urls: urls))
@@ -527,7 +707,12 @@ final class LocalMeetingEvidenceReliabilityTests: XCTestCase {
       includingPropertiesForKeys: nil
     ).filter { $0.pathExtension == "artifact" }
     XCTAssertEqual(preservedFiles.count, 1)
-    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(preservedFiles.first)), corruptData)
+    let preservedURL = try XCTUnwrap(preservedFiles.first)
+    XCTAssertEqual(try Data(contentsOf: preservedURL), corruptData)
+    var preservedStatus = stat()
+    XCTAssertEqual(lstat(preservedURL.path, &preservedStatus), 0)
+    XCTAssertNotEqual(preservedStatus.st_ino, corruptStatus.st_ino)
+    XCTAssertEqual(preservedStatus.st_nlink, 1)
 
     let fresh = try await coordinator.transcribe(makeInput(session: session, urls: urls))
     let freshTranscriptionCallCount = await transcription.callCount()
@@ -634,6 +819,23 @@ final class LocalMeetingEvidenceReliabilityTests: XCTestCase {
       envelopeData: placeholderData
     )
     return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+  }
+
+  private func createUnsafeLink(
+    at linkURL: URL,
+    to targetURL: URL,
+    symbolic: Bool
+  ) throws {
+    if symbolic {
+      try fileManager.createSymbolicLink(at: linkURL, withDestinationURL: targetURL)
+    } else {
+      try fileManager.linkItem(at: targetURL, to: linkURL)
+    }
+  }
+
+  private func unsafeLinkEntryExists(at url: URL) -> Bool {
+    var status = stat()
+    return lstat(url.path, &status) == 0
   }
 
   private func writePrimaryWaves(

@@ -3,6 +3,7 @@ import SwiftUI
 
 struct CepessaSessionAttachmentPreviewView: View {
   let attachment: LocalMeetingAttachment
+  let sessionFolderURL: URL?
 
   @Environment(\.dismiss) private var dismiss
 
@@ -119,17 +120,10 @@ struct CepessaSessionAttachmentPreviewView: View {
 
   private var attachmentImage: NSImage? {
     guard attachment.kind == .image || attachment.kind == .capture else { return nil }
-
-    if let urlString = attachment.urlString {
-      if urlString.hasPrefix("/") {
-        return NSImage(contentsOfFile: urlString)
-      }
-
-      if let url = URL(string: urlString), url.isFileURL {
-        return NSImage(contentsOf: url)
-      }
-    }
-
-    return nil
+    guard let url = LocalSessionAttachmentResolver.localURL(
+      for: attachment,
+      in: sessionFolderURL
+    ) else { return nil }
+    return NSImage(contentsOf: url)
   }
 }

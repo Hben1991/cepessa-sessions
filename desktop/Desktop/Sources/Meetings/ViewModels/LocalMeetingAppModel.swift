@@ -659,7 +659,7 @@ final class LocalSessionAppModel: ObservableObject {
       selectedSessionID = mergedSession.id
       captureLifecycle.finishCapture(lease)
       if captureLease == lease { captureLease = nil }
-      if shouldTranscribe {
+      if shouldTranscribe, session.status != .failed {
         Task { [weak self] in await self?.transcribe(mergedSession) }
       }
     } else {
@@ -687,6 +687,17 @@ final class LocalSessionAppModel: ObservableObject {
   }
 
   private func bindRecorder() {
+    recorder.onRecordingWriteFailure = { [weak self] in
+      guard let self, let lease = self.captureLease,
+        self.captureLifecycle.beginStopping(lease)
+      else { return }
+      let precedingTask = self.captureTask
+      self.captureTask = Task { [weak self] in
+        await precedingTask?.value
+        await self?.stopRecording(lease: lease, shouldTranscribe: false)
+      }
+    }
+
     recorder.$isRecording
       .receive(on: DispatchQueue.main)
       .sink { [weak self] in self?.isRecording = $0 }

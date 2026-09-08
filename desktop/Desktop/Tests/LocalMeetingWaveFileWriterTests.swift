@@ -31,6 +31,32 @@ final class LocalMeetingWaveFileWriterTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: fixture.fileURL).count, 50)
   }
 
+  func testRIFFBoundaryRejectsOversizedChunkWithoutIntegerOverflow() throws {
+    let limit = LocalMeetingWaveFileWriter.maximumPCMByteCount
+    XCTAssertEqual(
+      try LocalMeetingWaveFileWriter.checkedDataSize(current: limit - 2, appendingByteCount: 2),
+      limit)
+    XCTAssertThrowsError(
+      try LocalMeetingWaveFileWriter.checkedDataSize(current: limit, appendingByteCount: 2))
+    XCTAssertThrowsError(
+      try LocalMeetingWaveFileWriter.checkedDataSize(current: 0, appendingByteCount: Int.max))
+  }
+
+  func testRejectedAppendLeavesCompletedAudioAndHeaderIntact() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let writer = try LocalMeetingWaveFileWriter(fileURL: fixture.fileURL, maximumDataSize: 6)
+    try writer.append(samples: [1, 2, 3])
+    let completedAudio = try Data(contentsOf: fixture.fileURL)
+
+    XCTAssertThrowsError(try writer.append(samples: [4])) { error in
+      XCTAssertEqual(error as? LocalMeetingWaveFileWriter.WriterError, .sizeLimitReached)
+    }
+    try writer.close()
+    XCTAssertEqual(try Data(contentsOf: fixture.fileURL), completedAudio)
+    XCTAssertEqual(try waveSizes(at: fixture.fileURL), WaveSizes(riff: 42, data: 6))
+  }
+
   private func waveSizes(at url: URL) throws -> WaveSizes {
     let data = try Data(contentsOf: url)
     XCTAssertGreaterThanOrEqual(data.count, 44)

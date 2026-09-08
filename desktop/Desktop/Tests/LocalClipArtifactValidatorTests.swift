@@ -79,13 +79,16 @@ final class LocalClipArtifactValidatorTests: XCTestCase {
     let store = LocalClipStore(fileLayout: layout)
     var clip = fixture.manifest(status: .processing)
     try store.save(clip)
+    let savedManifest = try Data(contentsOf: layout.manifestURL(for: clip.id))
     let transcriptURL = layout.transcriptURL(for: clip.id)
     try FileManager.default.removeItem(at: transcriptURL)
     try FileManager.default.createDirectory(at: transcriptURL, withIntermediateDirectories: false)
 
     clip.status = .ready
     XCTAssertThrowsError(try store.save(clip))
-    XCTAssertEqual(store.loadClips().first?.status, .processing)
+    XCTAssertEqual(try Data(contentsOf: layout.manifestURL(for: clip.id)), savedManifest)
+    XCTAssertTrue(store.loadClips().isEmpty)
+    XCTAssertEqual(store.loadWarnings.count, 1)
 
     let emptyLayout = LocalClipFileLayout(
       baseDirectory: fixture.directoryURL.appendingPathComponent("ui", isDirectory: true)
@@ -114,7 +117,7 @@ private final class ClipArtifactFixture {
   let videoURL: URL
 
   init() throws {
-    directoryURL = FileManager.default.temporaryDirectory
+    directoryURL = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
       .appendingPathComponent(UUID().uuidString, isDirectory: true)
     audioURL = directoryURL.appendingPathComponent("clip.wav")
     videoURL = directoryURL.appendingPathComponent("audio-only.mov")

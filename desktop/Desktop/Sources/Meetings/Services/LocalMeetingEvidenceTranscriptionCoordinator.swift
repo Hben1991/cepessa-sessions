@@ -600,6 +600,11 @@ private actor LocalSessionEvidenceProgressAggregator {
 }
 
 actor LocalSessionEvidenceTranscriptionCoordinator {
+  private struct ImmutableArtifactSnapshot {
+    let data: Data
+    let status: stat
+  }
+
   private struct SourceWork: Sendable {
     let evidence: LocalSessionEvidenceSourceV1
     let result: LocalSessionTranscriptionResult?
@@ -918,6 +923,21 @@ actor LocalSessionEvidenceTranscriptionCoordinator {
       )
     }
 
+    guard fileLayout.isSafeDirectSessionAudioFile(url, fileManager: fileManager) else {
+      return SourceWork(
+        evidence: .init(
+          id: sourceID,
+          kind: kind,
+          fileName: url.lastPathComponent,
+          role: kind == .mixed ? "fallback" : "primary",
+          integrity: .invalid,
+          durationSeconds: nil,
+          sha256: nil,
+          issues: ["\(kind.rawValue) source is unavailable or unsafe."]
+        )
+      )
+    }
+
     let inspection = LocalSessionWaveEvidenceInspector.inspect(url: url, fileManager: fileManager)
     guard inspection.integrity == .available else {
       return SourceWork(
@@ -1194,16 +1214,8 @@ actor LocalSessionEvidenceTranscriptionCoordinator {
     let runFileName = "\(runID).json"
     let runURL = fileLayout.transcriptionRunsDirectory(for: input.session.id)
       .appendingPathComponent(runFileName)
-    guard fileManager.fileExists(atPath: runURL.path) else { return nil }
-
-    let data: Data
-    do {
-      data = try Data(contentsOf: runURL)
-    } catch {
-      throw LocalSessionEvidenceCoordinatorError.invalidImmutableArtifact(
-        "\(runFileName) could not be read."
-      )
-    }
+    guard let runSnapshot = try readImmutableArtifactSnapshot(at: runURL) else { return nil }
+    let data = runSnapshot.data
 
     let envelope: MeetingEvidenceEnvelopeV1
     do {
@@ -1212,7 +1224,7 @@ actor LocalSessionEvidenceTranscriptionCoordinator {
       envelope = try decoder.decode(MeetingEvidenceEnvelopeV1.self, from: data)
     } catch {
       try preserveCorruptRunAndThrow(
-        data,
+        runSnapshot,
         at: runURL,
         reason: "is malformed"
       )
@@ -1223,14 +1235,14 @@ actor LocalSessionEvidenceTranscriptionCoordinator {
       canonicalContentHash = try MeetingEvidenceCanonicalizer.contentHash(envelopeData: data)
     } catch {
       try preserveCorruptRunAndThrow(
-        data,
+        runSnapshot,
         at: runURL,
         reason: "cannot be canonicalized"
       )
     }
     guard envelope.contentHash == canonicalContentHash else {
       try preserveCorruptRunAndThrow(
-        data,
+        runSnapshot,
         at: runURL,
         reason: "does not match its content hash"
       )
@@ -1238,7 +1250,7 @@ actor LocalSessionEvidenceTranscriptionCoordinator {
     try validateRecoveredEnvelope(envelope, for: input, expectedRunID: runID)
     if let semanticIssue = recoveredSemanticValidationIssue(envelope, for: input) {
       try preserveCorruptRunAndThrow(
-        data,
+        runSnapshot,
         at: runURL,
         reason: "has inconsistent transcript evidence: \(semanticIssue)"
       )
@@ -1251,8 +1263,8 @@ actor LocalSessionEvidenceTranscriptionCoordinator {
       at: fileLayout.meetingEvidenceOutboxDirectory,
       withIntermediateDirectories: true
     )
-    if fileManager.fileExists(atPath: outboxURL.path) {
-      guard let outboxData = try? Data(contentsOf: outboxURL), outboxData == data else {
+    if let outboxSnapshot = try readImmutableArtifactSnapshot(at: outboxURL) {
+      guard outboxSnapshot.data == data else {
         throw LocalSessionEvidenceCoordinatorError.invalidImmutableArtifact(
           "\(outboxFileName) differs from the recovered run artifact."
         )
@@ -1324,6 +1336,11 @@ actor LocalSessionEvidenceTranscriptionCoordinator {
           )
         }
         continue
+      }
+      guard fileLayout.isSafeDirectSessionAudioFile(url, fileManager: fileManager) else {
+        throw LocalSessionEvidenceCoordinatorError.invalidImmutableArtifact(
+          "The \(source.kind.rawValue) source is unavailable or unsafe."
+        )
       }
       let inspection = LocalSessionWaveEvidenceInspector.inspect(
         url: url,
@@ -1573,10 +1590,11 @@ actor LocalSessionEvidenceTranscriptionCoordinator {
   }
 
   private func preserveCorruptRunAndThrow(
-    _ data: Data,
+    _ snapshot: ImmutableArtifactSnapshot,
     at runURL: URL,
     reason: String
   ) throws -> Never {
+    let data = snapshot.data
     let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     let preservedFileName =
       "\(runURL.deletingPathExtension().lastPathComponent).invalid-\(digest.prefix(12)).artifact"
@@ -1584,18 +1602,119 @@ actor LocalSessionEvidenceTranscriptionCoordinator {
       preservedFileName,
       isDirectory: false
     )
-    if fileManager.fileExists(atPath: preservedURL.path) {
-      guard let preservedData = try? Data(contentsOf: preservedURL), preservedData == data else {
+    if let preservedSnapshot = try readImmutableArtifactSnapshot(at: preservedURL) {
+      guard preservedSnapshot.data == data else {
         throw LocalSessionEvidenceCoordinatorError.invalidImmutableArtifact(
           "\(runURL.lastPathComponent) \(reason), and its preservation path is occupied."
         )
       }
     } else {
-      try fileManager.linkItem(at: runURL, to: preservedURL)
+      try publishImmutableArtifact(data, to: preservedURL)
     }
-    try fileManager.removeItem(at: runURL)
+    try removeImmutableArtifact(at: runURL, matching: snapshot)
     throw LocalSessionEvidenceCoordinatorError.invalidImmutableArtifact(
       "\(runURL.lastPathComponent) \(reason). Its exact bytes were preserved as \(preservedFileName). Retry transcription to create a fresh run artifact."
+    )
+  }
+
+  private func readImmutableArtifactSnapshot(
+    at url: URL
+  ) throws -> ImmutableArtifactSnapshot? {
+    var pathStatus = stat()
+    guard lstat(url.path, &pathStatus) == 0 else {
+      let errorCode = errno
+      if errorCode == ENOENT { return nil }
+      throw unsafeImmutableArtifactError(url)
+    }
+    guard isSafeImmutableFile(pathStatus) else {
+      throw unsafeImmutableArtifactError(url)
+    }
+
+    let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else {
+      throw unsafeImmutableArtifactError(url)
+    }
+    defer { close(descriptor) }
+
+    var openedStatus = stat()
+    guard
+      fstat(descriptor, &openedStatus) == 0,
+      isSafeImmutableFile(openedStatus),
+      sameFile(pathStatus, openedStatus)
+    else {
+      throw unsafeImmutableArtifactError(url)
+    }
+
+    let data: Data
+    do {
+      let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+      data = try handle.readToEnd() ?? Data()
+    } catch {
+      throw LocalSessionEvidenceCoordinatorError.invalidImmutableArtifact(
+        "\(url.lastPathComponent) could not be read safely."
+      )
+    }
+
+    var finishedStatus = stat()
+    var finalPathStatus = stat()
+    guard
+      fstat(descriptor, &finishedStatus) == 0,
+      lstat(url.path, &finalPathStatus) == 0,
+      isSafeImmutableFile(finishedStatus),
+      isSafeImmutableFile(finalPathStatus),
+      sameFile(openedStatus, finishedStatus),
+      sameFile(finishedStatus, finalPathStatus),
+      stableFileMetadata(openedStatus, finishedStatus),
+      stableFileMetadata(finishedStatus, finalPathStatus),
+      finishedStatus.st_size == off_t(data.count)
+    else {
+      throw unsafeImmutableArtifactError(url)
+    }
+    return .init(
+      data: data,
+      status: finishedStatus
+    )
+  }
+
+  private func removeImmutableArtifact(
+    at url: URL,
+    matching snapshot: ImmutableArtifactSnapshot
+  ) throws {
+    var status = stat()
+    guard
+      lstat(url.path, &status) == 0,
+      isSafeImmutableFile(status),
+      sameFile(status, snapshot.status),
+      stableFileMetadata(status, snapshot.status),
+      unlink(url.path) == 0
+    else {
+      throw LocalSessionEvidenceCoordinatorError.invalidImmutableArtifact(
+        "\(url.lastPathComponent) changed after it was read. Its copied evidence was preserved, but the unsafe entry was left untouched."
+      )
+    }
+  }
+
+  private func isSafeImmutableFile(_ status: stat) -> Bool {
+    (status.st_mode & S_IFMT) == S_IFREG && status.st_nlink == 1 && status.st_size >= 0
+  }
+
+  private func sameFile(_ lhs: stat, _ rhs: stat) -> Bool {
+    lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino
+  }
+
+  private func stableFileMetadata(_ lhs: stat, _ rhs: stat) -> Bool {
+    lhs.st_size == rhs.st_size
+      && lhs.st_mtimespec.tv_sec == rhs.st_mtimespec.tv_sec
+      && lhs.st_mtimespec.tv_nsec == rhs.st_mtimespec.tv_nsec
+      && lhs.st_ctimespec.tv_sec == rhs.st_ctimespec.tv_sec
+      && lhs.st_ctimespec.tv_nsec == rhs.st_ctimespec.tv_nsec
+  }
+
+  private func unsafeImmutableArtifactError(
+    _ url: URL
+  ) -> LocalSessionEvidenceCoordinatorError {
+    .invalidImmutableArtifact(
+      "\(url.lastPathComponent) is not a stable, regular, single-link file. The unsafe entry was left untouched; remove it before retrying."
     )
   }
 
@@ -1619,12 +1738,6 @@ actor LocalSessionEvidenceTranscriptionCoordinator {
     let outboxFileName = makeOutboxFileName(for: envelope)
     let runURL = runDirectory.appendingPathComponent(runFileName)
     let outboxURL = outboxDirectory.appendingPathComponent(outboxFileName)
-    guard !fileManager.fileExists(atPath: runURL.path) else {
-      throw LocalSessionEvidenceCoordinatorError.immutableArtifactExists(runFileName)
-    }
-    guard !fileManager.fileExists(atPath: outboxURL.path) else {
-      throw LocalSessionEvidenceCoordinatorError.immutableArtifactExists(outboxFileName)
-    }
 
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -1696,14 +1809,68 @@ enum LocalSessionWaveEvidenceInspector {
     let issues: [String]
   }
 
-  static func inspect(url: URL, fileManager: FileManager) -> Result {
-    guard fileManager.fileExists(atPath: url.path) else {
+  static func inspect(url: URL, fileManager _: FileManager) -> Result {
+    var pathStatus = stat()
+    guard lstat(url.path, &pathStatus) == 0 else {
+      if errno != ENOENT {
+        return .init(
+          integrity: .invalid, duration: nil, sha256: nil,
+          issues: ["Audio file metadata could not be read safely."])
+      }
       return .init(
         integrity: .missing, duration: nil, sha256: nil, issues: ["Audio file is missing."])
     }
-    guard let data = try? Data(contentsOf: url) else {
+    guard isSafeFile(pathStatus) else {
       return .init(
-        integrity: .invalid, duration: nil, sha256: nil, issues: ["Audio file is unreadable."])
+        integrity: .invalid, duration: nil, sha256: nil,
+        issues: ["Audio file is an unsafe linked audio entry."])
+    }
+
+    let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else {
+      return .init(
+        integrity: .invalid, duration: nil, sha256: nil,
+        issues: ["Audio file could not be opened safely."])
+    }
+    defer { close(descriptor) }
+
+    var openedStatus = stat()
+    guard
+      fstat(descriptor, &openedStatus) == 0,
+      isSafeFile(openedStatus),
+      sameFile(pathStatus, openedStatus)
+    else {
+      return .init(
+        integrity: .invalid, duration: nil, sha256: nil,
+        issues: ["Audio file changed before it could be read safely."])
+    }
+
+    let data: Data
+    do {
+      let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+      data = try handle.readToEnd() ?? Data()
+    } catch {
+      return .init(
+        integrity: .invalid, duration: nil, sha256: nil,
+        issues: ["Audio file is unreadable."])
+    }
+
+    var finishedStatus = stat()
+    var finalPathStatus = stat()
+    guard
+      fstat(descriptor, &finishedStatus) == 0,
+      lstat(url.path, &finalPathStatus) == 0,
+      isSafeFile(finishedStatus),
+      isSafeFile(finalPathStatus),
+      sameFile(openedStatus, finishedStatus),
+      sameFile(finishedStatus, finalPathStatus),
+      stableMetadata(openedStatus, finishedStatus),
+      stableMetadata(finishedStatus, finalPathStatus),
+      finishedStatus.st_size == off_t(data.count)
+    else {
+      return .init(
+        integrity: .invalid, duration: nil, sha256: nil,
+        issues: ["Audio file changed while it was being read."])
     }
     let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     guard data.count >= 44, String(data: data[0..<4], encoding: .ascii) == "RIFF",
@@ -1753,6 +1920,22 @@ enum LocalSessionWaveEvidenceInspector {
       offset += 8 + length + (length % 2)
     }
     return nil
+  }
+
+  private static func isSafeFile(_ status: stat) -> Bool {
+    (status.st_mode & S_IFMT) == S_IFREG && status.st_nlink == 1 && status.st_size >= 0
+  }
+
+  private static func sameFile(_ lhs: stat, _ rhs: stat) -> Bool {
+    lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino
+  }
+
+  private static func stableMetadata(_ lhs: stat, _ rhs: stat) -> Bool {
+    lhs.st_size == rhs.st_size
+      && lhs.st_mtimespec.tv_sec == rhs.st_mtimespec.tv_sec
+      && lhs.st_mtimespec.tv_nsec == rhs.st_mtimespec.tv_nsec
+      && lhs.st_ctimespec.tv_sec == rhs.st_ctimespec.tv_sec
+      && lhs.st_ctimespec.tv_nsec == rhs.st_ctimespec.tv_nsec
   }
 
   private static func readUInt32(_ data: Data, offset: Int) -> UInt32 {

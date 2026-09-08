@@ -153,6 +153,7 @@ final class LocalClipViewModelReliabilityTests: XCTestCase {
       segments: []
     )
     try fixture.store.save(storedClip)
+    let savedManifest = try Data(contentsOf: fixture.clipLayout.manifestURL(for: storedClip.id))
     fixture.model.loadClips()
     fixture.model.selectClip(storedClip.id)
     let transcriptURL = fixture.clipLayout.transcriptURL(for: storedClip.id)
@@ -173,7 +174,10 @@ final class LocalClipViewModelReliabilityTests: XCTestCase {
       return XCTFail("Expected a context-save failure beside the Notes controls")
     }
     XCTAssertTrue(message.contains("Failed to save CLIP"))
-    XCTAssertEqual(fixture.store.loadClips().first?.title, "Persisted title")
+    XCTAssertEqual(
+      try Data(contentsOf: fixture.clipLayout.manifestURL(for: storedClip.id)), savedManifest)
+    XCTAssertTrue(fixture.store.loadClips().isEmpty)
+    XCTAssertEqual(fixture.store.loadWarnings.count, 1)
   }
 
   func testStoredReadyClipMissingVideoStartsCheckingThenBecomesFailed() async throws {
@@ -281,7 +285,7 @@ private final class ViewModelFixture {
   ) throws {
     let resolvedAudioRecorder = audioRecorder ?? FakeClipAudioRecorder()
     let resolvedScreenRecorder = screenRecorder ?? FakeClipScreenRecorder()
-    directoryURL = FileManager.default.temporaryDirectory
+    directoryURL = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
       .appendingPathComponent(UUID().uuidString, isDirectory: true)
     let clipRoot = directoryURL.appendingPathComponent("Clips", isDirectory: true)
     let sessionRoot = directoryURL.appendingPathComponent("Sessions", isDirectory: true)

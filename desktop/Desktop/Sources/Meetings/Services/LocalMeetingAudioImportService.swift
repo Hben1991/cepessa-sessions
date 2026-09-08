@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 
 protocol LocalSessionAudioImporting: Sendable {
   func importAudio(from sourceURL: URL, to destinationWavURL: URL) async throws
@@ -18,6 +19,11 @@ enum LocalSessionAudioImportError: LocalizedError {
 }
 
 struct LocalSessionAudioImportService: LocalSessionAudioImporting {
+  private static let logger = Logger(
+    subsystem: "com.cepessa.sessions",
+    category: "AudioImport"
+  )
+
   func importAudio(from sourceURL: URL, to destinationWavURL: URL) async throws {
     try await Task.detached(priority: .userInitiated) {
       try convertToCanonicalWav(sourceURL: sourceURL, destinationWavURL: destinationWavURL)
@@ -25,8 +31,24 @@ struct LocalSessionAudioImportService: LocalSessionAudioImporting {
   }
 
   private func convertToCanonicalWav(sourceURL: URL, destinationWavURL: URL) throws {
-    let inputFile = try AVAudioFile(forReading: sourceURL)
+    let inputFile: AVAudioFile
+    do {
+      inputFile = try AVAudioFile(forReading: sourceURL)
+    } catch {
+      logUnderlying(error, stage: "open", sourceURL: sourceURL)
+      throw LocalSessionAudioImportError.unsupportedSource(
+        "Sessions could not open this audio file. It may be damaged or use an unsupported format. Import another WAV, MP3, or M4A file."
+      )
+    }
     let inputFormat = inputFile.processingFormat
+    guard inputFormat.sampleRate.isFinite, inputFormat.sampleRate > 0 else {
+      Self.logger.error(
+        "Audio import rejected an invalid sample rate for \(sourceURL.lastPathComponent, privacy: .public)."
+      )
+      throw LocalSessionAudioImportError.unsupportedSource(
+        "Sessions could not open this audio file. It may be damaged or use an unsupported format. Import another WAV, MP3, or M4A file."
+      )
+    }
     guard
       let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -40,8 +62,11 @@ struct LocalSessionAudioImportService: LocalSessionAudioImporting {
     }
 
     guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+      Self.logger.error(
+        "Audio import could not create a converter for \(sourceURL.lastPathComponent, privacy: .public)."
+      )
       throw LocalSessionAudioImportError.unsupportedSource(
-        "Sessions could not convert this recording format."
+        "Sessions could not open this audio file. It may be damaged or use an unsupported format. Import another WAV, MP3, or M4A file."
       )
     }
 
@@ -52,7 +77,15 @@ struct LocalSessionAudioImportService: LocalSessionAudioImporting {
         Int(Double(sourceFrameCapacity) * (targetFormat.sampleRate / inputFormat.sampleRate))
           .advanced(by: 64))
     )
-    let writer = try LocalMeetingWaveFileWriter(fileURL: destinationWavURL)
+    let writer: LocalMeetingWaveFileWriter
+    do {
+      writer = try LocalMeetingWaveFileWriter(fileURL: destinationWavURL)
+    } catch {
+      logUnderlying(error, stage: "prepare destination", sourceURL: sourceURL)
+      throw LocalSessionAudioImportError.conversionFailed(
+        "Sessions could not prepare the imported WAV file. Try importing the audio again."
+      )
+    }
     defer { try? writer.close() }
 
     let inputProvider = LocalSessionAudioImportInputProvider(inputFile: inputFile)
@@ -76,16 +109,36 @@ struct LocalSessionAudioImportService: LocalSessionAudioImporting {
       }
 
       if let readError = inputProvider.failure {
+        logUnderlying(readError, stage: "read", sourceURL: sourceURL)
         throw LocalSessionAudioImportError.conversionFailed(
-          "Sessions could not read this recording: \(readError.localizedDescription)"
+          "Sessions could not finish reading this audio file. It may be damaged. Import another WAV, MP3, or M4A file."
         )
       }
       if let conversionError {
-        throw LocalSessionAudioImportError.conversionFailed(conversionError.localizedDescription)
+        logUnderlying(conversionError, stage: "convert", sourceURL: sourceURL)
+        throw LocalSessionAudioImportError.conversionFailed(
+          "Sessions could not finish converting this audio file. Import another WAV, MP3, or M4A file."
+        )
+      }
+      if status == .error {
+        Self.logger.error(
+          "Audio import conversion failed without an AVFoundation diagnostic for \(sourceURL.lastPathComponent, privacy: .public)."
+        )
+        throw LocalSessionAudioImportError.conversionFailed(
+          "Sessions could not finish converting this audio file. Import another WAV, MP3, or M4A file."
+        )
       }
 
       if outputBuffer.frameLength > 0 {
-        try writer.append(samples: pcm16Samples(from: outputBuffer))
+        let samples = try pcm16Samples(from: outputBuffer)
+        do {
+          try writer.append(samples: samples)
+        } catch {
+          logUnderlying(error, stage: "write destination", sourceURL: sourceURL)
+          throw LocalSessionAudioImportError.conversionFailed(
+            "Sessions could not finish writing the imported WAV file. Try importing the audio again."
+          )
+        }
       }
 
       if status == .endOfStream {
@@ -94,14 +147,33 @@ struct LocalSessionAudioImportService: LocalSessionAudioImporting {
     }
   }
 
-  private func pcm16Samples(from buffer: AVAudioPCMBuffer) -> [Int16] {
-    guard let floatChannelData = buffer.floatChannelData else { return [] }
-    let samples = UnsafeBufferPointer(start: floatChannelData[0], count: Int(buffer.frameLength))
-    return samples.map { sample in
-      let scaled = Int((sample * 32_767.0).rounded())
-      let clamped = max(Int(Int16.min), min(Int(Int16.max), scaled))
-      return Int16(clamped)
+  func pcm16Samples(from buffer: AVAudioPCMBuffer) throws -> [Int16] {
+    guard let floatChannelData = buffer.floatChannelData else {
+      throw LocalSessionAudioImportError.conversionFailed(
+        "Sessions could not read the converted audio samples. Import another WAV, MP3, or M4A file."
+      )
     }
+    let samples = UnsafeBufferPointer(start: floatChannelData[0], count: Int(buffer.frameLength))
+    var result: [Int16] = []
+    result.reserveCapacity(samples.count)
+    for sample in samples {
+      guard sample.isFinite else {
+        Self.logger.error("Audio import conversion produced a nonfinite sample.")
+        throw LocalSessionAudioImportError.conversionFailed(
+          "Sessions found invalid sample data while converting this audio file. Import another WAV, MP3, or M4A file."
+        )
+      }
+      let clamped = max(-1.0, min(1.0, sample))
+      result.append(Int16((clamped * 32_767.0).rounded()))
+    }
+    return result
+  }
+
+  private func logUnderlying(_ error: Error, stage: String, sourceURL: URL) {
+    let diagnostic = String(reflecting: error)
+    Self.logger.error(
+      "Audio import failed during \(stage, privacy: .public) for \(sourceURL.lastPathComponent, privacy: .public): \(diagnostic, privacy: .public)"
+    )
   }
 }
 

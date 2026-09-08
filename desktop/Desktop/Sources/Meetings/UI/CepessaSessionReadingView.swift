@@ -253,12 +253,9 @@ struct CepessaSessionReadingView: View {
       }
       return "Preparing the transcript on this Mac."
     case .needsAttention:
-      if let error = session.processingError?.trimmingCharacters(in: .whitespacesAndNewlines),
-        !error.isEmpty
-      {
-        return error
-      }
-      return "Processing stopped before a transcript was written. Try Transcribe from the toolbar."
+      return model.audioPlaybackURL(for: session) != nil
+        ? "Use Transcribe in the toolbar to try the saved recording again."
+        : "Use Import Audio to choose another recording."
     case .ready:
       return "The audio is saved. Run Transcribe from the toolbar to read it."
     }
@@ -362,7 +359,9 @@ struct CepessaSessionReadingView: View {
 
     var seen = Set<UUID>()
     return attachments.compactMap { attachment in
-      guard !seen.contains(attachment.id), let image = attachmentImage(for: attachment) else {
+      guard !seen.contains(attachment.id),
+        let image = attachmentImage(for: attachment, in: session)
+      else {
         return nil
       }
       seen.insert(attachment.id)
@@ -370,16 +369,16 @@ struct CepessaSessionReadingView: View {
     }
   }
 
-  private func attachmentImage(for attachment: LocalSessionAttachment) -> NSImage? {
+  private func attachmentImage(
+    for attachment: LocalSessionAttachment,
+    in session: LocalSession
+  ) -> NSImage? {
     guard attachment.kind == .image || attachment.kind == .capture else { return nil }
-    guard let urlString = attachment.urlString else { return nil }
-    if urlString.hasPrefix("/") {
-      return NSImage(contentsOfFile: urlString)
-    }
-    if let url = URL(string: urlString), url.isFileURL {
-      return NSImage(contentsOf: url)
-    }
-    return nil
+    guard let url = LocalSessionAttachmentResolver.localURL(
+      for: attachment,
+      in: model.sessionFolderURL(for: session.id)
+    ) else { return nil }
+    return NSImage(contentsOf: url)
   }
 
   private func timestampLabel(for segment: LocalSessionTranscriptSegment, in session: LocalSession)

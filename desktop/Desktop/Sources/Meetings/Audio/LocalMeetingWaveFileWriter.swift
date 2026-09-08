@@ -1,11 +1,24 @@
 import Foundation
 
 final class LocalMeetingWaveFileWriter {
+  // RIFF includes 36 bytes beyond PCM; keep the final 16-bit sample whole.
+  static let maximumPCMByteCount = (UInt32.max - 36) & ~UInt32(1)
+
+  enum WriterError: LocalizedError, Equatable {
+    case sizeLimitReached
+
+    var errorDescription: String? {
+      "Recording stopped because the WAV size limit was reached. The saved audio is still available. Start another session to continue."
+    }
+  }
+
   private let fileHandle: FileHandle
+  private let maximumDataSize: UInt32
   private var dataSize: UInt32 = 0
   private var closed = false
 
-  init(fileURL: URL) throws {
+  init(fileURL: URL, maximumDataSize: UInt32 = maximumPCMByteCount) throws {
+    self.maximumDataSize = min(maximumDataSize, Self.maximumPCMByteCount)
     try Data(repeating: 0, count: 44).write(to: fileURL, options: .atomic)
     self.fileHandle = try FileHandle(forWritingTo: fileURL)
     try updateHeader()
@@ -18,9 +31,21 @@ final class LocalMeetingWaveFileWriter {
   func append(pcm16Data: Data) throws {
     guard !closed else { return }
     guard !pcm16Data.isEmpty else { return }
+    let nextSize = try Self.checkedDataSize(
+      current: dataSize, appendingByteCount: pcm16Data.count, maximum: maximumDataSize)
     try fileHandle.write(contentsOf: pcm16Data)
-    dataSize += UInt32(pcm16Data.count)
+    dataSize = nextSize
     try updateHeader()
+  }
+
+  static func checkedDataSize(
+    current: UInt32, appendingByteCount: Int, maximum: UInt32 = maximumPCMByteCount
+  ) throws -> UInt32 {
+    let limit = min(maximum, maximumPCMByteCount)
+    guard appendingByteCount >= 0, current <= limit,
+      UInt64(appendingByteCount) <= UInt64(limit - current)
+    else { throw WriterError.sizeLimitReached }
+    return current + UInt32(appendingByteCount)
   }
 
   func close() throws {
