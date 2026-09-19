@@ -109,37 +109,60 @@ See `.claude/settings.json` for connection details.
 
 ### Building & Running
 - **No Xcode project** — this is a Swift Package Manager project
-- **Build command**: `xcrun swift build -c debug --package-path Desktop` (the `xcrun` prefix is required to match the SDK version)
-- **Full dev run**: `./run.sh` — builds Swift app, starts Rust backend, starts Cloudflare tunnel, launches app
+- **Build command**: `./run.sh` — uses the pinned dependency graph, deterministic scratch path, and packages `build/Sessions Dev.app` without launching
+- **Dev launch**: `./run.sh --launch` — launches the local app with an isolated data root and no backend endpoint by default
 - **Release builds**: Handled entirely by Codemagic CI (no local release script needed)
 - **DO NOT** use bare `swift build` — it will fail with SDK version mismatch
 - **DO NOT** use `xcodebuild` — there is no `.xcodeproj`
-- **DO NOT** launch the app directly from `build/` — always use `./run.sh` or `./reset-and-run.sh`. These scripts install to `/Applications/Omi Dev.app` and launch from there, which is required for macOS "Quit & Reopen" (after granting permissions) to find the correct binary. Launching from `build/` causes stale binaries to run after permission restarts.
+- **Optional dev install**: `./run.sh --install --launch` targets only `/Applications/Sessions Dev.app`
 - **DO NOT** manually copy binaries into app bundles and launch them — this bypasses signing, `/Applications/` installation, and LaunchServices registration
 
 - **DO NOT** kill, delete, or interfere with running "Omi", "omi", or "Omi Beta" app bundles — these are production/release installs the user relies on
 
 ### App Names & Build Artifacts
-- `./run.sh` builds **"Omi Dev"** → installs to `/Applications/Omi Dev.app` (bundle ID: `com.omi.desktop-dev`)
+- `./run.sh` builds **"Sessions Dev"** at `build/Sessions Dev.app` (bundle ID: `me.cepessa.sessions-dev`)
 - **"Omi Beta"** (bundle ID: `com.omi.computer-macos`) is built by Codemagic CI only
-- To check which app is currently running: `ps aux | grep "Omi"`
+- The default data root is `build/dev-data`; use `--test-root` for an explicit isolated fixture root
 
 ### Testing with Named Bundles
-When the user asks to test a feature or bug fix, **always create a separate named bundle** so it can run side-by-side with the existing dev/prod apps:
+When the user asks to test a feature or bug fix, use the isolated Sessions Dev bundle and an explicit fixture root:
 ```bash
-OMI_APP_NAME="fix-rewind-delay" ./run.sh
+./run.sh --launch --test-root /absolute/path/to/fixtures
 ```
-This creates `/Applications/fix-rewind-delay.app` with bundle ID `com.omi.fix-rewind-delay`, completely independent of "Omi Dev" and "Omi Beta". Name it after the feature/bug being tested (e.g., `OMI_APP_NAME="onboarding-capture" ./run.sh`). The user can then run multiple test builds simultaneously without interfering with each other or the production app.
+This keeps development data separate from the production Sessions store and does not install or stop the production app.
 
 **Rules:**
-- NEVER use the default `./run.sh` (which overwrites "Omi Dev") when testing a specific feature — always set `OMI_APP_NAME`
-- Keep the name short and descriptive (it becomes both the app name and bundle ID suffix)
-- The named bundle gets its own permissions, database, and auth state — the user may need to re-grant permissions and sign in
-- To connect agent-swift: `agent-swift connect --bundle-id com.omi.fix-rewind-delay`
+- Never point `--test-root` at the production Application Support directory
+- Pass `--env-file` only when the test explicitly requires a local endpoint configuration
+- To connect agent-swift: `agent-swift connect --bundle-id me.cepessa.sessions-dev`
+
+### Local Sessions reliability architecture
+
+- `LocalCaptureLifecycle` owns a single lease shared by Sessions and CLIPS.
+  Generation tokens protect a newer capture from late asynchronous cleanup.
+- `CepessaMicrophoneCaptureHelper` is packaged under `Contents/Helpers`.
+  `MicrophoneCaptureProcess` accepts capture only after the helper handshake and
+  valid PCM, then uses a bounded drain and forced termination fallback on stop.
+- `LocalSessionStore` serializes each session with a checked file lock, merges
+  non-overlapping top-level edits from a loaded baseline, rejects overlapping
+  edits as conflicts, and publishes metadata atomically. Recovery warnings do
+  not imply that original files were deleted or repaired successfully.
+- Imports are normalized to `imported.wav` and retain evidence kind `imported`.
+  Mixed audio is a degraded fallback and is never sufficient for complete
+  evidence. Ready status depends on verified transcript coverage and timing.
+- Transcription attempts publish canonical, content-hashed immutable run and
+  outbox records atomically. Recovery may reconstruct a missing outbox from its
+  exact run; mismatched or corrupt evidence must not be silently overwritten.
+- UI status follows the evidence disposition. Partial attempts show a warning,
+  playback resolves the saved local source, search includes transcript and
+  captured context, and attachments stay anchored to session timeline entries.
+
+These are local source contracts. A green local build or test run is not proof
+of an installed, signed, or production app.
 
 ### After Implementing Changes
 - `xcrun swift build` is for **compile checks only** — it does NOT start the backend
-- To actually test, ALWAYS use `./run.sh` with `OMI_APP_NAME` — it starts Rust backend + Cloudflare tunnel + Swift app together
+- To test locally, use `./run.sh --launch`; backend services and external endpoints require separate, explicit setup
 - **When the user says "test it"**, use the `test-local` skill to build, run, and verify via macOS automation
 
 ### Verifying UI Changes (agent-swift)
@@ -151,7 +174,7 @@ After editing Swift UI code, verify the change programmatically using [agent-swi
 ```bash
 # After ./run.sh launches the app:
 agent-swift doctor                                   # verify Accessibility permission
-agent-swift connect --bundle-id com.omi.desktop-dev  # connect to running app
+agent-swift connect --bundle-id me.cepessa.sessions-dev  # connect to running app
 agent-swift snapshot -i                              # see interactive elements
 agent-swift click @e3                                # CGEvent click (SwiftUI)
 agent-swift press @e3                                # AXPress (AppKit buttons)
@@ -169,7 +192,7 @@ agent-swift screenshot /tmp/evidence.png             # capture app window
 - Argument order: `get <property> <ref>`, `is <condition> <ref>`, `wait <condition> [<target>]`, `find <locator> <value>`.
 - 15 commands: `doctor`, `connect`, `disconnect`, `status`, `snapshot`, `press`, `click`, `fill`, `get`, `find`, `screenshot`, `is`, `wait`, `scroll`, `schema`.
 - No app-side instrumentation needed — works via macOS Accessibility API on any Cocoa/SwiftUI app.
-- Dev bundle ID: `com.omi.desktop-dev`. Prod: `com.omi.computer-macos` (never automate prod).
+- Dev bundle ID: `me.cepessa.sessions-dev`. Never automate a production bundle.
 
 ### Changelog Entries
 

@@ -8,10 +8,11 @@ enum LocalSessionEvidenceDisposition: String, Codable, Equatable, Sendable {
   case failed
 }
 
-enum LocalSessionAudioSourceKind: String, Codable, CaseIterable, Equatable, Sendable {
+enum LocalSessionAudioSourceKind: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
   case microphone
   case system
   case mixed
+  case imported
 }
 
 enum LocalSessionSourceIntegrity: String, Codable, Equatable, Sendable {
@@ -55,6 +56,35 @@ struct LocalSessionTranscriptionEvidenceSummary: Codable, Equatable, Sendable {
   let runFileName: String
   let outboxFileName: String
   let issues: [String]
+  let isComplete: Bool?
+  let speechCoverage: Double?
+  let hasVerifiableTimestamps: Bool?
+
+  init(
+    runID: String,
+    revision: Int,
+    disposition: LocalSessionEvidenceDisposition,
+    contentHash: String,
+    parentContentHash: String?,
+    runFileName: String,
+    outboxFileName: String,
+    issues: [String],
+    isComplete: Bool? = nil,
+    speechCoverage: Double? = nil,
+    hasVerifiableTimestamps: Bool? = nil
+  ) {
+    self.runID = runID
+    self.revision = revision
+    self.disposition = disposition
+    self.contentHash = contentHash
+    self.parentContentHash = parentContentHash
+    self.runFileName = runFileName
+    self.outboxFileName = outboxFileName
+    self.issues = issues
+    self.isComplete = isComplete
+    self.speechCoverage = speechCoverage
+    self.hasVerifiableTimestamps = hasVerifiableTimestamps
+  }
 }
 
 struct LocalSessionEvidenceModelV1: Codable, Equatable, Sendable {

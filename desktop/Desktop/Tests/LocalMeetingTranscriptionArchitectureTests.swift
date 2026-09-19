@@ -150,7 +150,7 @@ private struct PassthroughLocalAudioImportService: LocalSessionAudioImporting {
       withIntermediateDirectories: true
     )
     var data = Data()
-    let sampleData = Data(repeating: 0, count: 3_200)
+    let sampleData = Data(repeating: 0, count: 64_000)
     data.append("RIFF".data(using: .ascii)!)
     appendUInt32(UInt32(36 + sampleData.count), to: &data)
     data.append("WAVEfmt ".data(using: .ascii)!)

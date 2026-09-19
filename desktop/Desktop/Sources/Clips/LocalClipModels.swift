@@ -1,4 +1,113 @@
+import Darwin
 import Foundation
+
+enum LocalClipStorageError: LocalizedError, Equatable {
+  case unsafeDirectory(URL)
+  case unsafeArtifact(URL)
+  case invalidManifest(URL)
+
+  var errorDescription: String? {
+    switch self {
+    case .unsafeDirectory:
+      return "The CLIP folder is unavailable or unsafe."
+    case .unsafeArtifact:
+      return "A saved CLIP file is unavailable or unsafe."
+    case .invalidManifest:
+      return "This CLIP's saved metadata is invalid."
+    }
+  }
+}
+
+enum LocalClipFileSafety {
+  static func validateDirectoryChain(to url: URL, allowMissingTail: Bool) throws {
+    guard let standardizedURL = LocalStoragePath.checkedFileURL(url) else {
+      throw LocalClipStorageError.unsafeDirectory(url)
+    }
+
+    var currentURL = URL(fileURLWithPath: "/", isDirectory: true)
+    for component in standardizedURL.pathComponents.dropFirst() {
+      currentURL.appendPathComponent(component, isDirectory: true)
+      var status = stat()
+      guard lstat(currentURL.path, &status) == 0 else {
+        guard allowMissingTail, errno == ENOENT else {
+          throw LocalClipStorageError.unsafeDirectory(currentURL)
+        }
+        return
+      }
+      guard (status.st_mode & S_IFMT) == S_IFDIR else {
+        throw LocalClipStorageError.unsafeDirectory(currentURL)
+      }
+    }
+  }
+
+  static func validateRegularFile(at url: URL, allowMissing: Bool) throws {
+    try validateDirectoryChain(to: url.deletingLastPathComponent(), allowMissingTail: false)
+    var pathStatus = stat()
+    guard lstat(url.path, &pathStatus) == 0 else {
+      guard allowMissing, errno == ENOENT else {
+        throw LocalClipStorageError.unsafeArtifact(url)
+      }
+      return
+    }
+    guard (pathStatus.st_mode & S_IFMT) == S_IFREG, pathStatus.st_nlink == 1 else {
+      throw LocalClipStorageError.unsafeArtifact(url)
+    }
+
+    let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else {
+      throw LocalClipStorageError.unsafeArtifact(url)
+    }
+    defer { close(descriptor) }
+
+    var openedStatus = stat()
+    guard fstat(descriptor, &openedStatus) == 0,
+      (openedStatus.st_mode & S_IFMT) == S_IFREG,
+      openedStatus.st_nlink == 1,
+      openedStatus.st_dev == pathStatus.st_dev,
+      openedStatus.st_ino == pathStatus.st_ino
+    else {
+      throw LocalClipStorageError.unsafeArtifact(url)
+    }
+  }
+
+  static func isSafeExistingRegularFile(at url: URL) -> Bool {
+    do {
+      try validateRegularFile(at: url, allowMissing: false)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  static func readRegularFile(at url: URL) throws -> Data {
+    try validateDirectoryChain(to: url.deletingLastPathComponent(), allowMissingTail: false)
+    var pathStatus = stat()
+    guard lstat(url.path, &pathStatus) == 0,
+      (pathStatus.st_mode & S_IFMT) == S_IFREG,
+      pathStatus.st_nlink == 1
+    else {
+      throw LocalClipStorageError.unsafeArtifact(url)
+    }
+
+    let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else {
+      throw LocalClipStorageError.unsafeArtifact(url)
+    }
+    defer { close(descriptor) }
+
+    var openedStatus = stat()
+    guard fstat(descriptor, &openedStatus) == 0,
+      (openedStatus.st_mode & S_IFMT) == S_IFREG,
+      openedStatus.st_nlink == 1,
+      openedStatus.st_dev == pathStatus.st_dev,
+      openedStatus.st_ino == pathStatus.st_ino
+    else {
+      throw LocalClipStorageError.unsafeArtifact(url)
+    }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    return try handle.readToEnd() ?? Data()
+  }
+}
 
 enum LocalClipStatus: String, Codable, Equatable, Sendable {
   case recording
@@ -75,10 +184,62 @@ struct LocalClipFileLayout {
   }
 
   func ensureDirectories(fileManager: FileManager = .default, for clipID: UUID? = nil) throws {
-    try fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
-    if let clipID {
-      try fileManager.createDirectory(
-        at: clipDirectory(for: clipID), withIntermediateDirectories: true)
+    try ensureSafeDirectory(baseDirectory, fileManager: fileManager, createIntermediates: true)
+    guard let clipID else { return }
+
+    try ensureSafeDirectory(
+      clipDirectory(for: clipID),
+      fileManager: fileManager,
+      createIntermediates: false
+    )
+    for artifactURL in [
+      manifestURL(for: clipID),
+      videoURL(for: clipID),
+      audioURL(for: clipID),
+      transcriptURL(for: clipID),
+      notesURL(for: clipID),
+    ] {
+      try LocalClipFileSafety.validateRegularFile(at: artifactURL, allowMissing: true)
     }
   }
+
+  func validateStoredArtifacts(for clipID: UUID) throws {
+    for artifactURL in [
+      manifestURL(for: clipID),
+      videoURL(for: clipID),
+      audioURL(for: clipID),
+      transcriptURL(for: clipID),
+      notesURL(for: clipID),
+    ] {
+      try LocalClipFileSafety.validateRegularFile(at: artifactURL, allowMissing: true)
+    }
+  }
+
+  func safeExistingVideoURL(for clipID: UUID) -> URL? {
+    let url = videoURL(for: clipID)
+    return LocalClipFileSafety.isSafeExistingRegularFile(at: url) ? url : nil
+  }
+
+  func safeExistingAudioURL(for clipID: UUID) -> URL? {
+    let url = audioURL(for: clipID)
+    return LocalClipFileSafety.isSafeExistingRegularFile(at: url) ? url : nil
+  }
+
+  private func ensureSafeDirectory(
+    _ url: URL,
+    fileManager: FileManager,
+    createIntermediates: Bool
+  ) throws {
+    try LocalClipFileSafety.validateDirectoryChain(to: url, allowMissingTail: true)
+    var status = stat()
+    if lstat(url.path, &status) != 0 {
+      guard errno == ENOENT else { throw LocalClipStorageError.unsafeDirectory(url) }
+      try fileManager.createDirectory(
+        at: url,
+        withIntermediateDirectories: createIntermediates
+      )
+    }
+    try LocalClipFileSafety.validateDirectoryChain(to: url, allowMissingTail: false)
+  }
+
 }

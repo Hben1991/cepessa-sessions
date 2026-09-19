@@ -3,6 +3,11 @@ import Combine
 import Foundation
 import SwiftUI
 
+enum LocalClipContextSaveFeedback: Equatable {
+  case success(String)
+  case failure(String)
+}
+
 @MainActor
 final class LocalClipViewModel: ObservableObject {
   @Published private(set) var clips: [LocalClipManifest] = []
@@ -11,20 +16,37 @@ final class LocalClipViewModel: ObservableObject {
   @Published private(set) var isRecording = false
   @Published private(set) var statusMessage: String?
   @Published private(set) var clipboardMessage: String?
+  @Published private(set) var selectedClipContextSaveFeedback: LocalClipContextSaveFeedback?
   @Published private(set) var recordingDurationText = "00:00"
-  @Published var titleDraft = ""
-  @Published var intentDraft = ""
-  @Published var postNotesDraft = ""
+  @Published private(set) var isCaptureTransitioning = false
+  @Published var newClipTitleDraft = ""
+  @Published var newClipIntentDraft = ""
+  @Published var selectedClipTitleDraft = "" {
+    didSet { clearSelectedClipContextSaveFeedback() }
+  }
+  @Published var selectedClipIntentDraft = "" {
+    didSet { clearSelectedClipContextSaveFeedback() }
+  }
+  @Published var selectedClipPostNotesDraft = "" {
+    didSet { clearSelectedClipContextSaveFeedback() }
+  }
 
   private let store: LocalClipStore
   private let clipFileLayout: LocalClipFileLayout
   private let sessionFileLayout: LocalSessionFileLayout
-  private let audioRecorder: LocalMeetingRecorder
+  private let audioRecorder: any LocalClipAudioRecording
   private let transcriptionService: any LocalSessionTranscribing
   private let fileManager: FileManager
-  private var screenRecordingProcess: Process?
+  let captureLifecycle: LocalCaptureLifecycle
+  private let screenRecorder: any LocalClipScreenRecording
   private var timer: Timer?
   private var audioSession: LocalSession?
+  private var captureLease: LocalCaptureLifecycle.Lease?
+  private var captureTask: Task<Void, Never>?
+  private var automaticTitles: [LocalClipManifest.ID: String] = [:]
+  @Published private var validatedReadyClipIDs: Set<LocalClipManifest.ID> = []
+  @Published private var validatingClipIDs: Set<LocalClipManifest.ID> = []
+  private var processingClipIDs: Set<LocalClipManifest.ID> = []
   private var cancellables: Set<AnyCancellable> = []
 
   init(
@@ -33,14 +55,19 @@ final class LocalClipViewModel: ObservableObject {
     sessionFileLayout: LocalSessionFileLayout = LocalSessionFileLayout(
       baseDirectory: LocalSessionStorageRoot.defaultBaseDirectory),
     transcriptionService: any LocalSessionTranscribing = LocalMeetingTranscriptionService(),
-    fileManager: FileManager = .default
+    fileManager: FileManager = .default,
+    captureLifecycle: LocalCaptureLifecycle? = nil,
+    audioRecorder: (any LocalClipAudioRecording)? = nil,
+    screenRecorder: (any LocalClipScreenRecording)? = nil
   ) {
     self.clipFileLayout = clipFileLayout
     self.store = store ?? LocalClipStore(fileLayout: clipFileLayout, fileManager: fileManager)
     self.sessionFileLayout = sessionFileLayout
-    self.audioRecorder = LocalMeetingRecorder(fileLayout: sessionFileLayout)
+    self.audioRecorder = audioRecorder ?? LocalMeetingRecorder(fileLayout: sessionFileLayout)
     self.transcriptionService = transcriptionService
     self.fileManager = fileManager
+    self.captureLifecycle = captureLifecycle ?? LocalCaptureLifecycle()
+    self.screenRecorder = screenRecorder ?? LocalClipScreenCaptureProcess()
     loadClips()
   }
 
@@ -54,8 +81,33 @@ final class LocalClipViewModel: ObservableObject {
     return clips.first { $0.id == activeClipID }
   }
 
+  var isProcessing: Bool {
+    !processingClipIDs.isEmpty || clips.contains { $0.status == .processing }
+  }
+
+  func isValidating(_ clipID: LocalClipManifest.ID) -> Bool {
+    validatingClipIDs.contains(clipID)
+  }
+
+  func isReadyForDisplay(_ clipID: LocalClipManifest.ID) -> Bool {
+    clip(for: clipID)?.status == .ready && validatedReadyClipIDs.contains(clipID)
+  }
+
+  func videoPlaybackURL(for clipID: LocalClipManifest.ID? = nil) -> URL? {
+    guard let clipID = clipID ?? selectedClipID else { return nil }
+    return clipFileLayout.safeExistingVideoURL(for: clipID)
+  }
+
+  func audioPlaybackURL(for clipID: LocalClipManifest.ID? = nil) -> URL? {
+    guard let clipID = clipID ?? selectedClipID else { return nil }
+    return clipFileLayout.safeExistingAudioURL(for: clipID)
+  }
+
   func loadClips() {
-    clips = store.loadClips().map { storedClip in
+    validatedReadyClipIDs = []
+    validatingClipIDs = []
+    let storedClips = store.loadClips()
+    clips = storedClips.map { storedClip in
       guard storedClip.status == .recording || storedClip.status == .processing else {
         return storedClip
       }
@@ -71,32 +123,172 @@ final class LocalClipViewModel: ObservableObject {
     if selectedClipID == nil {
       selectedClipID = clips.first?.id
     }
-    syncDrafts()
+    syncSelectedClipDrafts()
+    validateStoredReadyClips()
+    if let warning = store.loadWarnings.last {
+      statusMessage = warning
+    }
+  }
+
+  private func validateStoredReadyClips() {
+    let readyClips = clips.filter { $0.status == .ready }
+    guard !readyClips.isEmpty else { return }
+    validatingClipIDs = Set(readyClips.map(\.id))
+
+    Task { [weak self, readyClips] in
+      guard let self else { return }
+      for clip in readyClips {
+        await self.validateStoredReadyClip(clip)
+      }
+    }
+  }
+
+  private func validateStoredReadyClip(_ clip: LocalClipManifest) async {
+    defer { validatingClipIDs.remove(clip.id) }
+    guard self.clip(for: clip.id)?.status == .ready else { return }
+    let audioURL = clipFileLayout.audioURL(for: clip.id)
+    if let audioFailure = LocalClipAudioValidator.failureReason(
+      for: audioURL,
+      fileManager: fileManager
+    ) {
+      failClip(clip.id, message: audioFailure)
+      return
+    }
+    guard
+      let audioDuration = LocalClipAudioValidator.duration(
+        for: audioURL,
+        fileManager: fileManager
+      ),
+      LocalClipTranscriptValidator.hasUsableSegments(
+        clip.transcriptSegments,
+        audioDuration: audioDuration
+      )
+    else {
+      failClip(
+        clip.id,
+        message:
+          "CLIP video and audio were saved, but no usable speech was transcribed. Check the microphone and record again."
+      )
+      return
+    }
+    let videoURL = clipFileLayout.videoURL(for: clip.id)
+    guard fileManager.fileExists(atPath: videoURL.path) else {
+      failClip(
+        clip.id,
+        message:
+          "This CLIP's saved video file is missing. Record a new CLIP or restore the original file."
+      )
+      return
+    }
+    if let videoFailure = await LocalClipVideoValidator.failureReason(
+      for: videoURL,
+      fileManager: fileManager
+    ) {
+      failClip(clip.id, message: videoFailure)
+      return
+    }
+    guard self.clip(for: clip.id)?.status == .ready else { return }
+    validatedReadyClipIDs.insert(clip.id)
   }
 
   func selectClip(_ clipID: LocalClipManifest.ID) {
     guard clips.contains(where: { $0.id == clipID }) else { return }
+    if selectedClipID != clipID {
+      clipboardMessage = nil
+      selectedClipContextSaveFeedback = nil
+    }
     selectedClipID = clipID
-    syncDrafts()
+    syncSelectedClipDrafts()
   }
 
   func startClip() {
-    guard !isRecording else { return }
-    Task { await startClipRecording() }
+    guard captureLease == nil else { return }
+    do {
+      let lease = try captureLifecycle.beginCapture(.clip)
+      captureLease = lease
+      isCaptureTransitioning = true
+      statusMessage = "Starting CLIP capture."
+      let titleDraft = newClipTitleDraft
+      let intentDraft = newClipIntentDraft
+      captureTask = Task { [weak self] in
+        await self?.startClipRecording(
+          lease: lease,
+          titleDraft: titleDraft,
+          intentDraft: intentDraft
+        )
+      }
+    } catch {
+      statusMessage = error.localizedDescription
+    }
   }
 
   func stopClip() {
-    guard isRecording else { return }
-    Task { await stopClipRecording() }
+    guard let lease = captureLease, captureLifecycle.beginStopping(lease) else { return }
+    isCaptureTransitioning = true
+    statusMessage = "Stopping CLIP capture."
+    let precedingTask = captureTask
+    captureTask = Task { [weak self] in
+      await precedingTask?.value
+      guard let self, self.captureLease == lease else { return }
+      await self.stopClipRecording(lease: lease)
+    }
   }
 
   func saveSelectedNotes() {
     guard let selectedClipID else { return }
-    mutateClip(id: selectedClipID) { clip in
-      clip.title = normalizedTitle(titleDraft, fallback: clip.title)
-      clip.intent = intentDraft.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-      clip.postNotes = postNotesDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    let didSave = mutateClip(id: selectedClipID) { clip in
+      clip.title = normalizedTitle(selectedClipTitleDraft, fallback: clip.title)
+      clip.intent =
+        selectedClipIntentDraft.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+      clip.postNotes = selectedClipPostNotesDraft.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+    if didSave {
+      clipboardMessage = nil
+      selectedClipContextSaveFeedback = .success("Context saved.")
+    } else {
+      selectedClipContextSaveFeedback = .failure(
+        statusMessage ?? "Could not save this CLIP's context."
+      )
+    }
+  }
+
+  func canRetryTranscription(for clipID: LocalClipManifest.ID) -> Bool {
+    guard let clip = clip(for: clipID), clip.status == .failed else { return false }
+    return clipFileLayout.safeExistingVideoURL(for: clipID) != nil
+      && clipFileLayout.safeExistingAudioURL(for: clipID) != nil
+      && !processingClipIDs.contains(clipID)
+  }
+
+  func retryTranscription(for clipID: LocalClipManifest.ID? = nil) {
+    guard let clipID = clipID ?? selectedClipID, canRetryTranscription(for: clipID) else { return }
+    processingClipIDs.insert(clipID)
+    guard
+      mutateClip(
+        id: clipID,
+        { clip in
+          clip.status = .processing
+          clip.errorMessage = nil
+        })
+    else { return }
+    statusMessage = "Retrying CLIP transcript."
+    Task { [weak self] in
+      await self?.validateAndTranscribeClip(clipID: clipID)
+    }
+  }
+
+  func canCopyAgentPrompt(for clipID: LocalClipManifest.ID) -> Bool {
+    guard let clip = clip(for: clipID) else { return false }
+    return isReadyForDisplay(clipID)
+      && clipFileLayout.safeExistingVideoURL(for: clipID) != nil
+      && LocalClipAudioValidator.duration(
+        for: clipFileLayout.audioURL(for: clipID),
+        fileManager: fileManager
+      ).map {
+        LocalClipTranscriptValidator.hasUsableSegments(
+          clip.transcriptSegments,
+          audioDuration: $0
+        )
+      } == true
   }
 
   func clipDirectoryURL(for clipID: LocalClipManifest.ID? = nil) -> URL? {
@@ -107,16 +299,26 @@ final class LocalClipViewModel: ObservableObject {
 
   func copyAgentPrompt(for clipID: LocalClipManifest.ID? = nil) {
     guard let clip = clip(for: clipID ?? selectedClipID) else { return }
+    guard canCopyAgentPrompt(for: clip.id) else {
+      clipboardMessage =
+        "This CLIP needs a playable video, usable audio, and a transcript before it can be shared."
+      return
+    }
     let prompt = agentPrompt(for: clip)
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(prompt, forType: .string)
     clipboardMessage = "Agent prompt copied."
   }
 
-  private func startClipRecording() async {
+  private func startClipRecording(
+    lease: LocalCaptureLifecycle.Lease,
+    titleDraft: String,
+    intentDraft: String
+  ) async {
     let clipID = UUID()
     let title = normalizedTitle(titleDraft, fallback: Self.defaultClipTitle())
     let intent = intentDraft.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    let usesAutomaticTitle = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     var clip = LocalClipManifest(
       id: clipID,
       title: title,
@@ -136,85 +338,147 @@ final class LocalClipViewModel: ObservableObject {
     do {
       try clipFileLayout.ensureDirectories(fileManager: fileManager, for: clip.id)
       audioSession = try await audioRecorder.startRecording(title: "CLIP audio - \(title)")
-      try startScreenRecording(to: clipFileLayout.videoURL(for: clip.id))
+      guard captureLease == lease else { throw CancellationError() }
+      try screenRecorder.startRecording(
+        to: clipFileLayout.videoURL(for: clip.id),
+        onUnexpectedExit: { [weak self] message in
+          self?.screenCaptureExitedUnexpectedly(
+            message,
+            clipID: clipID,
+            lease: lease
+          )
+        }
+      )
       upsertClip(clip)
       activeClipID = clip.id
-      selectedClipID = clip.id
+      selectClip(clip.id)
+      if usesAutomaticTitle {
+        automaticTitles[clip.id] = title
+      }
+      newClipTitleDraft = ""
+      newClipIntentDraft = ""
+      guard captureLifecycle.markRecording(lease) else {
+        return
+      }
       isRecording = true
+      isCaptureTransitioning = false
       statusMessage = "Recording CLIP. Speak while the screen is captured."
       startTimer(startedAt: clip.startedAt)
     } catch {
       stopTimer()
-      stopScreenRecording()
+      _ = await screenRecorder.stopRecording()
+      var stoppedAudioSession: LocalSession?
       if audioSession != nil {
-        _ = await audioRecorder.stopRecording()
+        stoppedAudioSession = await audioRecorder.stopRecording()
+      }
+      if let stoppedAudioSession {
+        _ = copyAudioIfAvailable(from: stoppedAudioSession, to: clipID)
       }
       clip.status = .failed
+      clip.endedAt = Date()
       clip.errorMessage = error.localizedDescription
       upsertClip(clip)
       statusMessage = error.localizedDescription
       activeClipID = nil
       isRecording = false
+      isCaptureTransitioning = false
       audioSession = nil
+      finishCaptureLease(lease)
     }
   }
 
-  private func stopClipRecording() async {
-    guard let clipID = activeClipID else { return }
+  private func stopClipRecording(
+    lease: LocalCaptureLifecycle.Lease,
+    captureFailure: String? = nil,
+    shouldTranscribe: Bool = true
+  ) async {
+    guard let clipID = activeClipID else {
+      finishCaptureLease(lease)
+      return
+    }
     stopTimer()
-    stopScreenRecording()
+    let screenStopResult = await screenRecorder.stopRecording()
     let stoppedAudioSession = await audioRecorder.stopRecording()
     let endedAt = Date()
     isRecording = false
+    isCaptureTransitioning = false
     activeClipID = nil
-    statusMessage = "Processing CLIP transcript."
+    audioSession = nil
 
     mutateClip(id: clipID) { clip in
       clip.status = .processing
       clip.endedAt = endedAt
     }
 
+    var artifactFailure = captureFailure ?? screenStopResult.failureMessage
     if let stoppedAudioSession {
-      copyAudioIfAvailable(from: stoppedAudioSession, to: clipID)
-      await transcribeClipAudio(clipID: clipID)
+      artifactFailure =
+        artifactFailure ?? copyAudioIfAvailable(from: stoppedAudioSession, to: clipID)
     } else {
-      mutateClip(id: clipID) { clip in
-        clip.status = .failed
-        clip.errorMessage = "CLIP video was saved, but no audio transcript was available."
-      }
+      artifactFailure =
+        artifactFailure ?? "CLIP video was saved, but no audio recording was finalized."
     }
 
-    audioSession = nil
-    if clip(for: clipID)?.status == .ready {
-      statusMessage = "CLIP ready. Copy the agent prompt or connect through MCP."
-    } else {
-      statusMessage = clip(for: clipID)?.errorMessage ?? "CLIP capture needs attention."
+    finishCaptureLease(lease)
+
+    if let artifactFailure {
+      failClip(clipID, message: artifactFailure)
+      return
+    }
+
+    guard shouldTranscribe else {
+      failClip(
+        clipID,
+        message:
+          "CLIP capture was finalized before Sessions quit. Retry transcription after reopening the app."
+      )
+      return
+    }
+
+    statusMessage = "Processing CLIP transcript."
+    processingClipIDs.insert(clipID)
+    Task { [weak self] in
+      await self?.validateAndTranscribeClip(clipID: clipID)
     }
   }
 
-  private func startScreenRecording(to videoURL: URL) throws {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-    process.arguments = ["-v", "-k", "-x", videoURL.path]
-    try process.run()
-    screenRecordingProcess = process
-  }
-
-  private func stopScreenRecording() {
-    guard let process = screenRecordingProcess else { return }
-    if process.isRunning {
-      process.terminate()
-      process.waitUntilExit()
+  private func screenCaptureExitedUnexpectedly(
+    _ message: String,
+    clipID: LocalClipManifest.ID,
+    lease: LocalCaptureLifecycle.Lease
+  ) {
+    guard activeClipID == clipID, captureLease == lease else { return }
+    guard captureLifecycle.beginStopping(lease) else { return }
+    isCaptureTransitioning = true
+    statusMessage = message
+    let precedingTask = captureTask
+    captureTask = Task { [weak self] in
+      await precedingTask?.value
+      guard let self, self.captureLease == lease else { return }
+      await self.stopClipRecording(
+        lease: lease,
+        captureFailure: message,
+        shouldTranscribe: false
+      )
     }
-    screenRecordingProcess = nil
   }
 
-  private func copyAudioIfAvailable(from session: LocalSession, to clipID: UUID) {
+  /// Finalize active capture artifacts before normal application termination.
+  func finishCaptureForTermination() async {
+    guard let lease = captureLease else { return }
+    _ = captureLifecycle.beginStopping(lease)
+    isCaptureTransitioning = true
+    await captureTask?.value
+    guard captureLease == lease else { return }
+    await stopClipRecording(lease: lease, shouldTranscribe: false)
+  }
+
+  private func copyAudioIfAvailable(from session: LocalSession, to clipID: UUID) -> String? {
     guard
       let sourceURL = sessionFileLayout.existingAudioURL(
         for: session.id, artifacts: session.audioArtifacts, fileManager: fileManager)
     else {
-      return
+      return "CLIP video was saved, but no recorded audio artifact was available."
     }
     let destinationURL = clipFileLayout.audioURL(for: clipID)
     do {
@@ -222,20 +486,56 @@ final class LocalClipViewModel: ObservableObject {
         try fileManager.removeItem(at: destinationURL)
       }
       try fileManager.copyItem(at: sourceURL, to: destinationURL)
+      return LocalClipAudioValidator.failureReason(for: destinationURL, fileManager: fileManager)
     } catch {
-      mutateClip(id: clipID) { clip in
-        clip.errorMessage = "Could not copy CLIP audio. \(error.localizedDescription)"
-      }
+      return "Could not copy CLIP audio. \(error.localizedDescription)"
     }
   }
 
-  private func transcribeClipAudio(clipID: UUID) async {
+  private func finishCaptureLease(_ lease: LocalCaptureLifecycle.Lease) {
+    _ = captureLifecycle.finishCapture(lease)
+    if captureLease == lease {
+      captureLease = nil
+      captureTask = nil
+    }
+  }
+
+  private func failClip(_ clipID: LocalClipManifest.ID, message: String) {
+    validatedReadyClipIDs.remove(clipID)
+    processingClipIDs.remove(clipID)
+    mutateClip(id: clipID) { clip in
+      clip.status = .failed
+      clip.errorMessage = message
+    }
+    statusMessage = message
+  }
+
+  private func validateAndTranscribeClip(clipID: UUID) async {
+    defer { processingClipIDs.remove(clipID) }
+    let videoURL = clipFileLayout.videoURL(for: clipID)
+    if let videoFailure = await LocalClipVideoValidator.failureReason(
+      for: videoURL,
+      fileManager: fileManager
+    ) {
+      failClip(clipID, message: videoFailure)
+      return
+    }
+
     let audioURL = clipFileLayout.audioURL(for: clipID)
-    guard fileManager.fileExists(atPath: audioURL.path) else {
-      mutateClip(id: clipID) { clip in
-        clip.status = .failed
-        clip.errorMessage = "CLIP video was saved, but audio was not available for transcription."
-      }
+    if let audioFailure = LocalClipAudioValidator.failureReason(
+      for: audioURL,
+      fileManager: fileManager
+    ) {
+      failClip(clipID, message: audioFailure)
+      return
+    }
+    guard
+      let audioDuration = LocalClipAudioValidator.duration(
+        for: audioURL,
+        fileManager: fileManager
+      )
+    else {
+      failClip(clipID, message: "CLIP audio duration could not be validated.")
       return
     }
 
@@ -253,24 +553,39 @@ final class LocalClipViewModel: ObservableObject {
         translateToEnglish: false,
         onProgress: nil
       )
-      mutateClip(id: clipID) { clip in
+      let transcriptSegments = LocalClipTranscriptValidator.usableSegments(
+        from: result.segments,
+        audioDuration: audioDuration
+      )
+      guard !transcriptSegments.isEmpty else {
+        failClip(
+          clipID,
+          message:
+            "CLIP video and audio were saved, but no usable speech was transcribed. Check the microphone and record again."
+        )
+        return
+      }
+      let automaticTitle = automaticTitles[clipID]
+      let didPersist = mutateClip(id: clipID) { clip in
         clip.status = .ready
-        clip.transcriptSegments = result.segments.map {
-          LocalClipTranscriptSegment(
-            id: UUID(),
-            startOffset: $0.startTime,
-            endOffset: $0.endTime,
-            text: $0.text
-          )
+        clip.transcriptSegments = transcriptSegments
+        if let automaticTitle, clip.title == automaticTitle {
+          clip.title = inferredClipTitle(for: clip)
         }
-        clip.title = inferredClipTitle(for: clip)
         clip.errorMessage = result.warnings.isEmpty ? nil : result.warnings.joined(separator: "\n")
       }
-    } catch {
-      mutateClip(id: clipID) { clip in
-        clip.status = .failed
-        clip.errorMessage = "CLIP saved, but transcription failed. \(error.localizedDescription)"
+      guard didPersist else { return }
+      automaticTitles.removeValue(forKey: clipID)
+      validatedReadyClipIDs.insert(clipID)
+      if selectedClipID == clipID {
+        statusMessage = "CLIP ready. Copy the agent prompt or connect through MCP."
       }
+    } catch {
+      failClip(
+        clipID,
+        message:
+          "CLIP video and audio were saved, but transcription failed. \(error.localizedDescription)"
+      )
     }
   }
 
@@ -288,11 +603,12 @@ final class LocalClipViewModel: ObservableObject {
     timer = nil
   }
 
-  private func mutateClip(id: UUID, _ mutation: (inout LocalClipManifest) -> Void) {
-    guard let index = clips.firstIndex(where: { $0.id == id }) else { return }
+  @discardableResult
+  private func mutateClip(id: UUID, _ mutation: (inout LocalClipManifest) -> Void) -> Bool {
+    guard let index = clips.firstIndex(where: { $0.id == id }) else { return false }
     var clip = clips[index]
     mutation(&clip)
-    upsertClip(clip)
+    return persistAndPublish(clip)
   }
 
   private func clip(for clipID: UUID?) -> LocalClipManifest? {
@@ -350,26 +666,53 @@ final class LocalClipViewModel: ObservableObject {
     return compact.isEmpty ? clip.title : compact
   }
 
+  @discardableResult
+  func persistAndPublish(_ clip: LocalClipManifest) -> Bool {
+    do {
+      try store.save(clip)
+      publish(clip)
+      return true
+    } catch {
+      let message = "Failed to save CLIP. \(error.localizedDescription)"
+      var visibleFailure = clip
+      visibleFailure.status = .failed
+      visibleFailure.errorMessage = message
+      validatedReadyClipIDs.remove(clip.id)
+      processingClipIDs.remove(clip.id)
+      publish(visibleFailure)
+      statusMessage = message
+      return false
+    }
+  }
+
   private func upsertClip(_ clip: LocalClipManifest) {
+    _ = persistAndPublish(clip)
+  }
+
+  private func publish(_ clip: LocalClipManifest) {
     if let index = clips.firstIndex(where: { $0.id == clip.id }) {
       clips[index] = clip
     } else {
       clips.append(clip)
     }
     clips.sort { $0.startedAt > $1.startedAt }
-    do {
-      try store.save(clip)
-    } catch {
-      statusMessage = "Failed to save CLIP. \(error.localizedDescription)"
-    }
-    syncDrafts()
   }
 
-  private func syncDrafts() {
-    guard let selectedClip else { return }
-    titleDraft = selectedClip.title
-    intentDraft = selectedClip.intent ?? ""
-    postNotesDraft = selectedClip.postNotes
+  private func syncSelectedClipDrafts() {
+    guard let selectedClip else {
+      selectedClipTitleDraft = ""
+      selectedClipIntentDraft = ""
+      selectedClipPostNotesDraft = ""
+      return
+    }
+    selectedClipTitleDraft = selectedClip.title
+    selectedClipIntentDraft = selectedClip.intent ?? ""
+    selectedClipPostNotesDraft = selectedClip.postNotes
+  }
+
+  private func clearSelectedClipContextSaveFeedback() {
+    guard selectedClipContextSaveFeedback != nil else { return }
+    selectedClipContextSaveFeedback = nil
   }
 
   private func normalizedTitle(_ title: String, fallback: String) -> String {

@@ -22,6 +22,8 @@ MAX_QUERY_CHARACTERS = 2_000
 MAX_QUERY_TERMS = 64
 MAX_RESULTS = 50
 MAX_CONTEXT_TOKENS = 16_000
+MIN_IMPORTED_SPEECH_COVERAGE = 0.9
+SOURCE_TIMESTAMP_TOLERANCE_SECONDS = 0.25
 SCHEMA_VERSION = 2
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 ARTIFACT_FILE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}\.json$")
@@ -578,6 +580,60 @@ class MeetingBrainIndex:
             seen.add(segment_id)
 
     @staticmethod
+    def _verified_source_layout(
+        envelope: dict[str, Any],
+        session_imported_file_name: Optional[str],
+    ) -> str:
+        raw_sources = envelope.get("sources")
+        if not isinstance(raw_sources, list) or not all(
+            isinstance(item, dict) for item in raw_sources
+        ):
+            raise EvidenceNotReady("Meeting evidence sources are incomplete.")
+
+        def is_available_primary(source: dict[str, Any]) -> bool:
+            source_hash = source.get("sha256")
+            return (
+                source.get("integrity") == "available"
+                and source.get("role") == "primary"
+                and isinstance(source_hash, str)
+                and re.fullmatch(r"[0-9a-f]{64}", source_hash) is not None
+            )
+
+        source_kinds = {source.get("kind") for source in raw_sources}
+        if len(raw_sources) == 2 and source_kinds == {"microphone", "system"}:
+            expected_file_names = {
+                "microphone": {"mic.wav", "mic-transcript.wav"},
+                "system": {"system.wav"},
+            }
+            if not all(
+                is_available_primary(source)
+                and source.get("fileName") in expected_file_names[source["kind"]]
+                and (duration := _optional_number(source.get("durationSeconds")))
+                is not None
+                and duration > 0
+                for source in raw_sources
+            ):
+                raise EvidenceNotReady(
+                    "Independent microphone and system evidence is not ready."
+                )
+            return "separated"
+
+        if len(raw_sources) == 1 and source_kinds == {"imported"}:
+            source = raw_sources[0]
+            duration = _optional_number(source.get("durationSeconds"))
+            if (
+                not is_available_primary(source)
+                or session_imported_file_name != "imported.wav"
+                or source.get("fileName") != session_imported_file_name
+                or duration is None
+                or duration <= 0
+            ):
+                raise EvidenceNotReady("Imported audio evidence is not ready.")
+            return "imported"
+
+        raise EvidenceNotReady("Meeting evidence source layout is not publishable.")
+
+    @staticmethod
     def _normalize_envelope_segments(
         session_id: str,
         revision: str,
@@ -633,24 +689,6 @@ class MeetingBrainIndex:
             for source in raw_sources
         ):
             raise MeetingBrainError("Meeting evidence source metadata is invalid.")
-        primary_sources = [
-            source
-            for source in raw_sources
-            if source.get("kind") in {"microphone", "system"}
-        ]
-        if {source.get("kind") for source in primary_sources} != {
-            "microphone",
-            "system",
-        } or any(
-            source.get("integrity") != "available"
-            or source.get("role") != "primary"
-            or not isinstance(source.get("sha256"), str)
-            or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
-            for source in primary_sources
-        ):
-            raise EvidenceNotReady(
-                "Independent microphone and system evidence is not ready."
-            )
         normalized: list[dict[str, Any]] = []
         for ordinal, segment in enumerate(raw_segments):
             segment_id = _clean_string(segment.get("id"), 200)
@@ -661,6 +699,11 @@ class MeetingBrainIndex:
             end = _optional_number(segment.get("endSeconds"))
             source = sources.get(source_id)
             confidence = segment.get("confidence")
+            source_duration = (
+                _optional_number(source.get("durationSeconds"))
+                if source is not None
+                else None
+            )
             if (
                 not segment_id
                 or _canonical_uuid(segment_id, "Meeting evidence segment identifier")
@@ -690,6 +733,10 @@ class MeetingBrainIndex:
                 or end is None
                 or start < 0
                 or end <= start
+                or (
+                    source_duration is not None
+                    and end > source_duration + SOURCE_TIMESTAMP_TOLERANCE_SECONDS
+                )
             ):
                 raise EvidenceNotReady("Meeting evidence contains an unusable segment.")
             normalized.append(
@@ -712,6 +759,7 @@ class MeetingBrainIndex:
     def _latest_global_envelope(
         self,
         session_id: str,
+        expected_outbox_file_name: Optional[str] = None,
     ) -> Optional[tuple[str, bytes, os.stat_result, dict[str, Any]]]:
         outbox_path = (
             self.sessions_root.resolve(strict=False).parent / "MeetingEvidenceOutbox"
@@ -728,28 +776,47 @@ class MeetingBrainIndex:
                     "The global meeting evidence outbox is too large."
                 )
             matching: list[tuple[str, bytes, os.stat_result, dict[str, Any]]] = []
+            expected_artifact_found = expected_outbox_file_name is None
             for name in names:
                 if not ARTIFACT_FILE_PATTERN.fullmatch(name):
                     continue
-                raw, source_stat = self._read_regular_file_at(
-                    outbox_fd,
-                    name,
-                    maximum_bytes=MAX_ENVELOPE_BYTES,
-                )
-                envelope = self._decode_json_object(raw, "Meeting evidence envelope")
-                envelope_session = envelope.get("session")
-                if not isinstance(envelope_session, dict):
-                    raise MeetingBrainError(
-                        "Meeting evidence session metadata is invalid."
+                try:
+                    raw, source_stat = self._read_regular_file_at(
+                        outbox_fd,
+                        name,
+                        maximum_bytes=MAX_ENVELOPE_BYTES,
                     )
-                candidate_id = _canonical_uuid(
-                    envelope_session.get("id"), "Meeting evidence session identifier"
-                )
+                    envelope = self._decode_json_object(
+                        raw, "Meeting evidence envelope"
+                    )
+                    envelope_session = envelope.get("session")
+                    if not isinstance(envelope_session, dict):
+                        raise MeetingBrainError(
+                            "Meeting evidence session metadata is invalid."
+                        )
+                    candidate_id = _canonical_uuid(
+                        envelope_session.get("id"),
+                        "Meeting evidence session identifier",
+                    )
+                except MeetingBrainError:
+                    if name == expected_outbox_file_name:
+                        raise
+                    continue
                 if candidate_id == session_id.lower():
                     matching.append((name, raw, source_stat, envelope))
+                    if name == expected_outbox_file_name:
+                        expected_artifact_found = True
+                elif name == expected_outbox_file_name:
+                    raise MeetingBrainError(
+                        "Meeting evidence outbox does not match its session."
+                    )
         finally:
             os.close(outbox_fd)
             os.close(base_fd)
+        if not expected_artifact_found:
+            raise MeetingBrainError(
+                "Transcription evidence is missing from the global outbox."
+            )
         if not matching:
             return None
         by_revision: dict[int, tuple[str, bytes, os.stat_result, dict[str, Any]]] = {}
@@ -777,6 +844,8 @@ class MeetingBrainIndex:
         session_id: str,
         session_raw: bytes,
         session_stat: os.stat_result,
+        session_title: Optional[str],
+        session_imported_file_name: Optional[str],
         session_fd: int,
         artifact: tuple[str, bytes, os.stat_result, dict[str, Any]],
     ) -> IndexedSession:
@@ -827,10 +896,25 @@ class MeetingBrainIndex:
                 or envelope.get("revision") != revision_number
                 or quality.get("isComplete") is not True
                 or quality.get("hasVerifiableTimestamps") is not True
-                or quality.get("sourceSeparationPreserved") is not True
                 or quality.get("diarization") != "available"
             ):
                 raise EvidenceNotReady("Meeting evidence envelope is not ready.")
+            source_layout = self._verified_source_layout(
+                envelope,
+                session_imported_file_name=session_imported_file_name,
+            )
+            expected_source_separation = source_layout == "separated"
+            speech_coverage = _optional_number(quality.get("speechCoverage"))
+            if quality.get(
+                "sourceSeparationPreserved"
+            ) is not expected_source_separation or (
+                source_layout == "imported"
+                and (
+                    speech_coverage is None
+                    or not MIN_IMPORTED_SPEECH_COVERAGE <= speech_coverage <= 1
+                )
+            ):
+                raise EvidenceNotReady("Meeting evidence quality is not publishable.")
             if (
                 envelope.get("evidenceId")
                 != f"meeting:{canonical_session_id}:run:{run_id}"
@@ -867,7 +951,9 @@ class MeetingBrainIndex:
         fingerprint = hashlib.sha256(session_raw + b"\0" + envelope_raw).hexdigest()
         return IndexedSession(
             session_id=session_id,
-            title=_clean_string(
+            title=session_title
+            if session_title is not None
+            else _clean_string(
                 envelope_session.get("title") or "Untitled session", 500
             ),
             started_at=_clean_string(envelope_session.get("startedAt"), 80),
@@ -932,22 +1018,74 @@ class MeetingBrainIndex:
     def _read_indexable_session(self, session_id: str) -> IndexedSession:
         root_fd, session_fd = self._open_session_directory(session_id)
         try:
-            artifact = self._latest_global_envelope(session_id)
+            session_raw: Optional[bytes]
+            session_stat: os.stat_result
+            session: Optional[dict[str, Any]]
+            try:
+                session_raw, session_stat = self._read_regular_file_at(
+                    session_fd, "session.json"
+                )
+            except PathSecurityError:
+                try:
+                    os.stat("session.json", dir_fd=session_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    session_raw = None
+                    session_stat = os.fstat(session_fd)
+                    session = None
+                else:
+                    raise
+            else:
+                session = self._decode_json_object(session_raw, "Session metadata")
+
+            expected_outbox_file_name = None
+            session_title = None
+            session_imported_file_name = None
+            if session is not None:
+                stored_id = _clean_string(session.get("id"), 128)
+                if stored_id and stored_id.casefold() != session_id.casefold():
+                    raise MeetingBrainError(
+                        "Session identity does not match its directory."
+                    )
+                raw_title = session.get("title")
+                if raw_title is not None and not isinstance(raw_title, str):
+                    raise MeetingBrainError("Session title is invalid.")
+                session_title = _clean_string(raw_title or "Untitled session", 500)
+                audio_artifacts = session.get("audioArtifacts")
+                if isinstance(audio_artifacts, dict):
+                    imported_file_name = audio_artifacts.get("importedFileName")
+                    if isinstance(imported_file_name, str):
+                        session_imported_file_name = imported_file_name
+                summary = session.get("transcriptionEvidence")
+                if isinstance(summary, dict):
+                    outbox_name = summary.get("outboxFileName")
+                    if not isinstance(
+                        outbox_name, str
+                    ) or not ARTIFACT_FILE_PATTERN.fullmatch(outbox_name):
+                        raise MeetingBrainError(
+                            "Transcription evidence outbox reference is invalid."
+                        )
+                    expected_outbox_file_name = outbox_name
+                elif "transcriptionEvidence" in session and summary is not None:
+                    raise MeetingBrainError(
+                        "Transcription evidence summary is invalid."
+                    )
+
+            artifact = self._latest_global_envelope(
+                session_id,
+                expected_outbox_file_name=expected_outbox_file_name,
+            )
             if artifact is not None:
                 return self._read_envelope_session(
                     session_id=session_id,
-                    session_raw=b"",
-                    session_stat=os.fstat(session_fd),
+                    session_raw=session_raw or b"",
+                    session_stat=session_stat,
+                    session_title=session_title,
+                    session_imported_file_name=session_imported_file_name,
                     session_fd=session_fd,
                     artifact=artifact,
                 )
-            raw, session_stat = self._read_regular_file_at(session_fd, "session.json")
-            session = self._decode_json_object(raw, "Session metadata")
-            stored_id = _clean_string(session.get("id"), 128)
-            if stored_id and stored_id.casefold() != session_id.casefold():
-                raise MeetingBrainError(
-                    "Session identity does not match its directory."
-                )
+            if session is None or session_raw is None:
+                raise MeetingBrainError("Session metadata is missing.")
             summary = session.get("transcriptionEvidence")
             if isinstance(summary, dict):
                 raise MeetingBrainError(
@@ -960,7 +1098,7 @@ class MeetingBrainIndex:
             os.close(root_fd)
         if _clean_string(session.get("status"), 40).lower() != "ready":
             raise EvidenceNotReady("The legacy session is not ready.")
-        content_hash = hashlib.sha256(raw).hexdigest()
+        content_hash = hashlib.sha256(session_raw).hexdigest()
         revision = f"legacy:{content_hash[:16]}"
         normalized_segments = tuple(
             normalized
@@ -995,7 +1133,7 @@ class MeetingBrainIndex:
             segments=normalized_segments,
             content_hash=content_hash,
             modified_at_ns=session_stat.st_mtime_ns,
-            byte_count=session_stat.st_size,
+            byte_count=len(session_raw),
         )
 
     def _candidate_session_ids(self) -> tuple[list[str], int]:

@@ -130,22 +130,25 @@ final class LocalMeetingEvidenceTranscriptionTests: XCTestCase {
     ]
     XCTAssertTrue(tamperedHashes.allSatisfy { $0 != output.envelope.contentHash })
 
-    do {
-      _ = try await coordinator.transcribe(
-        .init(
-          session: session,
-          plan: makePlan(),
-          microphoneURL: micURL,
-          systemURL: systemURL,
-          mixedURL: mixedURL,
-          revision: 1,
-          parentContentHash: nil
-        )
+    let recovered = try await coordinator.transcribe(
+      .init(
+        session: session,
+        plan: makePlan(),
+        microphoneURL: micURL,
+        systemURL: systemURL,
+        mixedURL: mixedURL,
+        revision: 1,
+        parentContentHash: nil
       )
-      XCTFail("An existing immutable run must never be overwritten.")
-    } catch LocalSessionEvidenceCoordinatorError.immutableArtifactExists {
-      // Expected.
-    }
+    )
+    XCTAssertEqual(recovered.envelope, output.envelope)
+    XCTAssertEqual(recovered.summary, output.summary)
+    let recoveredCalledFileNames = await transcription.calledFileNames()
+    let recoveredDiarizedSources = await diarizer.calledSources()
+    XCTAssertEqual(recoveredCalledFileNames, calledFileNames)
+    XCTAssertEqual(recoveredDiarizedSources, diarizedSources)
+    XCTAssertEqual(try Data(contentsOf: runURL), outboxData)
+    XCTAssertEqual(try Data(contentsOf: outboxURL), outboxData)
   }
 
   func testUsablePrimaryIsPreservedWhenOtherPrimaryIsMissing() async throws {
@@ -257,7 +260,8 @@ final class LocalMeetingEvidenceTranscriptionTests: XCTestCase {
     )
 
     XCTAssertEqual(output.envelope.run.disposition, .degraded)
-    XCTAssertEqual(Set(output.envelope.segments.map(\.activeText)), ["local words", "remote words"])
+    XCTAssertEqual(
+      Set(output.envelope.segments.map(\.activeText)), ["local words", "remote words"])
     let calledFileNames = await transcription.calledFileNames()
     XCTAssertEqual(calledFileNames, ["mic-transcript.wav", "system.wav"])
     XCTAssertTrue(output.envelope.quality.sourceSeparationPreserved)
@@ -614,7 +618,7 @@ final class LocalMeetingEvidenceTranscriptionTests: XCTestCase {
     )
   }
 
-  private func writeWave(to url: URL, sampleData: Data = Data(repeating: 0, count: 3_200)) throws {
+  private func writeWave(to url: URL, sampleData: Data = Data(repeating: 0, count: 32_000)) throws {
     var data = Data()
     data.append("RIFF".data(using: .ascii)!)
     appendUInt32(UInt32(36 + sampleData.count), to: &data)

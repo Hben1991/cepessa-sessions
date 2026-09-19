@@ -1,12 +1,15 @@
+import Darwin
 import Foundation
 
 final class LocalClipStore {
+  private(set) var loadWarnings: [String] = []
   private let fileLayout: LocalClipFileLayout
   private let fileManager: FileManager
   private let encoder: JSONEncoder
   private let decoder: JSONDecoder
 
-  init(fileLayout: LocalClipFileLayout = LocalClipFileLayout(), fileManager: FileManager = .default) {
+  init(fileLayout: LocalClipFileLayout = LocalClipFileLayout(), fileManager: FileManager = .default)
+  {
     self.fileLayout = fileLayout
     self.fileManager = fileManager
 
@@ -21,7 +24,37 @@ final class LocalClipStore {
   }
 
   func loadClips() -> [LocalClipManifest] {
-    guard fileManager.fileExists(atPath: fileLayout.baseDirectory.path) else {
+    loadWarnings = []
+    do {
+      try LocalClipFileSafety.validateDirectoryChain(
+        to: fileLayout.baseDirectory,
+        allowMissingTail: true
+      )
+    } catch {
+      loadWarnings.append(
+        "The CLIP library could not be read. Check access to its folder and try again."
+      )
+      NSLog(
+        "LocalClipStore: Refusing unsafe clips root %@ (%@)",
+        fileLayout.baseDirectory.path,
+        error.localizedDescription
+      )
+      return []
+    }
+    var rootStatus = stat()
+    guard lstat(fileLayout.baseDirectory.path, &rootStatus) == 0 else {
+      guard errno == ENOENT else {
+        loadWarnings.append(
+          "The CLIP library could not be read. Check access to its folder and try again."
+        )
+        return []
+      }
+      return []
+    }
+    guard (rootStatus.st_mode & S_IFMT) == S_IFDIR else {
+      loadWarnings.append(
+        "The CLIP library could not be read. Check access to its folder and try again."
+      )
       return []
     }
 
@@ -34,29 +67,51 @@ final class LocalClipStore {
 
       return directories.compactMap { directory in
         do {
-          let values = try directory.resourceValues(forKeys: [.isDirectoryKey])
-          guard values.isDirectory == true else { return nil }
+          var directoryStatus = stat()
+          guard lstat(directory.path, &directoryStatus) == 0,
+            (directoryStatus.st_mode & S_IFMT) == S_IFDIR,
+            let directoryID = UUID(uuidString: directory.lastPathComponent),
+            directory.lastPathComponent == directoryID.uuidString
+          else {
+            throw LocalClipStorageError.unsafeDirectory(directory)
+          }
           let manifestURL = directory.appendingPathComponent("clip.json", isDirectory: false)
-          guard fileManager.fileExists(atPath: manifestURL.path) else { return nil }
-          let data = try Data(contentsOf: manifestURL)
-          return try decoder.decode(LocalClipManifest.self, from: data)
+          let data = try readManifest(at: manifestURL)
+          let clip = try decoder.decode(LocalClipManifest.self, from: data)
+          guard clip.id == directoryID else {
+            throw LocalClipStorageError.invalidManifest(manifestURL)
+          }
+          try fileLayout.validateStoredArtifacts(for: directoryID)
+          return clip
         } catch {
-          NSLog("LocalClipStore: Skipping corrupt clip at %@ (%@)", directory.path, error.localizedDescription)
+          loadWarnings.append(
+            "A saved CLIP could not be opened. Its original files are still on disk."
+          )
+          NSLog(
+            "LocalClipStore: Skipping corrupt clip at %@ (%@)", directory.path,
+            error.localizedDescription)
           return nil
         }
       }
       .sorted { $0.startedAt > $1.startedAt }
     } catch {
-      NSLog("LocalClipStore: Failed to read clips directory %@ (%@)", fileLayout.baseDirectory.path, error.localizedDescription)
+      loadWarnings.append(
+        "The CLIP library could not be read. Check access to its folder and try again."
+      )
+      NSLog(
+        "LocalClipStore: Failed to read clips directory %@ (%@)", fileLayout.baseDirectory.path,
+        error.localizedDescription)
       return []
     }
   }
 
   func save(_ clip: LocalClipManifest) throws {
     try fileLayout.ensureDirectories(fileManager: fileManager, for: clip.id)
-    try encoder.encode(clip).write(to: fileLayout.manifestURL(for: clip.id), options: .atomic)
+    // Ancillary artifacts may be replaced independently, but the manifest is the durable
+    // commit point. A reader must never observe `ready` until transcript and notes exist.
     try writeTranscript(for: clip)
-    try clip.postNotes.write(to: fileLayout.notesURL(for: clip.id), atomically: true, encoding: .utf8)
+    try writeSafely(Data(clip.postNotes.utf8), to: fileLayout.notesURL(for: clip.id))
+    try writeSafely(encoder.encode(clip), to: fileLayout.manifestURL(for: clip.id))
   }
 
   func clipDirectory(for clipID: UUID) -> URL {
@@ -85,8 +140,28 @@ final class LocalClipStore {
       },
       "text": clip.transcriptText,
     ]
-    let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-    try data.write(to: fileLayout.transcriptURL(for: clip.id), options: .atomic)
+    let data = try JSONSerialization.data(
+      withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+    try writeSafely(data, to: fileLayout.transcriptURL(for: clip.id))
   }
 
+  private func readManifest(at url: URL) throws -> Data {
+    try LocalClipFileSafety.readRegularFile(at: url)
+  }
+
+  private func writeSafely(_ data: Data, to url: URL) throws {
+    try LocalClipFileSafety.validateDirectoryChain(
+      to: url.deletingLastPathComponent(),
+      allowMissingTail: false
+    )
+    var status = stat()
+    if lstat(url.path, &status) == 0 {
+      guard (status.st_mode & S_IFMT) == S_IFREG, status.st_nlink == 1 else {
+        throw LocalClipStorageError.unsafeArtifact(url)
+      }
+    } else if errno != ENOENT {
+      throw LocalClipStorageError.unsafeArtifact(url)
+    }
+    try data.write(to: url, options: .atomic)
+  }
 }

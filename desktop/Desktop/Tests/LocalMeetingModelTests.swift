@@ -56,6 +56,11 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
       baseDirectory.appendingPathComponent("Sessions", isDirectory: true).appendingPathComponent(
         sessionID.uuidString, isDirectory: true
       ).appendingPathComponent("mixed.wav", isDirectory: false))
+    XCTAssertEqual(
+      layout.insightsURL(for: sessionID),
+      baseDirectory.appendingPathComponent("Sessions", isDirectory: true).appendingPathComponent(
+        sessionID.uuidString, isDirectory: true
+      ).appendingPathComponent("insights.json", isDirectory: false))
   }
 
   func testEnsureDirectoriesCreatesSessionAndModelFolders() throws {
@@ -73,7 +78,10 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
 
   func testResolvedHebrewModelURLDefaultsToInstalledModelLocation() {
     let baseDirectory = tempRootURL.appendingPathComponent("Meetings", isDirectory: true)
-    let layout = LocalMeetingFileLayout(baseDirectory: baseDirectory)
+    let layout = LocalMeetingFileLayout(
+      baseDirectory: baseDirectory,
+      compatibleModelSearchRoots: []
+    )
 
     let resolved = layout.resolvedHebrewModelURL(fileManager: fileManager)
     let developmentModelURL = URL(
@@ -93,7 +101,7 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
       at: multilingualURL.deletingLastPathComponent(),
       withIntermediateDirectories: true
     )
-    try Data().write(to: multilingualURL)
+    try writeValidGGMLFixture(to: multilingualURL)
 
     let plan = layout.resolvedTranscriptionPlan(
       settings: .init(speedMode: .balanced, languagePreference: .mixed),
@@ -119,7 +127,7 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
       at: fallbackURL.deletingLastPathComponent(),
       withIntermediateDirectories: true
     )
-    try Data().write(to: fallbackURL)
+    try writeValidGGMLFixture(to: fallbackURL)
 
     let plan = layout.resolvedTranscriptionPlan(
       settings: .init(speedMode: .balanced, languagePreference: .mixed),
@@ -165,7 +173,7 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
       at: hebrewURL.deletingLastPathComponent(),
       withIntermediateDirectories: true
     )
-    try Data().write(to: hebrewURL)
+    try writeValidGGMLFixture(to: hebrewURL)
 
     let plan = layout.resolvedTranscriptionPlan(
       settings: .init(speedMode: .balanced, languagePreference: .mixed),
@@ -191,7 +199,7 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
         at: modelURL.deletingLastPathComponent(),
         withIntermediateDirectories: true
       )
-      try Data().write(to: modelURL)
+      try writeValidGGMLFixture(to: modelURL)
     }
 
     let plan = layout.resolvedTranscriptionPlan(
@@ -213,7 +221,7 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
       at: multilingualURL.deletingLastPathComponent(),
       withIntermediateDirectories: true
     )
-    try Data().write(to: multilingualURL)
+    try writeValidGGMLFixture(to: multilingualURL)
 
     let plan = layout.resolvedTranscriptionPlan(
       settings: .init(speedMode: .balanced, languagePreference: .hebrewFirst),
@@ -672,7 +680,10 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
       at: legacyAudioURL.deletingLastPathComponent(),
       withIntermediateDirectories: true
     )
-    try Data("legacy-audio".utf8).write(to: legacyAudioURL)
+    try writeMonoPCM16Wav(
+      to: legacyAudioURL,
+      samples: Array(repeating: 1_000, count: 16_000)
+    )
 
     let resolved = layout.existingAudioURL(
       for: sessionID,
@@ -689,6 +700,10 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
       try fileManager.createDirectory(
         at: url.appendingPathComponent(component, isDirectory: true),
         withIntermediateDirectories: true
+      )
+      try Data([0x01]).write(
+        to: url.appendingPathComponent(component, isDirectory: true)
+          .appendingPathComponent("model.espresso.net", isDirectory: false)
       )
     }
   }
@@ -969,7 +984,10 @@ final class LocalMeetingAppModelTests: XCTestCase {
       at: audioURL.deletingLastPathComponent(),
       withIntermediateDirectories: true
     )
-    try Data("audio".utf8).write(to: audioURL)
+    try writeMonoPCM16Wav(
+      to: audioURL,
+      samples: Array(repeating: 1_000, count: 16_000)
+    )
     try store.save(session)
 
     let model = LocalMeetingAppModel(store: store, fileLayout: layout)
@@ -1007,7 +1025,10 @@ final class LocalMeetingAppModelTests: XCTestCase {
       at: audioURL.deletingLastPathComponent(),
       withIntermediateDirectories: true
     )
-    try Data("audio".utf8).write(to: audioURL)
+    try writeMonoPCM16Wav(
+      to: audioURL,
+      samples: Array(repeating: 1_000, count: 16_000)
+    )
 
     let refreshedSession = model.upsertSession(session)
 
@@ -1409,7 +1430,7 @@ final class LocalMeetingAppModelTests: XCTestCase {
         at: multilingualURL.deletingLastPathComponent(),
         withIntermediateDirectories: true
       )
-      try Data().write(to: multilingualURL)
+      try writeValidGGMLFixture(to: multilingualURL)
 
       let transcriptionService = StubLocalSessionTranscriptionService(
         result: LocalSessionTranscriptionResult(
@@ -1573,7 +1594,7 @@ final class LocalMeetingAppModelTests: XCTestCase {
     )
     try writeMonoPCM16Wav(
       to: layout.mixedAudioURL(for: sessionID),
-      samples: Array(repeating: 1_000, count: 16_000)
+      samples: Array(repeating: 1_000, count: 64_000)
     )
 
     let transcriptionService = StubLocalSessionTranscriptionService(
@@ -1601,9 +1622,7 @@ final class LocalMeetingAppModelTests: XCTestCase {
     XCTAssertEqual(model.selectedSessionID, sessionID)
     XCTAssertEqual(model.selectedSession?.status, .failed)
     XCTAssertEqual(model.selectedSession?.transcriptionEvidence?.disposition, .degraded)
-    XCTAssertEqual(model.processingQueue.count, 1)
-    XCTAssertEqual(model.processingQueue.first?.id, sessionID)
-    XCTAssertEqual(model.processingQueue.first?.phase, .transcribing)
+    XCTAssertTrue(model.processingQueue.isEmpty)
     XCTAssertEqual(transcriptionService.receivedAudioURLs, [layout.mixedAudioURL(for: sessionID)])
   }
 
@@ -1670,7 +1689,9 @@ final class LocalMeetingAppModelTests: XCTestCase {
     }
 
     XCTAssertEqual(
-      model.selectedSession?.transcriptSegments.map(\.speaker), ["Speaker 1", "Speaker 1"])
+      model.selectedSession?.transcriptSegments.map(\.speaker),
+      ["Microphone speaker", "Microphone speaker"]
+    )
     XCTAssertEqual(model.selectedSession?.status, .failed)
     XCTAssertEqual(model.selectedSession?.transcriptionEvidence?.disposition, .degraded)
   }
@@ -3419,6 +3440,10 @@ private func writeMonoPCM16Wav(to url: URL, samples: [Int16], sampleRate: Int = 
     appendUInt16LE(UInt16(bitPattern: sample), to: &data)
   }
   try data.write(to: url)
+}
+
+private func writeValidGGMLFixture(to url: URL) throws {
+  try Data([0x6c, 0x6d, 0x67, 0x67, 0x01]).write(to: url)
 }
 
 private func appendASCII(_ string: String, to data: inout Data) {

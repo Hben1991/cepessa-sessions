@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -1726,6 +1727,11 @@ final class CepessaStorageSettingsModel: ObservableObject {
     clearContents(of: clipsRoot, label: "CLIPS")
   }
 
+  func reportCleanupBlocked() {
+    cleanupMessage =
+      "Finish active capture and local processing before deleting stored recordings."
+  }
+
   private func clearContents(of directory: URL, label: String) {
     do {
       guard fileManager.fileExists(atPath: directory.path) else {
@@ -1826,6 +1832,7 @@ struct CepessaSessionsSettingsPage: View {
   @ObservedObject private var speakerModels =
     CepessaSessionsStore.shared.model.speakerModelProvisioner
   @ObservedObject private var clipModel = CepessaSessionsStore.shared.clipModel
+  @ObservedObject private var captureLifecycle = CepessaSessionsStore.shared.captureLifecycle
   @AppStorage("cepessa.sessions.preferredTranscriptLanguage") private var transcriptLanguage =
     "Mixed"
   @AppStorage("cepessa.sessions.transcriptionSpeedMode") private var transcriptionSpeedMode =
@@ -1833,11 +1840,15 @@ struct CepessaSessionsSettingsPage: View {
   @AppStorage(CepessaSessionFloatingBarPreferences.enabledKey) private var floatingBarEnabled =
     true
   @State private var cleanupRequest: CepessaStorageCleanupRequest?
+  @State private var microphonePermissionGranted =
+    AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+  @State private var screenRecordingPermissionGranted = CGPreflightScreenCaptureAccess()
 
   var body: some View {
     Form {
       captureSection
       speakerRecognitionSection
+      cloudAnalysisSection
       permissionsSection
       storageSection
     }
@@ -1846,6 +1857,12 @@ struct CepessaSessionsSettingsPage: View {
       CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
       CepessaSessionStatusBarController.shared.connect(model: CepessaSessionsStore.shared.model)
       storageModel.refresh()
+      refreshPermissions()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification))
+    {
+      _ in
+      refreshPermissions()
     }
     .onChange(of: floatingBarEnabled) { _, _ in
       CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
@@ -1891,16 +1908,20 @@ struct CepessaSessionsSettingsPage: View {
     }
   }
 
+  private var cloudAnalysisSection: some View {
+    CloudAnalysisSettingsSection()
+  }
+
   private var permissionsSection: some View {
     Section("Permissions") {
       permissionRow(
         title: "Microphone",
-        isGranted: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+        isGranted: microphonePermissionGranted,
         openAnchor: "Privacy_Microphone"
       )
       permissionRow(
         title: "Screen Recording",
-        isGranted: CGPreflightScreenCaptureAccess(),
+        isGranted: screenRecordingPermissionGranted,
         openAnchor: "Privacy_ScreenCapture"
       )
     }
@@ -1908,7 +1929,7 @@ struct CepessaSessionsSettingsPage: View {
 
   private var speakerRecognitionSection: some View {
     Section {
-      LabeledContent("Speaker separation") {
+      LabeledContent("Local models") {
         HStack(spacing: CepessaChrome.Space.s) {
           if case .downloading(let progress) = speakerModels.state {
             ProgressView(value: progress)
@@ -1938,10 +1959,10 @@ struct CepessaSessionsSettingsPage: View {
           .foregroundStyle(CepessaColors.warning)
       }
     } header: {
-      Text("Speaker Recognition")
+      Text("Speaker Separation")
     } footer: {
       Text(
-        "Cepessa downloads the local SpeakerKit Core ML models on demand from argmaxinc/speakerkit-coreml at pinned revision \(LocalSessionSpeakerModelContract.modelRevision). Meeting audio is never uploaded by this feature. Model attribution does not imply redistribution rights."
+        "Download the models once to separate speakers on this Mac. Your recording stays local."
       )
     }
   }
@@ -1951,7 +1972,7 @@ struct CepessaSessionsSettingsPage: View {
     case .notInstalled: return "Not installed"
     case .downloading: return "Downloading"
     case .verifying: return "Verifying"
-    case .ready: return "Ready for local diarization"
+    case .ready: return "Ready on this Mac"
     case .failed: return "Needs attention"
     }
   }
@@ -1963,7 +1984,7 @@ struct CepessaSessionsSettingsPage: View {
       storageRow(title: "Clips", path: storageModel.clipsRoot, size: storageModel.clipsSizeText)
       storageRow(title: "Models", path: modelsRoot, size: nil)
 
-      LabeledContent("Total", value: storageModel.totalSizeText)
+      LabeledContent("Recordings and clips", value: storageModel.totalSizeText)
 
       Button("Recalculate") { storageModel.refresh() }
 
@@ -1976,17 +1997,17 @@ struct CepessaSessionsSettingsPage: View {
       // Destructive actions live below a divider, are red, and are the only
       // controls in the pane that open a confirmation.
       Button("Delete All Sessions…", role: .destructive) { cleanupRequest = .sessions }
-        .disabled(sessionModel.isRecording || sessionModel.isTranscribing || clipModel.isRecording)
+        .disabled(isStorageCleanupBlocked)
         .help(
-          sessionModel.isRecording || sessionModel.isTranscribing || clipModel.isRecording
-            ? "Finish the active recording or transcription before deleting sessions."
+          isStorageCleanupBlocked
+            ? "Finish active capture and local processing before deleting sessions."
             : "Delete every local session after confirmation."
         )
       Button("Delete All Clips…", role: .destructive) { cleanupRequest = .clips }
-        .disabled(clipModel.isRecording)
+        .disabled(isStorageCleanupBlocked)
         .help(
-          clipModel.isRecording
-            ? "Stop the active clip recording before deleting clips."
+          isStorageCleanupBlocked
+            ? "Finish active capture and local processing before deleting clips."
             : "Delete every local clip after confirmation."
         )
     } header: {
@@ -2042,11 +2063,18 @@ struct CepessaSessionsSettingsPage: View {
     } label: {
       Text(title)
     }
+    .accessibilityElement(children: .contain)
   }
 
   // MARK: - Actions
 
   private func performCleanup(_ request: CepessaStorageCleanupRequest) {
+    guard !isStorageCleanupBlocked else {
+      storageModel.reportCleanupBlocked()
+      cleanupRequest = nil
+      return
+    }
+
     switch request {
     case .sessions:
       storageModel.clearSessions()
@@ -2062,6 +2090,14 @@ struct CepessaSessionsSettingsPage: View {
     fileLayout.modelsDirectory
   }
 
+  private var isStorageCleanupBlocked: Bool {
+    captureLifecycle.isBusy
+      || sessionModel.isTranscribing
+      || sessionModel.isGeneratingRecap
+      || !sessionModel.processingSnapshots.isEmpty
+      || clipModel.isProcessing
+  }
+
   private var fileLayout: LocalMeetingFileLayout {
     LocalMeetingFileLayout(baseDirectory: LocalSessionStorageRoot.defaultBaseDirectory)
   }
@@ -2070,6 +2106,12 @@ struct CepessaSessionsSettingsPage: View {
     guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")
     else { return }
     NSWorkspace.shared.open(url)
+  }
+
+  private func refreshPermissions() {
+    microphonePermissionGranted =
+      AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    screenRecordingPermissionGranted = CGPreflightScreenCaptureAccess()
   }
 }
 

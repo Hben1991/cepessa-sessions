@@ -10,7 +10,11 @@ struct CepessaSessionFloatingAttachmentDeck: Equatable {
         !previews.isEmpty || overflowCount > 0
     }
 
-    static func build(from session: LocalSession, maxVisible: Int = 3) -> Self {
+    static func build(
+        from session: LocalSession,
+        sessionFolderURL: URL?,
+        maxVisible: Int = 3
+    ) -> Self {
         let sortedAttachments = session.attachments
             .sorted { lhs, rhs in
                 if lhs.timestamp == rhs.timestamp {
@@ -20,7 +24,12 @@ struct CepessaSessionFloatingAttachmentDeck: Equatable {
             }
 
         let visibleAttachments = Array(sortedAttachments.prefix(maxVisible))
-        let previews = visibleAttachments.map { CepessaSessionFloatingAttachmentPreview(attachment: $0) }
+        let previews = visibleAttachments.map {
+            CepessaSessionFloatingAttachmentPreview(
+                attachment: $0,
+                sessionFolderURL: sessionFolderURL
+            )
+        }
         let overflowCount = max(0, sortedAttachments.count - previews.count)
         return Self(previews: previews, overflowCount: overflowCount)
     }
@@ -35,7 +44,7 @@ struct CepessaSessionFloatingAttachmentPreview: Identifiable, Equatable {
     let sessionOffset: TimeInterval?
     let fileURL: URL?
 
-    init(attachment: LocalSessionAttachment) {
+    init(attachment: LocalSessionAttachment, sessionFolderURL: URL?) {
         self.id = attachment.id
         self.title = attachment.title
         self.fileName = attachment.fileName
@@ -43,15 +52,13 @@ struct CepessaSessionFloatingAttachmentPreview: Identifiable, Equatable {
         self.timestamp = attachment.timestamp
         self.sessionOffset = attachment.sessionOffset
 
-        if let urlString = attachment.urlString,
-           urlString.hasPrefix("/") {
-            self.fileURL = URL(fileURLWithPath: urlString)
-        } else {
-            self.fileURL = nil
-        }
+        self.fileURL = LocalSessionAttachmentResolver.localURL(
+            for: attachment,
+            in: sessionFolderURL
+        )
     }
 
-    init(_ attachment: LocalSessionAttachment) {
-        self.init(attachment: attachment)
+    init(_ attachment: LocalSessionAttachment, sessionFolderURL: URL?) {
+        self.init(attachment: attachment, sessionFolderURL: sessionFolderURL)
     }
 }

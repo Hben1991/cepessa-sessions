@@ -1,4 +1,13 @@
+import Darwin
 import Foundation
+
+enum LocalSessionFileLayoutError: LocalizedError, Equatable {
+  case unsafeDirectory(URL)
+
+  var errorDescription: String? {
+    "The session storage directory is unavailable or unsafe."
+  }
+}
 
 enum LocalSessionTranscriptionEngineKind: String, Codable, Equatable, Sendable {
   case whisperKit
@@ -69,6 +78,12 @@ struct LocalSessionFileLayout {
   static let defaultWhisperKitHebrewModelID = "ivrit-ai_whisper-large-v3-turbo"
   static let defaultHebrewModelID = "ivrit-ai_whisper-large-v3-turbo-ggml"
   private static let defaultHebrewModelFileName = "ggml-model.bin"
+  private static let typeWhisperPluginModelsPath = [
+    "TypeWhisper",
+    "PluginData",
+    "com.typewhisper.ivrit-asr",
+    "models",
+  ]
   private static let legacyRootName = "Cepessa Legacy"
   private static let legacySessionsRootName = "Meetings"
   private static let currentRootName = "Cepessa"
@@ -131,9 +146,11 @@ struct LocalSessionFileLayout {
 
   let baseDirectory: URL
   private let resolvedLegacyRootDirectory: URL
+  private let compatibleModelSearchRootsOverride: [URL]?
 
-  init(baseDirectory: URL) {
+  init(baseDirectory: URL, compatibleModelSearchRoots: [URL]? = nil) {
     self.baseDirectory = baseDirectory
+    compatibleModelSearchRootsOverride = compatibleModelSearchRoots
 
     let standardizedCurrent = baseDirectory.standardizedFileURL.path
     let standardizedDefault = Self.currentBaseDirectory.standardizedFileURL.path
@@ -294,6 +311,11 @@ struct LocalSessionFileLayout {
     sessionDirectory(for: sessionID).appendingPathComponent("session.json", isDirectory: false)
   }
 
+  func insightsURL(for sessionID: UUID) -> URL {
+    sessionDirectory(for: sessionID).appendingPathComponent(
+      LocalSessionInsightSchema.sidecarFileName, isDirectory: false)
+  }
+
   func attachmentsDirectory(for sessionID: UUID) -> URL {
     sessionDirectory(for: sessionID).appendingPathComponent("Attachments", isDirectory: true)
   }
@@ -353,12 +375,17 @@ struct LocalSessionFileLayout {
     sessionDirectory(for: sessionID).appendingPathComponent("mixed.wav", isDirectory: false)
   }
 
+  func importedAudioURL(for sessionID: UUID) -> URL {
+    sessionDirectory(for: sessionID).appendingPathComponent("imported.wav", isDirectory: false)
+  }
+
   func existingAudioURL(
     for sessionID: UUID,
     artifacts: LocalSessionAudioArtifacts,
     fileManager: FileManager = .default
   ) -> URL? {
     let orderedFileNames = [
+      artifacts.importedFileName,
       artifacts.mixedFileName,
       artifacts.micFileName,
       artifacts.systemFileName,
@@ -377,8 +404,8 @@ struct LocalSessionFileLayout {
     for root in roots {
       for fileName in candidateFileNames {
         let candidate = root.appendingPathComponent(fileName, isDirectory: false)
-        if fileManager.fileExists(atPath: candidate.path) {
-          return candidate
+        if let validatedURL = validatedAudioURL(for: candidate, fileManager: fileManager) {
+          return validatedURL
         }
       }
     }
@@ -386,22 +413,183 @@ struct LocalSessionFileLayout {
     return nil
   }
 
-  func ensureDirectories(fileManager: FileManager = .default, for sessionID: UUID? = nil) throws {
-    try fileManager.createDirectory(at: sessionsDirectory, withIntermediateDirectories: true)
-    try fileManager.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
-    try fileManager.createDirectory(at: modelDirectory(), withIntermediateDirectories: true)
-    try fileManager.createDirectory(
-      at: meetingEvidenceOutboxDirectory, withIntermediateDirectories: true)
+  /// Returns an audio URL only when it is a direct file in a known session directory.
+  ///
+  /// This is shared by playback and transcription retry callers. Every existing path
+  /// component is checked with `lstat`, and the final file is opened with `O_NOFOLLOW`.
+  /// Existing symlinks, hard links, and paths outside this layout are rejected before
+  /// header inspection. Consumers that reopen the returned path must still handle replacement.
+  func validatedAudioURL(for url: URL, fileManager: FileManager = .default) -> URL? {
+    guard isSafeDirectSessionAudioFile(url, fileManager: fileManager) else {
+      return nil
+    }
+    return isUsableWaveAudio(at: url, fileManager: fileManager) ? url : nil
+  }
 
+  /// Checks only path and file safety. It deliberately does not inspect the file contents,
+  /// allowing transcription evidence code to distinguish an unsafe file from a malformed WAV.
+  func isSafeDirectSessionAudioFile(
+    _ url: URL,
+    fileManager _: FileManager = .default
+  ) -> Bool {
+    guard let standardizedURL = LocalStoragePath.checkedFileURL(url) else {
+      return false
+    }
+
+    let parentComponents = standardizedURL.deletingLastPathComponent().pathComponents
+    let roots = [sessionsDirectory, legacySessionsDirectory].compactMap {
+      LocalStoragePath.checkedFileURL($0)
+    }
+    guard
+      roots.contains(where: { root in
+        let rootComponents = root.pathComponents
+        guard parentComponents.count == rootComponents.count + 1,
+          Array(parentComponents.prefix(rootComponents.count)) == rootComponents,
+          let sessionComponent = parentComponents.last,
+          UUID(uuidString: sessionComponent) != nil
+        else {
+          return false
+        }
+        return true
+      })
+    else {
+      return false
+    }
+
+    var currentURL = URL(fileURLWithPath: "/", isDirectory: true)
+    for component in standardizedURL.pathComponents.dropLast() {
+      currentURL.appendPathComponent(component, isDirectory: true)
+      var status = stat()
+      guard lstat(currentURL.path, &status) == 0,
+        (status.st_mode & S_IFMT) == S_IFDIR
+      else {
+        return false
+      }
+    }
+
+    var pathStatus = stat()
+    guard
+      lstat(standardizedURL.path, &pathStatus) == 0,
+      (pathStatus.st_mode & S_IFMT) == S_IFREG,
+      pathStatus.st_nlink == 1
+    else {
+      return false
+    }
+
+    let descriptor = open(standardizedURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else { return false }
+    defer { close(descriptor) }
+
+    var openedStatus = stat()
+    guard
+      fstat(descriptor, &openedStatus) == 0,
+      (openedStatus.st_mode & S_IFMT) == S_IFREG,
+      openedStatus.st_nlink == 1,
+      sameFile(pathStatus, openedStatus)
+    else {
+      return false
+    }
+
+    var finalPathStatus = stat()
+    return
+      lstat(standardizedURL.path, &finalPathStatus) == 0
+      && (finalPathStatus.st_mode & S_IFMT) == S_IFREG
+      && finalPathStatus.st_nlink == 1
+      && sameFile(openedStatus, finalPathStatus)
+  }
+
+  func ensureDirectories(fileManager: FileManager = .default, for sessionID: UUID? = nil) throws {
+    var directories = [
+      sessionsDirectory,
+      modelsDirectory,
+      modelDirectory(),
+      meetingEvidenceOutboxDirectory,
+    ]
     if let sessionID {
-      try fileManager.createDirectory(
-        at: sessionDirectory(for: sessionID), withIntermediateDirectories: true)
-      try fileManager.createDirectory(
-        at: attachmentsDirectory(for: sessionID), withIntermediateDirectories: true)
-      try fileManager.createDirectory(
-        at: exportsDirectory(for: sessionID), withIntermediateDirectories: true)
-      try fileManager.createDirectory(
-        at: transcriptionRunsDirectory(for: sessionID), withIntermediateDirectories: true)
+      directories += [
+        sessionDirectory(for: sessionID),
+        attachmentsDirectory(for: sessionID),
+        exportsDirectory(for: sessionID),
+        transcriptionRunsDirectory(for: sessionID),
+      ]
+    }
+
+    // Validate every existing component before creating any missing descendant. This prevents
+    // a later unsafe session or managed directory from causing writes through an earlier one.
+    for directory in directories {
+      try validateExistingDirectoryComponents(at: directory)
+    }
+    for directory in directories {
+      try ensureDirectoryStepwise(at: directory, fileManager: fileManager)
+    }
+  }
+
+  private func validateExistingDirectoryComponents(at url: URL) throws {
+    guard let standardizedURL = LocalStoragePath.checkedFileURL(url) else {
+      throw LocalSessionFileLayoutError.unsafeDirectory(url)
+    }
+    let components = standardizedURL.pathComponents
+    guard components.first == "/" else {
+      throw LocalSessionFileLayoutError.unsafeDirectory(url)
+    }
+
+    var currentURL = URL(fileURLWithPath: "/", isDirectory: true)
+    for component in components.dropFirst() {
+      currentURL.appendPathComponent(component, isDirectory: true)
+      var status = stat()
+      guard lstat(currentURL.path, &status) == 0 else {
+        let errorNumber = errno
+        if errorNumber == ENOENT {
+          return
+        }
+        throw LocalSessionFileLayoutError.unsafeDirectory(currentURL)
+      }
+      guard (status.st_mode & S_IFMT) == S_IFDIR else {
+        throw LocalSessionFileLayoutError.unsafeDirectory(currentURL)
+      }
+    }
+  }
+
+  private func ensureDirectoryStepwise(at url: URL, fileManager: FileManager) throws {
+    guard let standardizedURL = LocalStoragePath.checkedFileURL(url) else {
+      throw LocalSessionFileLayoutError.unsafeDirectory(url)
+    }
+    let components = standardizedURL.pathComponents
+    guard components.first == "/" else {
+      throw LocalSessionFileLayoutError.unsafeDirectory(url)
+    }
+
+    var currentURL = URL(fileURLWithPath: "/", isDirectory: true)
+    for component in components.dropFirst() {
+      currentURL.appendPathComponent(component, isDirectory: true)
+      var status = stat()
+      if lstat(currentURL.path, &status) == 0 {
+        guard (status.st_mode & S_IFMT) == S_IFDIR else {
+          throw LocalSessionFileLayoutError.unsafeDirectory(currentURL)
+        }
+        continue
+      }
+
+      let errorNumber = errno
+      guard errorNumber == ENOENT else {
+        throw LocalSessionFileLayoutError.unsafeDirectory(currentURL)
+      }
+      do {
+        try fileManager.createDirectory(at: currentURL, withIntermediateDirectories: false)
+      } catch {
+        var racedStatus = stat()
+        guard lstat(currentURL.path, &racedStatus) == 0,
+          (racedStatus.st_mode & S_IFMT) == S_IFDIR
+        else {
+          throw error
+        }
+      }
+      var createdStatus = stat()
+      guard lstat(currentURL.path, &createdStatus) == 0,
+        (createdStatus.st_mode & S_IFMT) == S_IFDIR
+      else {
+        throw LocalSessionFileLayoutError.unsafeDirectory(currentURL)
+      }
     }
   }
 
@@ -411,7 +599,7 @@ struct LocalSessionFileLayout {
   ) -> URL? {
     for modelID in Self.modelIDs(for: speedMode) {
       let candidate = resolvedModelURL(for: modelID, fileManager: fileManager)
-      if fileManager.fileExists(atPath: candidate.path) {
+      if isValidGGMLModelFile(candidate, fileManager: fileManager) {
         return candidate
       }
     }
@@ -433,9 +621,11 @@ struct LocalSessionFileLayout {
         let modelID = directoryURL.lastPathComponent.lowercased()
         guard !modelID.contains(Self.defaultHebrewModelID.lowercased()) else { continue }
 
-        let candidate = directoryURL.appendingPathComponent(
-          Self.defaultHebrewModelFileName, isDirectory: false)
-        if fileManager.fileExists(atPath: candidate.path) {
+        if let candidate = resolvedGGMLModelURL(
+          in: directoryURL,
+          modelID: directoryURL.lastPathComponent,
+          fileManager: fileManager)
+        {
           return candidate
         }
       }
@@ -471,7 +661,10 @@ struct LocalSessionFileLayout {
         let modelID = directoryURL.lastPathComponent.lowercased()
         guard modelID.contains("whisper") || modelID.contains("openai") else { continue }
         guard !modelID.contains("ggml"), !modelID.contains("ivrit-ai") else { continue }
-        if isWhisperKitModelDirectory(directoryURL, fileManager: fileManager) {
+        if LocalSessionWhisperKitModelInspector.isWhisperKitModelDirectory(
+          directoryURL,
+          fileManager: fileManager)
+        {
           return directoryURL
         }
       }
@@ -521,25 +714,30 @@ struct LocalSessionFileLayout {
   }
 
   private func resolvedModelURL(for modelID: String, fileManager: FileManager) -> URL {
-    let installedModelURL = modelURL(for: modelID)
-    if fileManager.fileExists(atPath: installedModelURL.path) {
-      return installedModelURL
+    let modelDirectories =
+      [
+        modelDirectory(for: modelID),
+        legacyModelDirectory(for: modelID),
+      ]
+      + compatibleModelRoots().map {
+        $0.appendingPathComponent(modelID, isDirectory: true)
+      } + [
+        URL(
+          fileURLWithPath: "/Users/ben/Documents/App/General/__MODELS__/\(modelID)",
+          isDirectory: true)
+      ]
+
+    for directory in modelDirectories {
+      if let modelURL = resolvedGGMLModelURL(
+        in: directory,
+        modelID: modelID,
+        fileManager: fileManager)
+      {
+        return modelURL
+      }
     }
 
-    let legacyModelURL = legacyModelURL(for: modelID)
-    if fileManager.fileExists(atPath: legacyModelURL.path) {
-      return legacyModelURL
-    }
-
-    let developmentModelURL = URL(
-      fileURLWithPath:
-        "/Users/ben/Documents/App/General/__MODELS__/\(modelID)/\(Self.defaultHebrewModelFileName)"
-    )
-    if fileManager.fileExists(atPath: developmentModelURL.path) {
-      return developmentModelURL
-    }
-
-    return installedModelURL
+    return modelURL(for: modelID)
   }
 
   private func resolvedWhisperKitModelURL(for modelID: String, fileManager: FileManager) -> URL? {
@@ -552,60 +750,194 @@ struct LocalSessionFileLayout {
     ]
 
     for candidate in candidates
-    where isWhisperKitModelDirectory(candidate, fileManager: fileManager) {
+    where LocalSessionWhisperKitModelInspector.isWhisperKitModelDirectory(
+      candidate,
+      fileManager: fileManager)
+    {
       return candidate
     }
 
     return nil
   }
 
-  private func isWhisperKitModelDirectory(_ url: URL, fileManager: FileManager) -> Bool {
-    var isDirectory: ObjCBool = false
-    guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
-      isDirectory.boolValue
-    else {
-      return false
-    }
-
-    let requiredComponents = [
-      "AudioEncoder.mlmodelc",
-      "TextDecoder.mlmodelc",
-      "MelSpectrogram.mlmodelc",
-    ]
-    if requiredComponents.allSatisfy({
-      fileManager.fileExists(atPath: url.appendingPathComponent($0, isDirectory: true).path)
-    }) {
-      return true
-    }
-
-    guard
-      let enumerator = fileManager.enumerator(
-        at: url,
-        includingPropertiesForKeys: [.isDirectoryKey],
-        options: [.skipsHiddenFiles]
-      )
-    else {
-      return false
-    }
-
-    var modelComponentCount = 0
-    for case let fileURL as URL in enumerator {
-      guard fileURL.pathExtension == "mlmodelc" else { continue }
-      modelComponentCount += 1
-      if modelComponentCount >= 2 {
-        return true
-      }
-    }
-
-    return false
-  }
-
   private func modelSearchRoots() -> [URL] {
-    [
+    var roots = [
       modelsDirectory,
       legacyModelsDirectory,
       URL(fileURLWithPath: "/Users/ben/Documents/App/General/__MODELS__", isDirectory: true),
     ]
+    roots.append(contentsOf: compatibleModelRoots())
+    return roots
+  }
+
+  private func compatibleModelRoots() -> [URL] {
+    if let compatibleModelSearchRootsOverride {
+      return deduplicatedModelRoots(compatibleModelSearchRootsOverride)
+    }
+
+    let relativeApplicationSupportDirectory = baseDirectory.deletingLastPathComponent()
+    let userApplicationSupportDirectory = FileManager.default.urls(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask
+    )[0]
+    return deduplicatedModelRoots(
+      [relativeApplicationSupportDirectory, userApplicationSupportDirectory].map {
+        Self.typeWhisperPluginModelsPath.reduce($0) { partialURL, pathComponent in
+          partialURL.appendingPathComponent(pathComponent, isDirectory: true)
+        }
+      })
+  }
+
+  private func deduplicatedModelRoots(_ roots: [URL]) -> [URL] {
+    var seenPaths: Set<String> = []
+    return roots.filter { seenPaths.insert($0.standardizedFileURL.path).inserted }
+  }
+
+  private func resolvedGGMLModelURL(
+    in directory: URL,
+    modelID: String,
+    fileManager: FileManager
+  ) -> URL? {
+    var candidateNames = [Self.defaultHebrewModelFileName, "\(modelID).bin"]
+    let normalizedModelID =
+      modelID
+      .replacingOccurrences(of: "openai_whisper-", with: "")
+      .replacingOccurrences(of: "-ggml", with: "")
+    candidateNames.append("ggml-\(normalizedModelID).bin")
+
+    var seenNames: Set<String> = []
+    for name in candidateNames where seenNames.insert(name).inserted {
+      let candidate = directory.appendingPathComponent(name, isDirectory: false)
+      if isValidGGMLModelFile(candidate, fileManager: fileManager) {
+        return candidate
+      }
+    }
+
+    guard
+      let contents = try? fileManager.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: [.skipsHiddenFiles]
+      )
+    else {
+      return nil
+    }
+    let validGGMLFiles =
+      contents
+      .filter { $0.pathExtension.lowercased() == "bin" && $0.lastPathComponent.hasPrefix("ggml-") }
+      .filter { isValidGGMLModelFile($0, fileManager: fileManager) }
+      .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    return validGGMLFiles.count == 1 ? validGGMLFiles[0] : nil
+  }
+
+  private func isValidGGMLModelFile(_ url: URL, fileManager: FileManager) -> Bool {
+    guard
+      let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+      values.isRegularFile == true,
+      (values.fileSize ?? 0) >= 4,
+      let handle = try? FileHandle(forReadingFrom: url)
+    else {
+      return false
+    }
+    defer { try? handle.close() }
+    guard
+      let magic = try? handle.read(upToCount: 4),
+      magic.count == 4
+    else {
+      return false
+    }
+    return magic == Data([0x6c, 0x6d, 0x67, 0x67])
+  }
+
+  private func isUsableWaveAudio(at url: URL, fileManager _: FileManager) -> Bool {
+    var pathStatus = stat()
+    guard
+      lstat(url.path, &pathStatus) == 0,
+      (pathStatus.st_mode & S_IFMT) == S_IFREG,
+      pathStatus.st_nlink == 1
+    else {
+      return false
+    }
+
+    let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else { return false }
+    defer { close(descriptor) }
+
+    var openedStatus = stat()
+    guard
+      fstat(descriptor, &openedStatus) == 0,
+      (openedStatus.st_mode & S_IFMT) == S_IFREG,
+      openedStatus.st_nlink == 1,
+      sameFile(pathStatus, openedStatus),
+      openedStatus.st_size >= 44
+    else {
+      return false
+    }
+
+    var finalPathStatus = stat()
+    guard
+      lstat(url.path, &finalPathStatus) == 0,
+      (finalPathStatus.st_mode & S_IFMT) == S_IFREG,
+      finalPathStatus.st_nlink == 1,
+      sameFile(openedStatus, finalPathStatus)
+    else {
+      return false
+    }
+
+    let fileSize = openedStatus.st_size
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+
+    guard
+      let header = try? handle.read(upToCount: 12),
+      header.count == 12,
+      String(data: header[0..<4], encoding: .ascii) == "RIFF",
+      String(data: header[8..<12], encoding: .ascii) == "WAVE"
+    else {
+      return false
+    }
+    let declaredSize = UInt64(Self.readUInt32(header, offset: 4)) + 8
+    guard declaredSize <= UInt64(fileSize) else { return false }
+
+    var byteRate: UInt32?
+    var offset: UInt64 = 12
+    while offset + 8 <= declaredSize {
+      do {
+        try handle.seek(toOffset: offset)
+        guard let chunkHeader = try handle.read(upToCount: 8), chunkHeader.count == 8 else {
+          return false
+        }
+        let chunkName = String(data: chunkHeader[0..<4], encoding: .ascii)
+        let chunkLength = UInt64(Self.readUInt32(chunkHeader, offset: 4))
+        let dataOffset = offset + 8
+        guard dataOffset + chunkLength <= declaredSize else { return false }
+
+        if chunkName == "fmt ", chunkLength >= 16 {
+          guard let formatData = try handle.read(upToCount: 16), formatData.count == 16 else {
+            return false
+          }
+          byteRate = Self.readUInt32(formatData, offset: 8)
+        } else if chunkName == "data" {
+          guard chunkLength > 0, let byteRate, byteRate > 0 else { return false }
+          return Double(chunkLength) / Double(byteRate) > 0
+        }
+
+        offset = dataOffset + chunkLength + (chunkLength % 2)
+      } catch {
+        return false
+      }
+    }
+    return false
+  }
+
+  private func sameFile(_ lhs: stat, _ rhs: stat) -> Bool {
+    lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino
+  }
+
+  private static func readUInt32(_ data: Data, offset: Int) -> UInt32 {
+    guard offset + 4 <= data.count else { return 0 }
+    return data[offset..<(offset + 4)].enumerated().reduce(0) {
+      $0 | (UInt32($1.element) << UInt32($1.offset * 8))
+    }
   }
 }
 

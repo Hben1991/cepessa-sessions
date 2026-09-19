@@ -1,4 +1,5 @@
 import json
+from uuid import NAMESPACE_URL, uuid5
 
 from mcp_server_omi.server import (
     get_local_clip,
@@ -15,16 +16,35 @@ from mcp_server_omi.server import (
 )
 
 
+def fixture_id(label):
+    return str(uuid5(NAMESPACE_URL, f"cepessa-mcp-test:{label}"))
+
+
+OLDER_SESSION_ID = fixture_id("session:older")
+NEWER_SESSION_ID = fixture_id("session:newer")
+SESSION_ONE_ID = fixture_id("session:one")
+SESSION_TWO_ID = fixture_id("session:two")
+OLDER_CLIP_ID = fixture_id("clip:older")
+NEWER_CLIP_ID = fixture_id("clip:newer")
+CLIP_ONE_ID = fixture_id("clip:one")
+
+
 def write_session(root, session_id, title, started_at, segments, extra=None):
     session_dir = root / session_id
     session_dir.mkdir(parents=True)
+    normalized_segments = []
+    for index, segment in enumerate(segments):
+        normalized = dict(segment)
+        normalized.setdefault("id", fixture_id(f"{session_id}:segment:{index}"))
+        normalized.setdefault("timestamp", started_at)
+        normalized_segments.append(normalized)
     payload = {
         "id": session_id,
         "title": title,
         "startedAt": started_at,
         "status": "ready",
         "recap": {"overview": "Short recap", "sections": []},
-        "transcriptSegments": segments,
+        "transcriptSegments": normalized_segments,
     }
     if extra:
         payload.update(extra)
@@ -34,6 +54,13 @@ def write_session(root, session_id, title, started_at, segments, extra=None):
 def write_clip(root, clip_id, title, started_at, segments=None, extra=None):
     clip_dir = root / clip_id
     clip_dir.mkdir(parents=True)
+    normalized_segments = [
+        {
+            **segment,
+            "id": segment.get("id") or fixture_id(f"{clip_id}:segment:{index}"),
+        }
+        for index, segment in enumerate(segments or [])
+    ]
     payload = {
         "id": clip_id,
         "title": title,
@@ -45,25 +72,57 @@ def write_clip(root, clip_id, title, started_at, segments=None, extra=None):
         "audioFileName": "clip-audio.wav",
         "transcriptFileName": "transcript.json",
         "notesFileName": "notes.md",
-        "transcriptSegments": segments or [],
+        "transcriptSegments": normalized_segments,
         "postNotes": "Additional post-recording context.",
     }
     if extra:
         payload.update(extra)
     (clip_dir / "clip.json").write_text(json.dumps(payload), encoding="utf-8")
+    wav_body = (
+        b"WAVE"
+        + b"fmt "
+        + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little")
+        + (1).to_bytes(2, "little")
+        + (8_000).to_bytes(4, "little")
+        + (16_000).to_bytes(4, "little")
+        + (2).to_bytes(2, "little")
+        + (16).to_bytes(2, "little")
+        + b"data"
+        + (2).to_bytes(4, "little")
+        + b"\0\0"
+    )
+    (clip_dir / "clip-video.mov").write_bytes(
+        (16).to_bytes(4, "big") + b"ftypqt  \0\0\0\0"
+    )
+    (clip_dir / "clip-audio.wav").write_bytes(
+        b"RIFF" + (len(wav_body)).to_bytes(4, "little") + wav_body
+    )
+    (clip_dir / "transcript.json").write_text(
+        json.dumps(
+            {
+                "id": clip_id,
+                "title": title,
+                "segments": normalized_segments,
+                "text": "\n".join(segment["text"] for segment in normalized_segments),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (clip_dir / "notes.md").write_text(payload["postNotes"], encoding="utf-8")
 
 
 def test_list_local_sessions_returns_recent_transcript_summaries(tmp_path):
     write_session(
         tmp_path,
-        "older",
+        OLDER_SESSION_ID,
         "Older session",
         "2026-06-10T08:00:00Z",
         [{"speaker": "You", "text": "Old notes", "timestamp": "2026-06-10T08:00:01Z"}],
     )
     write_session(
         tmp_path,
-        "newer",
+        NEWER_SESSION_ID,
         "Newer session",
         "2026-06-11T08:00:00Z",
         [
@@ -77,7 +136,7 @@ def test_list_local_sessions_returns_recent_transcript_summaries(tmp_path):
 
     result = list_local_sessions(str(tmp_path))
 
-    assert [session["id"] for session in result] == ["newer", "older"]
+    assert [session["id"] for session in result] == [NEWER_SESSION_ID, OLDER_SESSION_ID]
     assert result[0]["transcript_segment_count"] == 1
     assert (
         result[0]["transcript_preview"] == "Dana: Discussed MCP access for transcripts"
@@ -87,7 +146,7 @@ def test_list_local_sessions_returns_recent_transcript_summaries(tmp_path):
 def test_get_local_session_transcript_formats_segments_as_markdown(tmp_path):
     write_session(
         tmp_path,
-        "session-1",
+        SESSION_ONE_ID,
         "Agent handoff",
         "2026-06-11T08:00:00Z",
         [
@@ -105,9 +164,9 @@ def test_get_local_session_transcript_formats_segments_as_markdown(tmp_path):
         ],
     )
 
-    result = get_local_session_transcript("session-1", str(tmp_path))
+    result = get_local_session_transcript(SESSION_ONE_ID, str(tmp_path))
 
-    assert result["id"] == "session-1"
+    assert result["id"] == SESSION_ONE_ID
     assert result["title"] == "Agent handoff"
     assert (
         "- [2026-06-11T08:00:01Z] You: Please read the transcript directly."
@@ -122,7 +181,7 @@ def test_get_local_session_transcript_formats_segments_as_markdown(tmp_path):
 def test_search_local_session_transcripts_returns_matching_snippet(tmp_path):
     write_session(
         tmp_path,
-        "session-1",
+        SESSION_ONE_ID,
         "Planning",
         "2026-06-11T08:00:00Z",
         [
@@ -135,7 +194,7 @@ def test_search_local_session_transcripts_returns_matching_snippet(tmp_path):
     )
     write_session(
         tmp_path,
-        "session-2",
+        SESSION_TWO_ID,
         "Codex MCP",
         "2026-06-12T08:00:00Z",
         [
@@ -150,7 +209,7 @@ def test_search_local_session_transcripts_returns_matching_snippet(tmp_path):
     result = search_local_session_transcripts("pull transcripts", str(tmp_path))
 
     assert len(result) == 1
-    assert result[0]["id"] == "session-2"
+    assert result[0]["id"] == SESSION_TWO_ID
     assert "pull transcripts directly" in result[0]["snippet"]
 
 
@@ -176,19 +235,26 @@ def test_local_session_tools_do_not_require_omi_api_key():
 def test_list_local_clips_returns_recent_agent_handoff_summaries(tmp_path):
     write_clip(
         tmp_path,
-        "older-clip",
+        OLDER_CLIP_ID,
         "Older CLIP",
         "2026-06-10T08:00:00Z",
-        [{"id": "s1", "startOffset": 0, "endOffset": 2, "text": "Old clip"}],
+        [
+            {
+                "id": fixture_id("clip:older:segment"),
+                "startOffset": 0,
+                "endOffset": 2,
+                "text": "Old clip",
+            }
+        ],
     )
     write_clip(
         tmp_path,
-        "newer-clip",
+        NEWER_CLIP_ID,
         "Newer CLIP",
         "2026-06-11T08:00:00Z",
         [
             {
-                "id": "s2",
+                "id": fixture_id("clip:newer:segment"),
                 "startOffset": 0,
                 "endOffset": 5,
                 "text": "Agent should inspect the screen change",
@@ -198,48 +264,61 @@ def test_list_local_clips_returns_recent_agent_handoff_summaries(tmp_path):
 
     result = list_local_clips(str(tmp_path))
 
-    assert [clip["id"] for clip in result] == ["newer-clip", "older-clip"]
+    assert [clip["id"] for clip in result] == [NEWER_CLIP_ID, OLDER_CLIP_ID]
     assert result[0]["transcript_segment_count"] == 1
     assert "screen change" in result[0]["transcript_preview"]
-    assert result[0]["video_path"].endswith("newer-clip/clip-video.mov")
+    assert result[0]["video_path"].endswith(f"{NEWER_CLIP_ID}/clip-video.mov")
 
 
 def test_get_local_clip_exposes_video_transcript_and_notes(tmp_path):
     write_clip(
         tmp_path,
-        "clip-1",
+        CLIP_ONE_ID,
         "Agent visual handoff",
         "2026-06-11T08:00:00Z",
-        [{"id": "s1", "startOffset": 1, "endOffset": 3, "text": "Look at this button"}],
+        [
+            {
+                "id": fixture_id("clip:one:segment"),
+                "startOffset": 1,
+                "endOffset": 3,
+                "text": "Look at this button",
+            }
+        ],
     )
 
-    result = get_local_clip("clip-1", str(tmp_path))
+    result = get_local_clip(CLIP_ONE_ID, str(tmp_path))
 
-    assert result["id"] == "clip-1"
+    assert result["id"] == CLIP_ONE_ID
     assert result["clip"]["title"] == "Agent visual handoff"
     assert result["transcript_segments"][0]["text"] == "Look at this button"
     assert result["post_notes"] == "Additional post-recording context."
-    assert result["video_path"].endswith("clip-1/clip-video.mov")
+    assert result["video_path"].endswith(f"{CLIP_ONE_ID}/clip-video.mov")
 
 
 def test_list_local_clip_files_returns_agent_packet_inventory(tmp_path):
-    write_clip(tmp_path, "clip-1", "Files", "2026-06-11T08:00:00Z")
-    video_path = tmp_path / "clip-1" / "clip-video.mov"
-    notes_path = tmp_path / "clip-1" / "notes.md"
+    write_clip(tmp_path, CLIP_ONE_ID, "Files", "2026-06-11T08:00:00Z")
+    video_path = tmp_path / CLIP_ONE_ID / "clip-video.mov"
+    notes_path = tmp_path / CLIP_ONE_ID / "notes.md"
     video_path.write_bytes(b"mov")
     notes_path.write_text("note", encoding="utf-8")
 
-    result = list_local_clip_files("clip-1", str(tmp_path))
+    result = list_local_clip_files(CLIP_ONE_ID, str(tmp_path))
 
-    assert result["id"] == "clip-1"
+    assert result["id"] == CLIP_ONE_ID
     relative_paths = [file["relative_path"] for file in result["files"]]
-    assert relative_paths == ["clip-video.mov", "clip.json", "notes.md"]
+    assert relative_paths == [
+        "clip-audio.wav",
+        "clip-video.mov",
+        "clip.json",
+        "notes.md",
+        "transcript.json",
+    ]
 
 
 def test_update_local_session_title_writes_session_json(tmp_path):
     write_session(
         tmp_path,
-        "session-1",
+        SESSION_ONE_ID,
         "Old title",
         "2026-06-11T08:00:00Z",
         [
@@ -252,16 +331,16 @@ def test_update_local_session_title_writes_session_json(tmp_path):
     )
 
     result = update_local_session_title(
-        "session-1", "Better meeting title", str(tmp_path)
+        SESSION_ONE_ID, "Better meeting title", str(tmp_path)
     )
 
-    assert result["id"] == "session-1"
+    assert result["id"] == SESSION_ONE_ID
     assert result["old_title"] == "Old title"
     assert result["new_title"] == "Better meeting title"
     assert result["title"] == "Better meeting title"
 
     updated_session = json.loads(
-        (tmp_path / "session-1" / "session.json").read_text(encoding="utf-8")
+        (tmp_path / SESSION_ONE_ID / "session.json").read_text(encoding="utf-8")
     )
     assert updated_session["title"] == "Better meeting title"
 
@@ -269,14 +348,14 @@ def test_update_local_session_title_writes_session_json(tmp_path):
 def test_update_local_session_title_rejects_blank_titles(tmp_path):
     write_session(
         tmp_path,
-        "session-1",
+        SESSION_ONE_ID,
         "Old title",
         "2026-06-11T08:00:00Z",
         [],
     )
 
     try:
-        update_local_session_title("session-1", "   ", str(tmp_path))
+        update_local_session_title(SESSION_ONE_ID, "   ", str(tmp_path))
     except ValueError as error:
         assert "title" in str(error).lower()
     else:
@@ -286,33 +365,42 @@ def test_update_local_session_title_rejects_blank_titles(tmp_path):
 def test_get_local_session_data_exposes_future_fields_and_file_path(tmp_path):
     write_session(
         tmp_path,
-        "session-1",
+        SESSION_ONE_ID,
         "Full feature session",
         "2026-06-11T08:00:00Z",
         [],
         extra={
             "futureFeature": {"enabled": True},
-            "attachments": [{"id": "image-1", "urlString": "/tmp/example.png"}],
+            "attachments": [
+                {
+                    "id": fixture_id("attachment:image"),
+                    "kind": "image",
+                    "source": "manual",
+                    "title": "Example image",
+                    "timestamp": "2026-06-11T08:00:00Z",
+                    "urlString": "/tmp/example.png",
+                }
+            ],
         },
     )
 
-    result = get_local_session_data("session-1", str(tmp_path))
+    result = get_local_session_data(SESSION_ONE_ID, str(tmp_path))
 
     assert result["session"]["futureFeature"] == {"enabled": True}
-    assert result["session"]["attachments"][0]["id"] == "image-1"
-    assert result["session_json_path"].endswith("session-1/session.json")
+    assert result["session"]["attachments"][0]["id"] == fixture_id("attachment:image")
+    assert result["session_json_path"].endswith(f"{SESSION_ONE_ID}/session.json")
 
 
 def test_list_local_session_files_returns_attachment_inventory(tmp_path):
-    write_session(tmp_path, "session-1", "Files", "2026-06-11T08:00:00Z", [])
-    attachments_dir = tmp_path / "session-1" / "Attachments"
+    write_session(tmp_path, SESSION_ONE_ID, "Files", "2026-06-11T08:00:00Z", [])
+    attachments_dir = tmp_path / SESSION_ONE_ID / "Attachments"
     attachments_dir.mkdir()
     image_path = attachments_dir / "screen.png"
     image_path.write_bytes(b"png")
 
-    result = list_local_session_files("session-1", str(tmp_path))
+    result = list_local_session_files(SESSION_ONE_ID, str(tmp_path))
 
-    assert result["id"] == "session-1"
+    assert result["id"] == SESSION_ONE_ID
     assert result["files"] == [
         {
             "path": str(image_path),
@@ -326,7 +414,7 @@ def test_list_local_session_files_returns_attachment_inventory(tmp_path):
 def test_update_local_session_fields_merges_top_level_future_fields(tmp_path):
     write_session(
         tmp_path,
-        "session-1",
+        SESSION_ONE_ID,
         "Field update",
         "2026-06-11T08:00:00Z",
         [],
@@ -334,24 +422,26 @@ def test_update_local_session_fields_merges_top_level_future_fields(tmp_path):
     )
 
     result = update_local_session_fields(
-        "session-1",
+        SESSION_ONE_ID,
         {"futureFeature": {"enabled": True}, "documentMarkdown": "# Summary"},
         str(tmp_path),
     )
 
     assert result["updated_fields"] == ["documentMarkdown", "futureFeature"]
     updated_session = json.loads(
-        (tmp_path / "session-1" / "session.json").read_text(encoding="utf-8")
+        (tmp_path / SESSION_ONE_ID / "session.json").read_text(encoding="utf-8")
     )
     assert updated_session["futureFeature"] == {"enabled": True}
     assert updated_session["documentMarkdown"] == "# Summary"
 
 
 def test_update_local_session_fields_rejects_identity_changes(tmp_path):
-    write_session(tmp_path, "session-1", "Field update", "2026-06-11T08:00:00Z", [])
+    write_session(tmp_path, SESSION_ONE_ID, "Field update", "2026-06-11T08:00:00Z", [])
 
     try:
-        update_local_session_fields("session-1", {"id": "different"}, str(tmp_path))
+        update_local_session_fields(
+            SESSION_ONE_ID, {"id": fixture_id("different")}, str(tmp_path)
+        )
     except ValueError as error:
         assert "id" in str(error)
     else:

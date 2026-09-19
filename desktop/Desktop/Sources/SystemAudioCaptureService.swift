@@ -302,6 +302,49 @@ class SystemAudioCaptureService: @unchecked Sendable {
     localMeetingLog("SystemAudioCapture: Stopped capturing")
   }
 
+  /// Stop the process tap and wait until CoreAudio can no longer deliver callbacks.
+  /// Recording writers must remain open until this completes.
+  func stopCaptureAndWait() async {
+    guard isCapturing else { return }
+    isCapturing = false
+    onAudioChunk = nil
+    onAudioLevel = nil
+
+    let procID = self.ioProcID
+    let aggregateDeviceID = self.aggregateDeviceID
+    let tapID = self.tapID
+
+    self.ioProcID = nil
+    self.aggregateDeviceID = kAudioObjectUnknown
+    self.tapID = kAudioObjectUnknown
+    lastAudioLevelDispatchTime = 0
+    lastDispatchedAudioLevel = 0
+
+    await withCheckedContinuation { continuation in
+      audioQueue.async { [self] in
+        if let procID, aggregateDeviceID != kAudioObjectUnknown {
+          AudioDeviceStop(aggregateDeviceID, procID)
+          AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
+        }
+        if aggregateDeviceID != kAudioObjectUnknown {
+          AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+        }
+        if tapID != kAudioObjectUnknown {
+          AudioHardwareDestroyProcessTap(tapID)
+        }
+
+        audioConverter = nil
+        inputFormat = nil
+        targetFormat = nil
+        sourceSampleRate = 0
+        conversionBuffers.reset()
+        continuation.resume()
+      }
+    }
+
+    localMeetingLog("SystemAudioCapture: Stopped capturing")
+  }
+
   /// Check if currently capturing
   var capturing: Bool {
     return isCapturing

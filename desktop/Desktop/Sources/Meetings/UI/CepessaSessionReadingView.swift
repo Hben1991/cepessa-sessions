@@ -3,10 +3,8 @@ import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The on-demand session window is a pure reading surface: nothing but the
-/// transcript text in a centered column. Every control (which session, the
-/// document language, export, transcribe) lives in the native window toolbar,
-/// so the content area stays clean. Opened from the floating bar's menu.
+/// The session reader keeps source audio, quality status, attachments, and
+/// transcript together, with library and export actions in the native toolbar.
 struct CepessaSessionReadingView: View {
   @ObservedObject private var model = CepessaSessionsStore.shared.model
 
@@ -16,6 +14,9 @@ struct CepessaSessionReadingView: View {
   @State private var enlargedImage: NSImage?
   @State private var renameTarget: LocalSessionTranscriptSegment?
   @State private var proposedSpeakerName = ""
+  @State private var renameSession = false
+  @State private var proposedTitle = ""
+  @State private var editError: String?
 
   private let inlineImageMaxHeight: CGFloat = 320
 
@@ -42,7 +43,8 @@ struct CepessaSessionReadingView: View {
       } else {
         emptyState(
           title: "No Session Open",
-          message: "Choose a session from the toolbar to read its transcript.",
+          message: model.recorderErrorMessage
+            ?? "Start a recording or import audio from the toolbar.",
           symbol: "rectangle.stack"
         )
       }
@@ -60,6 +62,19 @@ struct CepessaSessionReadingView: View {
         }
     )
     .background(zoomShortcuts)
+    .sheet(isPresented: $model.isSessionLibraryPresented) {
+      LocalSessionLibrarySheet(model: model)
+    }
+    .alert("Rename session", isPresented: $renameSession) {
+      TextField("Session title", text: $proposedTitle)
+      Button("Cancel", role: .cancel) {}
+      Button("Save") {
+        editError =
+          model.updateSessionTitle(proposedTitle)
+          ? nil : model.recorderErrorMessage ?? "The session title could not be saved."
+      }
+      .disabled(proposedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
     .overlay {
       if let enlargedImage {
         enlargedOverlay(enlargedImage)
@@ -79,7 +94,9 @@ struct CepessaSessionReadingView: View {
       }
       Button("Save") {
         if let speakerID = segment.speakerID {
-          _ = model.renameSpeaker(speakerID: speakerID, to: proposedSpeakerName)
+          editError =
+            model.renameSpeaker(speakerID: speakerID, to: proposedSpeakerName)
+            ? nil : model.recorderErrorMessage ?? "The speaker name could not be saved."
         }
         renameTarget = nil
       }
@@ -132,28 +149,109 @@ struct CepessaSessionReadingView: View {
     let items = session.transcriptTimelineItems
     let hasText = !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
-    if !hasText {
-      let status = CepessaStatusStyle.resolve(session.status)
-      emptyState(
-        title: pendingTitle(for: status),
-        message: pendingMessage(for: session, status: status),
-        symbol: status == .ready ? "waveform" : status.symbol
-      )
-    } else {
-      GeometryReader { proxy in
-        let width = columnWidth(available: proxy.size.width)
+    GeometryReader { geometry in
+      let width = columnWidth(available: geometry.size.width)
+      ScrollViewReader { scroller in
         ScrollView {
           VStack(alignment: .leading, spacing: sz(24)) {
-            ForEach(items) { item in
-              transcriptBlock(item, in: session, width: width)
+            sessionHeader(session)
+            if let audioURL = model.audioPlaybackURL(for: session), session.status != .recording {
+              LocalSessionAudioPlayer(
+                url: audioURL,
+                seekSeconds: model.insightReveal?.sessionID == session.id
+                  ? model.insightReveal?.audioOffsetSeconds : nil,
+                seekGeneration: model.insightReveal?.generation
+              )
+            }
+            LocalSessionInsightsView(model: model, session: session)
+            if !session.attachments.isEmpty {
+              LocalSessionAttachmentsView(
+                session: session, folder: model.sessionFolderURL(for: session.id))
+            }
+            Divider()
+            if hasText {
+              ForEach(items) { item in
+                transcriptBlock(item, in: session, width: width)
+                  .id(item.segment.id)
+              }
+            } else {
+              Text(pendingMessage(for: session, status: CepessaStatusStyle.resolve(session.status)))
+                .font(.body).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
             }
           }
           .frame(width: width, alignment: .leading)
           .frame(maxWidth: .infinity, alignment: .center)
-          .padding(.top, 36)
-          .padding(.bottom, 72)
+          .padding(.top, 28)
+          .padding(.bottom, 64)
+          .scrollIndicators(.hidden)
         }
-        .scrollIndicators(.hidden)
+        .onChange(of: model.insightReveal?.generation) { _, _ in
+          guard let reveal = model.insightReveal, reveal.sessionID == session.id else { return }
+          withAnimation(.easeInOut(duration: 0.2)) {
+            scroller.scrollTo(reveal.segmentID, anchor: .center)
+          }
+        }
+      }
+    }
+    .alert("Analyze with TypeSafe?", isPresented: consentBinding) {
+      Button("Cancel", role: .cancel) { model.declineInsightConsent() }
+      Button("Send transcript text") {
+        if let id = model.pendingInsightConsentSessionID {
+          model.confirmInsightConsent(for: id)
+        }
+      }
+    } message: {
+      Text(LocalSessionInsightPolicy.cloudDisclosure)
+    }
+  }
+
+  private var consentBinding: Binding<Bool> {
+    Binding(
+      get: { model.pendingInsightConsentSessionID != nil },
+      set: { if !$0 { model.declineInsightConsent() } }
+    )
+  }
+
+  private func sessionHeader(_ session: LocalSession) -> some View {
+    let notice = LocalSessionReadingNotice.resolve(session)
+    let progress = model.processingSnapshot(for: session.id)
+    let saveError = model.sessionSaveErrors[session.id]
+    return VStack(alignment: .leading, spacing: 12) {
+      HStack(alignment: .firstTextBaseline) {
+        Text(session.startedAt.formatted(date: .long, time: .shortened))
+          .font(.caption).foregroundStyle(.secondary)
+        Spacer()
+        Button("Rename") {
+          proposedTitle = session.title
+          renameSession = true
+        }
+        .buttonStyle(.borderless).font(.caption)
+        .accessibilityLabel("Rename session")
+      }
+      VStack(alignment: .leading, spacing: 6) {
+        Label(
+          saveError != nil ? "Changes not saved" : progress?.title ?? notice.title,
+          systemImage: saveError != nil
+            ? "exclamationmark.triangle"
+            : progress != nil
+              ? "waveform" : notice.needsReview ? "exclamationmark.triangle" : "doc.text"
+        )
+        .font(.system(size: 15, weight: .medium))
+        Text(saveError ?? progress?.detail ?? notice.detail)
+          .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        if let progress {
+          if let value = progress.progress {
+            ProgressView(value: value)
+          } else {
+            ProgressView().controlSize(.small)
+          }
+        }
+      }
+      .accessibilityElement(children: .combine)
+      if saveError == nil, let editError {
+        Label(editError, systemImage: "exclamationmark.triangle")
+          .font(.callout).foregroundStyle(.secondary)
       }
     }
   }
@@ -179,19 +277,17 @@ struct CepessaSessionReadingView: View {
     case .capturing:
       return "This session is still being captured. The transcript appears once you stop."
     case .working:
-      if let detail = model.processingStatusDetail?.trimmingCharacters(in: .whitespacesAndNewlines),
+      if let detail = model.processingSnapshot(for: session.id)?.detail.trimmingCharacters(
+        in: .whitespacesAndNewlines),
         !detail.isEmpty
       {
         return detail
       }
       return "Preparing the transcript on this Mac."
     case .needsAttention:
-      if let error = model.recorderErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
-        !error.isEmpty
-      {
-        return error
-      }
-      return "Processing stopped before a transcript was written. Try Transcribe from the toolbar."
+      return model.audioPlaybackURL(for: session) != nil
+        ? "Use Transcribe in the toolbar to try the saved recording again."
+        : "Use Import Audio to choose another recording."
     case .ready:
       return "The audio is saved. Run Transcribe from the toolbar to read it."
     }
@@ -202,40 +298,55 @@ struct CepessaSessionReadingView: View {
   ) -> some View {
     let segment = item.segment
     let images = timelineImages(for: item, in: session)
+    let isRightToLeft = LocalTranscriptTextDirection.isRightToLeft(segment.text)
 
     return VStack(alignment: .leading, spacing: sz(7)) {
       HStack(spacing: 8) {
         if !segment.speaker.trimmingCharacters(in: .whitespaces).isEmpty {
-          Text(segment.speaker.uppercased())
-            .font(.system(size: sz(11), weight: .semibold))
-            .foregroundColor(CepessaColors.textTertiary)
-            .tracking(0.4)
+          if let speakerID = segment.speakerID, session.transcriptionEvidence != nil {
+            Menu {
+              Button("Rename speaker…") {
+                proposedSpeakerName = segment.speaker
+                renameTarget = segment
+              }
+              if segment.identityStatus == .confirmed {
+                Button("Undo latest rename") {
+                  if !model.undoLatestSpeakerRename(speakerID: speakerID, in: session.id) {
+                    editError =
+                      model.recorderErrorMessage ?? "There is no saved speaker rename to undo."
+                  }
+                }
+              }
+            } label: {
+              Text(segment.speaker.uppercased())
+                .font(.system(size: sz(11), weight: .semibold))
+                .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel("Speaker actions for \(segment.speaker)")
+          } else {
+            Text(segment.speaker.uppercased())
+              .font(.system(size: sz(11), weight: .semibold))
+              .foregroundStyle(.secondary)
+              .tracking(0.4)
+          }
         }
 
         Text(timestampLabel(for: segment, in: session))
           .font(.system(size: sz(11), weight: .medium).monospacedDigit())
-          .foregroundColor(CepessaColors.textQuaternary)
+          .foregroundStyle(.secondary)
       }
+      .frame(maxWidth: .infinity, alignment: isRightToLeft ? .trailing : .leading)
 
-      Text(segment.text)
+      highlightedTranscript(segment, isRightToLeft: isRightToLeft)
         .font(.system(size: sz(15)))
         .foregroundColor(CepessaColors.textPrimary)
         .lineSpacing(sz(5))
         .textSelection(.enabled)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contextMenu {
-          if segment.speakerID != nil {
-            Button("Rename \(segment.speaker)") {
-              proposedSpeakerName = segment.speaker
-              renameTarget = segment
-            }
-            Button("Undo latest speaker rename") {
-              if let speakerID = segment.speakerID {
-                _ = model.undoLatestSpeakerRename(speakerID: speakerID)
-              }
-            }
-          }
-        }
+        .multilineTextAlignment(isRightToLeft ? .trailing : .leading)
+        .frame(maxWidth: .infinity, alignment: isRightToLeft ? .trailing : .leading)
+        .accessibilityLabel(segment.text)
 
       if !images.isEmpty {
         VStack(alignment: .leading, spacing: sz(8)) {
@@ -280,7 +391,9 @@ struct CepessaSessionReadingView: View {
 
     var seen = Set<UUID>()
     return attachments.compactMap { attachment in
-      guard !seen.contains(attachment.id), let image = attachmentImage(for: attachment) else {
+      guard !seen.contains(attachment.id),
+        let image = attachmentImage(for: attachment, in: session)
+      else {
         return nil
       }
       seen.insert(attachment.id)
@@ -288,16 +401,49 @@ struct CepessaSessionReadingView: View {
     }
   }
 
-  private func attachmentImage(for attachment: LocalSessionAttachment) -> NSImage? {
+  private func attachmentImage(
+    for attachment: LocalSessionAttachment,
+    in session: LocalSession
+  ) -> NSImage? {
     guard attachment.kind == .image || attachment.kind == .capture else { return nil }
-    guard let urlString = attachment.urlString else { return nil }
-    if urlString.hasPrefix("/") {
-      return NSImage(contentsOfFile: urlString)
+    guard let url = LocalSessionAttachmentResolver.localURL(
+      for: attachment,
+      in: model.sessionFolderURL(for: session.id)
+    ) else { return nil }
+    return NSImage(contentsOf: url)
+  }
+
+  private func highlightedTranscript(
+    _ segment: LocalSessionTranscriptSegment, isRightToLeft: Bool
+  ) -> Text {
+    let reveal = model.insightReveal
+    guard reveal?.segmentID == segment.id,
+      let range = reveal?.range,
+      range.isValid(in: segment.text),
+      let slice = LocalSessionInsightWindowBuilder.extract(range: range, from: segment.text)
+    else {
+      return Text(LocalTranscriptTextDirection.displayText(segment.text))
     }
-    if let url = URL(string: urlString), url.isFileURL {
-      return NSImage(contentsOf: url)
-    }
-    return nil
+    let prefixText =
+      LocalSessionInsightWindowBuilder.extract(
+        range: LocalSessionInsightTextRange(utf16Start: 0, utf16Length: range.utf16Start),
+        from: segment.text) ?? ""
+    let suffixText =
+      LocalSessionInsightWindowBuilder.extract(
+        range: LocalSessionInsightTextRange(
+          utf16Start: range.utf16End,
+          utf16Length: max(0, segment.text.utf16.count - range.utf16End)
+        ),
+        from: segment.text) ?? ""
+    let isolateStart = isRightToLeft ? "\u{2067}" : "\u{2066}"
+    var marked = AttributedString(slice)
+    marked.backgroundColor = CepessaColors.accentLight
+    marked.underlineStyle = .single
+    return Text(isolateStart)
+      + Text(prefixText)
+      + Text(marked)
+      + Text(suffixText)
+      + Text("\u{2069}")
   }
 
   private func timestampLabel(for segment: LocalSessionTranscriptSegment, in session: LocalSession)
@@ -355,19 +501,22 @@ struct CepessaSessionReadingView: View {
 final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbarItemValidation {
   private weak var model: LocalMeetingAppModel?
   private weak var window: NSWindow?
+  private let toolbar: NSToolbar
   private var cancellables: Set<AnyCancellable> = []
   private let exporter = LocalSessionRecapExporter()
 
   private let sessionItemID = NSToolbarItem.Identifier("cepessa.reading.session")
   private let exportItemID = NSToolbarItem.Identifier("cepessa.reading.export")
   private let transcribeItemID = NSToolbarItem.Identifier("cepessa.reading.transcribe")
+  private let importItemID = NSToolbarItem.Identifier("cepessa.reading.import")
 
   init(model: LocalMeetingAppModel, window: NSWindow) {
+    let toolbar = NSToolbar(identifier: "cepessa.reading.toolbar")
     self.model = model
     self.window = window
+    self.toolbar = toolbar
     super.init()
 
-    let toolbar = NSToolbar(identifier: "cepessa.reading.toolbar")
     toolbar.delegate = self
     toolbar.displayMode = .default
     toolbar.allowsUserCustomization = false
@@ -378,18 +527,21 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
     let publishers: [AnyPublisher<Void, Never>] = [
       model.$selectedSessionID.map { _ in () }.eraseToAnyPublisher(),
       model.$sessions.map { _ in () }.eraseToAnyPublisher(),
+      model.$processingSnapshots.map { _ in () }.eraseToAnyPublisher(),
+      model.$retranscribableSessionIDs.map { _ in () }.eraseToAnyPublisher(),
+      model.$isTranscribing.map { _ in () }.eraseToAnyPublisher(),
     ]
     Publishers.MergeMany(publishers)
       .receive(on: DispatchQueue.main)
-      .sink { [weak self, weak window] in
+      .sink { [weak self] in
         self?.refreshTitles()
-        window?.toolbar?.validateVisibleItems()
+        self?.toolbar.validateVisibleItems()
       }
       .store(in: &cancellables)
   }
 
   func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-    [sessionItemID, .flexibleSpace, transcribeItemID, exportItemID]
+    [sessionItemID, .flexibleSpace, importItemID, transcribeItemID, exportItemID]
   }
 
   func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -402,6 +554,14 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
     willBeInsertedIntoToolbar flag: Bool
   ) -> NSToolbarItem? {
     switch identifier {
+    case importItemID:
+      let item = NSToolbarItem(itemIdentifier: identifier)
+      item.label = "Import Audio"
+      item.image = NSImage(
+        systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Import audio")
+      item.target = self
+      item.action = #selector(importAction)
+      return item
     case sessionItemID:
       let item = NSMenuToolbarItem(itemIdentifier: identifier)
       item.title = currentSessionTitle
@@ -447,7 +607,7 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
       menu.addItem(empty)
       return menu
     }
-    for session in sessions {
+    for session in sessions.prefix(8) {
       let item = NSMenuItem(
         title: session.displayTitle, action: #selector(selectSessionAction(_:)), keyEquivalent: "")
       item.target = self
@@ -455,10 +615,18 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
       item.state = (session.id == model?.selectedSessionID) ? .on : .off
       menu.addItem(item)
     }
+    menu.addItem(.separator())
+    let browse = NSMenuItem(
+      title: "Browse All Sessions…", action: #selector(browseAction), keyEquivalent: "")
+    browse.target = self
+    menu.addItem(browse)
     return menu
   }
 
   // MARK: Actions
+
+  @objc private func importAction() { CepessaSessionsWindowController.shared.importAudio() }
+  @objc private func browseAction() { model?.isSessionLibraryPresented = true }
 
   @objc private func selectSessionAction(_ sender: NSMenuItem) {
     guard let id = sender.representedObject as? UUID else { return }
@@ -482,9 +650,9 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
     }
 
     panel.beginSheetModal(for: window) { [weak self] response in
-      guard response == .OK, let directory = panel.directoryURL, let self else { return }
+      guard response == .OK, let destination = panel.url, let self else { return }
       do {
-        _ = try self.exporter.exportTranscriptMarkdown(session: session, to: directory)
+        _ = try self.exporter.exportTranscriptMarkdown(session: session, toFile: destination)
       } catch {
         let alert = NSAlert(error: error)
         alert.messageText = "The transcript could not be exported"
@@ -516,8 +684,7 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
   }
 
   private func refreshTitles() {
-    guard let items = window?.toolbar?.items else { return }
-    for item in items {
+    for item in toolbar.items {
       if item.itemIdentifier == sessionItemID, let menuItem = item as? NSMenuToolbarItem {
         menuItem.title = currentSessionTitle
         menuItem.menu = sessionMenu()
@@ -526,6 +693,21 @@ final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbar
   }
 
   func setVisible(_ isVisible: Bool) {
-    window?.toolbar?.isVisible = isVisible
+    guard let window else { return }
+    guard isVisible else {
+      // Do not hide or mutate a toolbar owned by the Clips hierarchy.
+      if window.toolbar === toolbar {
+        toolbar.isVisible = false
+      }
+      return
+    }
+
+    if window.toolbar !== toolbar {
+      window.toolbar = toolbar
+    }
+    window.toolbarStyle = .unified
+    toolbar.isVisible = true
+    refreshTitles()
+    toolbar.validateVisibleItems()
   }
 }

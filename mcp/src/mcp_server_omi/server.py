@@ -1,11 +1,19 @@
-import os
-from enum import Enum
 import json
-from typing import Any, List, Optional
-from datetime import datetime, timedelta
-from pathlib import Path
 import requests
 import logging
+import fcntl
+import math
+import os
+import re
+import stat
+import tempfile
+import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+from enum import Enum
+from pathlib import Path
+from typing import Any, List, NoReturn, Optional
+from uuid import UUID
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
@@ -76,6 +84,54 @@ DEFAULT_CEPESSA_SESSIONS_ROOT = (
     Path.home() / "Library/Application Support/Cepessa/Sessions"
 )
 DEFAULT_CEPESSA_CLIPS_ROOT = Path.home() / "Library/Application Support/Cepessa/Clips"
+MAX_LOCAL_JSON_BYTES = 32 * 1024 * 1024
+GENERATED_SESSION_PACKAGE_DIRECTORY = "Exports"
+GENERATED_SESSION_PACKAGE_NAMES = ("session-package.md", "session-package.json")
+LOCAL_ID_PATTERN = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
+SWIFT_ISO8601_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$"
+)
+SESSION_STATUS_VALUES = {"recording", "transcribing", "ready", "failed"}
+SESSION_TITLE_ORIGIN_VALUES = {"automatic", "user", "imported"}
+SESSION_SOURCE_VALUES = {"microphone", "system", "mixed", "imported"}
+SESSION_IDENTITY_VALUES = {"anonymous", "confirmed", "unavailable"}
+SESSION_CONTENT_TYPE_VALUES = {
+    "meeting",
+    "voiceNote",
+    "videoCommentary",
+    "generalTranscript",
+}
+SESSION_ATTACHMENT_KIND_VALUES = {"file", "image", "audio", "link", "capture"}
+SESSION_ATTACHMENT_SOURCE_VALUES = {
+    "manual",
+    "transcript",
+    "floatingBar",
+    "imported",
+}
+SESSION_CAPTURE_KIND_VALUES = {
+    "floatingBarCapture",
+    "screenCapture",
+    "clipboardCapture",
+    "note",
+}
+SESSION_EVIDENCE_DISPOSITION_VALUES = {"ready", "degraded", "failed"}
+SESSION_CHAT_ROLE_VALUES = {"user", "assistant"}
+SESSION_CHAT_STATUS_VALUES = {"idle", "sending", "failed"}
+SESSION_DOCUMENT_OPERATION_VALUES = {"read", "update", "delete"}
+
+
+class LocalSessionValidationError(ValueError):
+    """Raised when a session cannot be decoded by the Swift app models."""
+
+
+class LocalSessionPathError(ValueError):
+    """Raised when a local MCP path is outside its configured root or unsafe."""
+
+
+class LocalSessionLockError(LocalSessionPathError):
+    """Raised when a local session lock cannot be acquired safely."""
 
 
 class OmiTools(str, Enum):
@@ -238,7 +294,18 @@ class ListLocalSessionFiles(BaseModel):
 class UpdateLocalSessionFields(BaseModel):
     session_id: str = Field(description="The local Cepessa session ID to update.")
     fields: dict[str, Any] = Field(
-        description="Top-level JSON fields to merge into session.json. This enables current and future app-backed session features."
+        description=(
+            "Top-level JSON fields to merge into session.json. User-editable fields "
+            "include title, titleOrigin, recap, documentMarkdown, documentChat, and "
+            "future user metadata. Capture and transcription-owned fields such as "
+            "status, timestamps, transcriptSegments, captureArtifacts, "
+            "audioArtifacts, transcriptionEvidence, and latestTranscriptionAttempt "
+            "are rejected when changed."
+        )
+    )
+    sessions_root: Optional[str] = Field(
+        description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
+        default=None,
     )
 
 
@@ -324,7 +391,7 @@ def get_memories(
     categories: List[MemoryCategory] = [],
 ) -> List:
     logger.info(f"Getting memories with params: {offset}, {limit}, {categories}")
-    params = {"offset": offset, "limit": limit}
+    params: dict[str, Any] = {"offset": offset, "limit": limit}
     if categories:
         params["categories"] = ",".join([c.value for c in categories])
     logger.info(f"get_memories params: {params}")
@@ -376,7 +443,7 @@ def get_conversations(
     limit: int = 100,
     offset: int = 0,
 ) -> List:
-    params = {"limit": limit, "offset": offset}
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
     if start_date:
         try:
             params["start_date"] = datetime.strptime(start_date, "%Y-%m-%d").isoformat()
@@ -426,41 +493,978 @@ def _local_clips_root(clips_root: Optional[str] = None) -> Path:
     return DEFAULT_CEPESSA_CLIPS_ROOT
 
 
+def _validated_local_root(root: Path, label: str, *, allow_missing: bool) -> Path:
+    """Return a canonical configured root, rejecting a symlink root."""
+    root = root.expanduser()
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    try:
+        root_stat = root.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return root
+        raise FileNotFoundError(f"{label} root not found: {root}") from None
+    except OSError as error:
+        raise LocalSessionPathError(f"Cannot inspect {label} root: {root}") from error
+    if stat.S_ISLNK(root_stat.st_mode):
+        raise LocalSessionPathError(f"{label} root must not be a symlink: {root}")
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise LocalSessionPathError(f"{label} root is not a directory: {root}")
+    try:
+        return root.resolve(strict=True)
+    except OSError as error:
+        raise LocalSessionPathError(f"Cannot resolve {label} root: {root}") from error
+
+
+def _validate_local_id(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not LOCAL_ID_PATTERN.fullmatch(value):
+        raise LocalSessionValidationError(f"{field} must be a UUID string.")
+    try:
+        UUID(value)
+    except ValueError as error:
+        raise LocalSessionValidationError(f"{field} must be a UUID string.") from error
+    return value
+
+
+def _validated_regular_file(
+    path: Path, *, label: str, max_bytes: Optional[int] = None
+) -> Path:
+    try:
+        file_stat = path.lstat()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"{label} not found: {path}") from None
+    except OSError as error:
+        raise LocalSessionPathError(f"Cannot inspect {label}: {path}") from error
+    if stat.S_ISLNK(file_stat.st_mode):
+        raise LocalSessionPathError(f"{label} must not be a symlink: {path}")
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise LocalSessionPathError(f"{label} must be a regular file: {path}")
+    if file_stat.st_nlink != 1:
+        raise LocalSessionPathError(f"{label} must not be hard-linked: {path}")
+    if max_bytes is not None and file_stat.st_size > max_bytes:
+        raise LocalSessionPathError(
+            f"{label} exceeds the {max_bytes}-byte limit: {path}"
+        )
+    return path
+
+
+def _validated_bundle_json(
+    root: Path, bundle_id: str, filename: str, label: str
+) -> Path:
+    bundle_id = _validate_local_id(bundle_id, f"{label} ID")
+    bundle = root / bundle_id
+    try:
+        bundle_stat = bundle.lstat()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"{label} not found: {bundle_id}") from None
+    except OSError as error:
+        raise LocalSessionPathError(f"Cannot inspect {label}: {bundle_id}") from error
+    if stat.S_ISLNK(bundle_stat.st_mode):
+        raise LocalSessionPathError(
+            f"{label} directory must not be a symlink: {bundle}"
+        )
+    if not stat.S_ISDIR(bundle_stat.st_mode):
+        raise LocalSessionPathError(f"{label} path is not a directory: {bundle}")
+    try:
+        if bundle.resolve(strict=True).parent != root:
+            raise LocalSessionPathError(
+                f"{label} directory is outside its configured root."
+            )
+    except OSError as error:
+        raise LocalSessionPathError(
+            f"Cannot resolve {label} directory: {bundle}"
+        ) from error
+    return _validated_regular_file(
+        bundle / filename, label=f"{label} manifest", max_bytes=MAX_LOCAL_JSON_BYTES
+    )
+
+
+@contextmanager
+def _local_session_lock(session_json_path: Path):
+    """Hold the same bounded advisory lock used by the desktop store."""
+    lock_path = session_json_path.parent / ".session.lock"
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        file_descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as error:
+        raise LocalSessionLockError(
+            f"Cannot securely open local session lock: {lock_path}"
+        ) from error
+    try:
+        lock_stat = os.fstat(file_descriptor)
+        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
+            raise LocalSessionLockError(
+                f"Local session lock is not a private regular file: {lock_path}"
+            )
+        deadline = time.monotonic() + 1.0
+        while True:
+            try:
+                fcntl.flock(file_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LocalSessionLockError(
+                        f"Timed out waiting for local session lock: {lock_path}"
+                    )
+                time.sleep(0.01)
+            except OSError as error:
+                raise LocalSessionLockError(
+                    f"Cannot acquire local session lock: {lock_path}"
+                ) from error
+        yield
+    finally:
+        try:
+            fcntl.flock(file_descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(file_descriptor)
+
+
+def _reject_json_constant(value: str) -> NoReturn:
+    raise ValueError(f"Non-finite JSON number is not supported: {value}")
+
+
 def _read_local_session(session_json_path: Path) -> dict:
-    with session_json_path.open("r", encoding="utf-8") as file:
-        return json.load(file)
+    _validated_regular_file(
+        session_json_path, label="local JSON", max_bytes=MAX_LOCAL_JSON_BYTES
+    )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        file_descriptor = os.open(session_json_path, flags)
+    except OSError as error:
+        raise LocalSessionPathError(
+            f"Cannot securely open local JSON: {session_json_path}"
+        ) from error
+    try:
+        opened_stat = os.fstat(file_descriptor)
+        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
+            raise LocalSessionPathError(
+                f"Local JSON changed to an unsafe file: {session_json_path}"
+            )
+        with os.fdopen(file_descriptor, "rb") as file:
+            file_descriptor = -1
+            raw = file.read(MAX_LOCAL_JSON_BYTES + 1)
+        if len(raw) > MAX_LOCAL_JSON_BYTES:
+            raise LocalSessionPathError(
+                f"Local JSON exceeds the {MAX_LOCAL_JSON_BYTES}-byte limit: {session_json_path}"
+            )
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise LocalSessionValidationError(
+                f"Local JSON is not UTF-8: {session_json_path}"
+            ) from error
+        try:
+            value = json.loads(decoded, parse_constant=_reject_json_constant)
+        except json.JSONDecodeError as error:
+            raise LocalSessionValidationError(
+                f"Invalid local JSON: {session_json_path}"
+            ) from error
+        except ValueError as error:
+            raise LocalSessionValidationError(
+                f"Invalid local JSON value: {session_json_path}"
+            ) from error
+        if not isinstance(value, dict):
+            raise LocalSessionValidationError(
+                f"Local JSON must contain an object: {session_json_path}"
+            )
+        return value
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
 
 
 def _write_local_session(session_json_path: Path, session: dict) -> None:
-    temporary_path = session_json_path.with_suffix(".json.tmp")
-    with temporary_path.open("w", encoding="utf-8") as file:
-        json.dump(session, file, ensure_ascii=False, indent=2)
-        file.write("\n")
-    temporary_path.replace(session_json_path)
+    """Atomically replace a validated session manifest without following links."""
+    parent = session_json_path.parent
+    parent_stat = parent.lstat()
+    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
+        raise LocalSessionPathError(f"Session directory is unsafe: {parent}")
+    existing_mode = 0o600
+    try:
+        existing_stat = session_json_path.lstat()
+    except FileNotFoundError:
+        existing_stat = None
+    if existing_stat is not None:
+        _validated_regular_file(
+            session_json_path, label="local JSON", max_bytes=MAX_LOCAL_JSON_BYTES
+        )
+        existing_mode = stat.S_IMODE(existing_stat.st_mode)
+    temporary_path: Optional[Path] = None
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".session-", suffix=".tmp", dir=str(parent)
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(file_descriptor, existing_mode)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as file:
+            file_descriptor = -1
+            json.dump(session, file, ensure_ascii=False, indent=2, allow_nan=False)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary_path, session_json_path)
+        temporary_path = None
+        try:
+            directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _invalidate_generated_session_packages(session_json_path: Path) -> None:
+    """Remove only the desktop-generated package caches before metadata changes."""
+    exports_directory = session_json_path.parent / GENERATED_SESSION_PACKAGE_DIRECTORY
+    try:
+        exports_stat = exports_directory.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(exports_stat.st_mode) or not stat.S_ISDIR(exports_stat.st_mode):
+        raise LocalSessionPathError(
+            f"Generated package directory is unsafe: {exports_directory}"
+        )
+
+    for name in GENERATED_SESSION_PACKAGE_NAMES:
+        cache_path = exports_directory / name
+        try:
+            cache_stat = cache_path.lstat()
+        except FileNotFoundError:
+            continue
+        if (
+            stat.S_ISLNK(cache_stat.st_mode)
+            or not stat.S_ISREG(cache_stat.st_mode)
+            or cache_stat.st_nlink != 1
+        ):
+            raise LocalSessionPathError(
+                f"Generated package cache is unsafe: {cache_path}"
+            )
+        try:
+            cache_path.unlink()
+        except OSError as error:
+            raise LocalSessionPathError(
+                f"Cannot invalidate generated package cache: {cache_path}"
+            ) from error
 
 
 def _local_session_paths(sessions_root: Optional[str] = None) -> list[Path]:
-    root = _local_sessions_root(sessions_root)
+    root = _validated_local_root(
+        _local_sessions_root(sessions_root), "sessions", allow_missing=True
+    )
     if not root.exists():
         return []
-    return sorted(root.glob("*/session.json"))
+    paths = []
+    for child in root.iterdir():
+        try:
+            child_stat = child.lstat()
+            if stat.S_ISLNK(child_stat.st_mode) or not stat.S_ISDIR(child_stat.st_mode):
+                continue
+            _validate_local_id(child.name, "session ID")
+            paths.append(
+                _validated_regular_file(
+                    child / "session.json",
+                    label="session manifest",
+                    max_bytes=MAX_LOCAL_JSON_BYTES,
+                )
+            )
+        except (
+            FileNotFoundError,
+            LocalSessionPathError,
+            LocalSessionValidationError,
+            OSError,
+        ):
+            continue
+    return sorted(paths)
 
 
 def _local_clip_paths(clips_root: Optional[str] = None) -> list[Path]:
-    root = _local_clips_root(clips_root)
+    root = _validated_local_root(
+        _local_clips_root(clips_root), "clips", allow_missing=True
+    )
     if not root.exists():
         return []
-    return sorted(root.glob("*/clip.json"))
+    paths = []
+    for child in root.iterdir():
+        try:
+            child_stat = child.lstat()
+            if stat.S_ISLNK(child_stat.st_mode) or not stat.S_ISDIR(child_stat.st_mode):
+                continue
+            _validate_local_id(child.name, "CLIP ID")
+            paths.append(
+                _validated_regular_file(
+                    child / "clip.json",
+                    label="CLIP manifest",
+                    max_bytes=MAX_LOCAL_JSON_BYTES,
+                )
+            )
+        except (
+            FileNotFoundError,
+            LocalSessionPathError,
+            LocalSessionValidationError,
+            OSError,
+        ):
+            continue
+    return sorted(paths)
+
+
+def _expect_object(value: Any, path: str) -> dict:
+    if not isinstance(value, dict):
+        raise LocalSessionValidationError(f"{path} must be an object.")
+    return value
+
+
+def _expect_list(value: Any, path: str) -> list:
+    if not isinstance(value, list):
+        raise LocalSessionValidationError(f"{path} must be an array.")
+    return value
+
+
+def _expect_string(value: Any, path: str) -> str:
+    if not isinstance(value, str):
+        raise LocalSessionValidationError(f"{path} must be a string.")
+    return value
+
+
+def _expect_number(value: Any, path: str) -> float | int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        raise LocalSessionValidationError(f"{path} must be a finite number.")
+    return value
+
+
+def _expect_integer(value: Any, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LocalSessionValidationError(f"{path} must be an integer.")
+    return value
+
+
+def _expect_bool(value: Any, path: str) -> bool:
+    if not isinstance(value, bool):
+        raise LocalSessionValidationError(f"{path} must be a boolean.")
+    return value
+
+
+def _expect_enum(value: Any, values: set[str], path: str) -> str:
+    value = _expect_string(value, path)
+    if value not in values:
+        raise LocalSessionValidationError(f"{path} has unsupported value: {value}")
+    return value
+
+
+def _expect_date(value: Any, path: str) -> str:
+    value = _expect_string(value, path)
+    if not SWIFT_ISO8601_PATTERN.fullmatch(value):
+        raise LocalSessionValidationError(
+            f"{path} must be an ISO-8601 date supported by Swift."
+        )
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise LocalSessionValidationError(
+            f"{path} must be a valid ISO-8601 date."
+        ) from error
+    return value
+
+
+def _validate_json_value(value: Any, path: str = "value") -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise LocalSessionValidationError(f"{path} contains a non-finite number.")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_value(item, f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise LocalSessionValidationError(
+                    f"{path} has a non-string object key."
+                )
+            _validate_json_value(item, f"{path}.{key}")
+        return
+    raise LocalSessionValidationError(
+        f"{path} contains a value that cannot be represented as JSON."
+    )
+
+
+def _json_values_equal(left: Any, right: Any) -> bool:
+    return json.dumps(
+        left, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ) == json.dumps(right, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _optional(value: dict, key: str, path: str) -> Any:
+    return value.get(key) if key in value else None
+
+
+def _decoded_array(value: dict, key: str, path: str) -> list:
+    """Match Swift decodeIfPresent(... ) ?? [] for legacy null arrays."""
+    raw = value.get(key)
+    return [] if raw is None else _expect_list(raw, f"{path}.{key}")
+
+
+def _validate_transcript_segment(segment: Any, path: str) -> None:
+    segment = _expect_object(segment, path)
+    _validate_local_id(segment.get("id"), f"{path}.id")
+    _expect_string(segment.get("speaker"), f"{path}.speaker")
+    _expect_string(segment.get("text"), f"{path}.text")
+    _expect_date(segment.get("timestamp"), f"{path}.timestamp")
+    if _optional(segment, "endTimestamp", path) is not None:
+        _expect_date(segment["endTimestamp"], f"{path}.endTimestamp")
+    if _optional(segment, "speakerID", path) is not None:
+        _expect_string(segment["speakerID"], f"{path}.speakerID")
+    if _optional(segment, "source", path) is not None:
+        _expect_enum(segment["source"], SESSION_SOURCE_VALUES, f"{path}.source")
+    if _optional(segment, "identityStatus", path) is not None:
+        _expect_enum(
+            segment["identityStatus"], SESSION_IDENTITY_VALUES, f"{path}.identityStatus"
+        )
+    if _optional(segment, "uncertainty", path) is not None:
+        for index, item in enumerate(
+            _expect_list(segment["uncertainty"], f"{path}.uncertainty")
+        ):
+            _expect_string(item, f"{path}.uncertainty[{index}]")
+
+
+def _validate_recap_section(section: Any, path: str) -> None:
+    section = _expect_object(section, path)
+    _validate_local_id(section.get("id"), f"{path}.id")
+    # Swift's custom decoder maps unknown recap kinds to `.notes`; preserve any
+    # string here so MCP can round-trip that forward-compatible behavior.
+    _expect_string(section.get("kind"), f"{path}.kind")
+    _expect_string(section.get("title"), f"{path}.title")
+    _expect_string(section.get("summary"), f"{path}.summary")
+    for index, bullet in enumerate(
+        _expect_list(section.get("bullets"), f"{path}.bullets")
+    ):
+        _expect_string(bullet, f"{path}.bullets[{index}]")
+    for key in ("anchorTimestamp",):
+        if _optional(section, key, path) is not None:
+            _expect_date(section[key], f"{path}.{key}")
+    for key in ("startOffset", "endOffset"):
+        if _optional(section, key, path) is not None:
+            _expect_number(section[key], f"{path}.{key}")
+
+
+def _validate_recap(recap: Any, path: str) -> None:
+    recap = _expect_object(recap, path)
+    _expect_string(recap.get("overview"), f"{path}.overview")
+    if _optional(recap, "generatedAt", path) is not None:
+        _expect_date(recap["generatedAt"], f"{path}.generatedAt")
+    for index, section in enumerate(
+        _expect_list(recap.get("sections"), f"{path}.sections")
+    ):
+        _validate_recap_section(section, f"{path}.sections[{index}]")
+
+
+def _validate_attachment(attachment: Any, path: str) -> None:
+    attachment = _expect_object(attachment, path)
+    _validate_local_id(attachment.get("id"), f"{path}.id")
+    _expect_enum(attachment.get("kind"), SESSION_ATTACHMENT_KIND_VALUES, f"{path}.kind")
+    _expect_enum(
+        attachment.get("source"), SESSION_ATTACHMENT_SOURCE_VALUES, f"{path}.source"
+    )
+    _expect_string(attachment.get("title"), f"{path}.title")
+    _expect_date(attachment.get("timestamp"), f"{path}.timestamp")
+    if _optional(attachment, "sessionOffset", path) is not None:
+        _expect_number(attachment["sessionOffset"], f"{path}.sessionOffset")
+    for key in ("fileName", "mimeType", "urlString", "note"):
+        if _optional(attachment, key, path) is not None:
+            _expect_string(attachment[key], f"{path}.{key}")
+    if _optional(attachment, "transcriptSegmentID", path) is not None:
+        _validate_local_id(
+            attachment["transcriptSegmentID"], f"{path}.transcriptSegmentID"
+        )
+
+
+def _validate_capture_artifact(artifact: Any, path: str) -> None:
+    artifact = _expect_object(artifact, path)
+    _validate_local_id(artifact.get("id"), f"{path}.id")
+    _expect_enum(artifact.get("kind"), SESSION_CAPTURE_KIND_VALUES, f"{path}.kind")
+    _expect_string(artifact.get("title"), f"{path}.title")
+    _expect_date(artifact.get("capturedAt"), f"{path}.capturedAt")
+    if _optional(artifact, "sessionOffset", path) is not None:
+        _expect_number(artifact["sessionOffset"], f"{path}.sessionOffset")
+    for index, identifier in enumerate(
+        _expect_list(artifact.get("attachmentIDs"), f"{path}.attachmentIDs")
+    ):
+        _validate_local_id(identifier, f"{path}.attachmentIDs[{index}]")
+    if _optional(artifact, "notes", path) is not None:
+        _expect_string(artifact["notes"], f"{path}.notes")
+    if _optional(artifact, "transcriptSegmentID", path) is not None:
+        _validate_local_id(
+            artifact["transcriptSegmentID"], f"{path}.transcriptSegmentID"
+        )
+
+
+def _validate_audio_artifacts(audio: Any, path: str) -> None:
+    audio = _expect_object(audio, path)
+    for key in (
+        "micFileName",
+        "micTranscriptFileName",
+        "systemFileName",
+        "mixedFileName",
+    ):
+        if _optional(audio, key, path) is not None:
+            _expect_string(audio[key], f"{path}.{key}")
+    if _optional(audio, "importedFileName", path) is not None:
+        _safe_bundle_filename(audio["importedFileName"], f"{path}.importedFileName")
+
+
+def _validate_content_classification(classification: Any, path: str) -> None:
+    classification = _expect_object(classification, path)
+    _expect_enum(
+        classification.get("type"), SESSION_CONTENT_TYPE_VALUES, f"{path}.type"
+    )
+    _expect_number(classification.get("confidence"), f"{path}.confidence")
+    _expect_string(classification.get("rationale"), f"{path}.rationale")
+    _expect_date(classification.get("generatedAt"), f"{path}.generatedAt")
+
+
+def _validate_transcription_evidence(evidence: Any, path: str) -> None:
+    evidence = _expect_object(evidence, path)
+    _expect_string(evidence.get("runID"), f"{path}.runID")
+    _expect_integer(evidence.get("revision"), f"{path}.revision")
+    _expect_enum(
+        evidence.get("disposition"),
+        SESSION_EVIDENCE_DISPOSITION_VALUES,
+        f"{path}.disposition",
+    )
+    _expect_string(evidence.get("contentHash"), f"{path}.contentHash")
+    if _optional(evidence, "parentContentHash", path) is not None:
+        _expect_string(evidence["parentContentHash"], f"{path}.parentContentHash")
+    _expect_string(evidence.get("runFileName"), f"{path}.runFileName")
+    _expect_string(evidence.get("outboxFileName"), f"{path}.outboxFileName")
+    for index, issue in enumerate(
+        _expect_list(evidence.get("issues"), f"{path}.issues")
+    ):
+        _expect_string(issue, f"{path}.issues[{index}]")
+    if _optional(evidence, "isComplete", path) is not None:
+        _expect_bool(evidence["isComplete"], f"{path}.isComplete")
+    if _optional(evidence, "speechCoverage", path) is not None:
+        coverage = _expect_number(evidence["speechCoverage"], f"{path}.speechCoverage")
+        if not 0 <= coverage <= 1:
+            raise LocalSessionValidationError(
+                f"{path}.speechCoverage must be between 0 and 1."
+            )
+    if _optional(evidence, "hasVerifiableTimestamps", path) is not None:
+        _expect_bool(
+            evidence["hasVerifiableTimestamps"],
+            f"{path}.hasVerifiableTimestamps",
+        )
+
+
+def _validate_source_citation(citation: Any, path: str) -> None:
+    citation = _expect_object(citation, path)
+    _validate_local_id(citation.get("id"), f"{path}.id")
+    if _optional(citation, "segmentID", path) is not None:
+        _validate_local_id(citation["segmentID"], f"{path}.segmentID")
+    _expect_string(citation.get("title"), f"{path}.title")
+    _expect_string(citation.get("excerpt"), f"{path}.excerpt")
+
+
+def _validate_recap_patch(patch: Any, path: str) -> None:
+    patch = _expect_object(patch, path)
+    if _optional(patch, "overview", path) is not None:
+        _expect_string(patch["overview"], f"{path}.overview")
+    for index, section in enumerate(
+        _expect_list(patch.get("sections"), f"{path}.sections")
+    ):
+        section = _expect_object(section, f"{path}.sections[{index}]")
+        _expect_string(section.get("kind"), f"{path}.sections[{index}].kind")
+        _expect_string(section.get("title"), f"{path}.sections[{index}].title")
+        _expect_string(section.get("summary"), f"{path}.sections[{index}].summary")
+        for bullet_index, bullet in enumerate(
+            _expect_list(section.get("bullets"), f"{path}.sections[{index}].bullets")
+        ):
+            _expect_string(bullet, f"{path}.sections[{index}].bullets[{bullet_index}]")
+
+
+def _validate_edit_proposal(proposal: Any, path: str) -> None:
+    proposal = _expect_object(proposal, path)
+    _expect_string(proposal.get("assistantMessage"), f"{path}.assistantMessage")
+    if _optional(proposal, "operation", path) is not None:
+        _expect_enum(
+            proposal["operation"],
+            SESSION_DOCUMENT_OPERATION_VALUES,
+            f"{path}.operation",
+        )
+    for key in ("sessionTitle", "documentMarkdown"):
+        if _optional(proposal, key, path) is not None:
+            _expect_string(proposal[key], f"{path}.{key}")
+    if _optional(proposal, "recapPatch", path) is not None:
+        _validate_recap_patch(proposal["recapPatch"], f"{path}.recapPatch")
+    for index, patch in enumerate(_decoded_array(proposal, "transcriptPatches", path)):
+        patch = _expect_object(patch, f"{path}.transcriptPatches[{index}]")
+        _validate_local_id(
+            patch.get("segmentID"), f"{path}.transcriptPatches[{index}].segmentID"
+        )
+        _expect_string(patch.get("text"), f"{path}.transcriptPatches[{index}].text")
+    for index, rename in enumerate(_decoded_array(proposal, "speakerRenames", path)):
+        rename = _expect_object(rename, f"{path}.speakerRenames[{index}]")
+        _expect_string(rename.get("oldName"), f"{path}.speakerRenames[{index}].oldName")
+        _expect_string(rename.get("newName"), f"{path}.speakerRenames[{index}].newName")
+    for array_name in ("warnings",):
+        for index, item in enumerate(_decoded_array(proposal, array_name, path)):
+            _expect_string(item, f"{path}.{array_name}[{index}]")
+    for index, citation in enumerate(_decoded_array(proposal, "sourceCitations", path)):
+        _validate_source_citation(citation, f"{path}.sourceCitations[{index}]")
+
+
+def _validate_document_chat(chat: Any, path: str) -> None:
+    chat = _expect_object(chat, path)
+    for index, message in enumerate(
+        _expect_list(chat.get("messages"), f"{path}.messages")
+    ):
+        message = _expect_object(message, f"{path}.messages[{index}]")
+        _validate_local_id(message.get("id"), f"{path}.messages[{index}].id")
+        _expect_enum(
+            message.get("role"),
+            SESSION_CHAT_ROLE_VALUES,
+            f"{path}.messages[{index}].role",
+        )
+        _expect_string(message.get("text"), f"{path}.messages[{index}].text")
+        _expect_date(message.get("createdAt"), f"{path}.messages[{index}].createdAt")
+        for citation_index, citation in enumerate(
+            _decoded_array(message, "sourceCitations", f"{path}.messages[{index}]")
+        ):
+            _validate_source_citation(
+                citation, f"{path}.messages[{index}].sourceCitations[{citation_index}]"
+            )
+    if _optional(chat, "pendingProposal", path) is not None:
+        _validate_edit_proposal(chat["pendingProposal"], f"{path}.pendingProposal")
+    if _optional(chat, "undoSnapshot", path) is not None:
+        snapshot = _expect_object(chat["undoSnapshot"], f"{path}.undoSnapshot")
+        _expect_string(snapshot.get("title"), f"{path}.undoSnapshot.title")
+        if _optional(snapshot, "documentMarkdown", f"{path}.undoSnapshot") is not None:
+            _expect_string(
+                snapshot["documentMarkdown"], f"{path}.undoSnapshot.documentMarkdown"
+            )
+        _validate_recap(snapshot.get("recap"), f"{path}.undoSnapshot.recap")
+        for index, segment in enumerate(
+            _expect_list(
+                snapshot.get("transcriptSegments"),
+                f"{path}.undoSnapshot.transcriptSegments",
+            )
+        ):
+            _validate_transcript_segment(
+                segment, f"{path}.undoSnapshot.transcriptSegments[{index}]"
+            )
+        _expect_date(snapshot.get("createdAt"), f"{path}.undoSnapshot.createdAt")
+    _expect_enum(chat.get("status"), SESSION_CHAT_STATUS_VALUES, f"{path}.status")
+    if _optional(chat, "errorMessage", path) is not None:
+        _expect_string(chat["errorMessage"], f"{path}.errorMessage")
+    for key in ("createdAt", "updatedAt"):
+        if _optional(chat, key, path) is not None:
+            _expect_date(chat[key], f"{path}.{key}")
+
+
+def _validate_local_session(session: Any, session_id: Optional[str] = None) -> dict:
+    session = _expect_object(session, "session")
+    _validate_json_value(session, "session")
+    identifier = _validate_local_id(session.get("id"), "session.id")
+    if session_id is not None:
+        requested_id = _validate_local_id(session_id, "session ID")
+        if identifier.casefold() != requested_id.casefold():
+            raise LocalSessionValidationError("session.id must match its directory ID.")
+    _expect_string(session.get("title"), "session.title")
+    if session.get("titleOrigin") is not None:
+        _expect_enum(
+            session.get("titleOrigin"),
+            SESSION_TITLE_ORIGIN_VALUES,
+            "session.titleOrigin",
+        )
+    if session.get("processingError") is not None:
+        _expect_string(session.get("processingError"), "session.processingError")
+    _expect_date(session.get("startedAt"), "session.startedAt")
+    _expect_enum(session.get("status"), SESSION_STATUS_VALUES, "session.status")
+    if "transcriptSegments" in session and session["transcriptSegments"] is not None:
+        for index, segment in enumerate(
+            _expect_list(session["transcriptSegments"], "session.transcriptSegments")
+        ):
+            _validate_transcript_segment(
+                segment, f"session.transcriptSegments[{index}]"
+            )
+    if "segments" in session and session["segments"] is not None:
+        for index, segment in enumerate(
+            _expect_list(session["segments"], "session.segments")
+        ):
+            _validate_transcript_segment(segment, f"session.segments[{index}]")
+    if session.get("recap") is not None:
+        _validate_recap(session.get("recap"), "session.recap")
+    if session.get("attachments") is not None:
+        for index, attachment in enumerate(
+            _expect_list(session.get("attachments"), "session.attachments")
+        ):
+            _validate_attachment(attachment, f"session.attachments[{index}]")
+    if session.get("captureArtifacts") is not None:
+        for index, artifact in enumerate(
+            _expect_list(session.get("captureArtifacts"), "session.captureArtifacts")
+        ):
+            _validate_capture_artifact(artifact, f"session.captureArtifacts[{index}]")
+    if session.get("audioArtifacts") is not None:
+        _validate_audio_artifacts(
+            session.get("audioArtifacts"), "session.audioArtifacts"
+        )
+    if session.get("contentClassification") is not None:
+        _validate_content_classification(
+            session.get("contentClassification"), "session.contentClassification"
+        )
+    if session.get("transcriptionEvidence") is not None:
+        _validate_transcription_evidence(
+            session.get("transcriptionEvidence"), "session.transcriptionEvidence"
+        )
+    if session.get("latestTranscriptionAttempt") is not None:
+        _validate_transcription_evidence(
+            session.get("latestTranscriptionAttempt"),
+            "session.latestTranscriptionAttempt",
+        )
+    if session.get("documentMarkdown") is not None:
+        _expect_string(session.get("documentMarkdown"), "session.documentMarkdown")
+    if session.get("documentChat") is not None:
+        _validate_document_chat(session.get("documentChat"), "session.documentChat")
+    return session
+
+
+def _safe_bundle_filename(value: Any, path: str) -> str:
+    value = _expect_string(value, path)
+    if not value or value in {".", ".."} or "\x00" in value:
+        raise LocalSessionValidationError(f"{path} must be a safe file name.")
+    if (
+        Path(value).name != value
+        or "/" in value
+        or "\\" in value
+        or Path(value).is_absolute()
+    ):
+        raise LocalSessionValidationError(f"{path} must be a safe file name.")
+    return value
+
+
+def _validate_clip(clip: Any, clip_id: Optional[str] = None) -> dict:
+    clip = _expect_object(clip, "CLIP")
+    _validate_json_value(clip, "CLIP")
+    identifier = _validate_local_id(clip.get("id"), "CLIP.id")
+    if (
+        clip_id is not None
+        and identifier.casefold() != _validate_local_id(clip_id, "CLIP ID").casefold()
+    ):
+        raise LocalSessionValidationError("CLIP.id must match its directory ID.")
+    _expect_string(clip.get("title"), "CLIP.title")
+    _expect_date(clip.get("startedAt"), "CLIP.startedAt")
+    if clip.get("endedAt") is not None:
+        _expect_date(clip.get("endedAt"), "CLIP.endedAt")
+    _expect_enum(
+        clip.get("status"),
+        {"recording", "processing", "ready", "failed"},
+        "CLIP.status",
+    )
+    if clip.get("intent") is not None:
+        _expect_string(clip.get("intent"), "CLIP.intent")
+    for key in ("videoFileName", "transcriptFileName", "notesFileName"):
+        _safe_bundle_filename(clip.get(key), f"CLIP.{key}")
+    if clip.get("audioFileName") is not None:
+        _safe_bundle_filename(clip.get("audioFileName"), "CLIP.audioFileName")
+    for index, segment in enumerate(
+        _expect_list(clip.get("transcriptSegments"), "CLIP.transcriptSegments")
+    ):
+        segment = _expect_object(segment, f"CLIP.transcriptSegments[{index}]")
+        _validate_local_id(segment.get("id"), f"CLIP.transcriptSegments[{index}].id")
+        _expect_number(
+            segment.get("startOffset"), f"CLIP.transcriptSegments[{index}].startOffset"
+        )
+        _expect_number(
+            segment.get("endOffset"), f"CLIP.transcriptSegments[{index}].endOffset"
+        )
+        _expect_string(segment.get("text"), f"CLIP.transcriptSegments[{index}].text")
+    _expect_string(clip.get("postNotes"), "CLIP.postNotes")
+    if clip.get("errorMessage") is not None:
+        _expect_string(clip.get("errorMessage"), "CLIP.errorMessage")
+    return clip
+
+
+def _clip_artifact_path(
+    clip_directory: Path, value: Any, field: str, fallback: str
+) -> Path:
+    filename = _safe_bundle_filename(
+        value if value is not None else fallback, f"CLIP.{field}"
+    )
+    path = clip_directory / filename
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return path
+    return _validated_regular_file(path, label=f"CLIP.{field}")
+
+
+def _read_clip_artifact_prefix(path: Path, limit: int = 64 * 1024) -> bytes:
+    try:
+        file_stat = path.lstat()
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            return b""
+        with path.open("rb") as file:
+            return file.read(limit)
+    except OSError:
+        return b""
+
+
+def _has_valid_wav_container(path: Path) -> bool:
+    size = path.stat().st_size
+    if size < 44:
+        return False
+    data = _read_clip_artifact_prefix(path)
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return False
+    declared_size = int.from_bytes(data[4:8], "little") + 8
+    if declared_size > size:
+        return False
+
+    offset = 12
+    has_format = False
+    has_audio = False
+    while offset + 8 <= len(data) and offset + 8 <= declared_size:
+        chunk_name = data[offset : offset + 4]
+        chunk_size = int.from_bytes(data[offset + 4 : offset + 8], "little")
+        chunk_end = offset + 8 + chunk_size
+        if chunk_end > declared_size:
+            return False
+        if chunk_name == b"fmt " and chunk_size >= 16:
+            has_format = True
+        if chunk_name == b"data" and chunk_size > 0:
+            has_audio = True
+        offset = chunk_end + (chunk_size % 2)
+    return has_format and has_audio
+
+
+def _has_valid_mov_container(path: Path) -> bool:
+    size = path.stat().st_size
+    if size < 16:
+        return False
+    data = _read_clip_artifact_prefix(path, limit=32)
+    if len(data) < 12 or data[4:8] != b"ftyp":
+        return False
+    atom_size = int.from_bytes(data[:4], "big")
+    if atom_size == 1:
+        if len(data) < 16:
+            return False
+        atom_size = int.from_bytes(data[8:16], "big")
+    return atom_size >= 16 and atom_size <= size
+
+
+def _valid_clip_transcript_artifact(path: Path, clip_id: str) -> bool:
+    try:
+        transcript = _read_local_session(path)
+        if transcript.get("id") != clip_id:
+            return False
+        segments = transcript.get("segments")
+        if not isinstance(segments, list):
+            return False
+        for index, segment in enumerate(segments):
+            segment_path = f"CLIP.transcript.segments[{index}]"
+            segment = _expect_object(segment, segment_path)
+            _validate_local_id(segment.get("id"), f"{segment_path}.id")
+            _expect_number(segment.get("startOffset"), f"{segment_path}.startOffset")
+            _expect_number(segment.get("endOffset"), f"{segment_path}.endOffset")
+            _expect_string(segment.get("text"), f"{segment_path}.text")
+        _expect_string(transcript.get("text"), "CLIP.transcript.text")
+        return True
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _clip_artifact_readiness(clip: dict, clip_directory: Path, clip_id: str) -> dict:
+    issues = []
+    artifacts = (
+        (
+            "video",
+            _clip_artifact_path(
+                clip_directory,
+                clip.get("videoFileName"),
+                "videoFileName",
+                "clip-video.mov",
+            ),
+        ),
+        (
+            "audio",
+            _clip_artifact_path(
+                clip_directory,
+                clip.get("audioFileName"),
+                "audioFileName",
+                "clip-audio.wav",
+            ),
+        ),
+        (
+            "transcript",
+            _clip_artifact_path(
+                clip_directory,
+                clip.get("transcriptFileName"),
+                "transcriptFileName",
+                "transcript.json",
+            ),
+        ),
+    )
+    for kind, path in artifacts:
+        try:
+            _validated_regular_file(path, label=f"CLIP {kind}")
+            if path.stat().st_size == 0:
+                raise LocalSessionPathError(f"CLIP {kind} is empty: {path}")
+            if kind == "video" and path.suffix.lower() == ".mov":
+                if not _has_valid_mov_container(path):
+                    raise LocalSessionValidationError(
+                        "CLIP video container is incomplete"
+                    )
+            elif kind == "audio" and path.suffix.lower() == ".wav":
+                if not _has_valid_wav_container(path):
+                    raise LocalSessionValidationError(
+                        "CLIP audio container is incomplete"
+                    )
+            elif kind == "transcript" and not _valid_clip_transcript_artifact(
+                path, clip_id
+            ):
+                raise LocalSessionValidationError("CLIP transcript artifact is invalid")
+        except (OSError, ValueError, json.JSONDecodeError):
+            issues.append(f"{kind} artifact is missing or invalid")
+
+    return {
+        "ready": not issues,
+        "issues": issues,
+        "media_playability": "unverified",
+    }
 
 
 def _session_segments(session: dict) -> list[dict]:
     segments = session.get("transcriptSegments")
-    if not segments:
+    if segments is None:
         segments = session.get("segments")
-    return segments if isinstance(segments, list) else []
+    return (
+        [segment for segment in segments if isinstance(segment, dict)]
+        if isinstance(segments, list)
+        else []
+    )
 
 
 def _segment_line(segment: dict) -> str:
+    if not isinstance(segment, dict):
+        return ""
     speaker = str(segment.get("speaker") or "Speaker").strip() or "Speaker"
     text = str(segment.get("text") or "").strip()
     return f"{speaker}: {text}".strip()
@@ -494,6 +1498,21 @@ def _clip_transcript_segments(clip: dict) -> list[dict]:
 
 def _clip_summary(clip: dict, clip_json_path: Path) -> dict:
     segments = _clip_transcript_segments(clip)
+    artifact_readiness = _clip_artifact_readiness(
+        clip, clip_json_path.parent, clip_json_path.parent.name
+    )
+    stored_status = clip.get("status")
+    effective_status = (
+        "failed"
+        if stored_status == "ready" and not artifact_readiness["ready"]
+        else stored_status
+    )
+    video_path = _clip_artifact_path(
+        clip_json_path.parent,
+        clip.get("videoFileName"),
+        "videoFileName",
+        "clip-video.mov",
+    )
     preview = " ".join(
         str(segment.get("text") or "").strip()
         for segment in segments
@@ -504,14 +1523,14 @@ def _clip_summary(clip: dict, clip_json_path: Path) -> dict:
         "title": str(clip.get("title") or "Untitled CLIP"),
         "started_at": str(clip.get("startedAt") or ""),
         "ended_at": clip.get("endedAt"),
-        "status": clip.get("status"),
+        "status": effective_status,
+        "stored_status": stored_status,
+        "artifact_readiness": artifact_readiness,
         "intent": clip.get("intent"),
         "transcript_segment_count": len(segments),
         "transcript_preview": preview[:500],
         "clip_directory": str(clip_json_path.parent),
-        "video_path": str(
-            clip_json_path.parent / str(clip.get("videoFileName") or "clip-video.mov")
-        ),
+        "video_path": str(video_path),
     }
 
 
@@ -522,7 +1541,8 @@ def list_local_sessions(
     for session_json_path in _local_session_paths(sessions_root):
         try:
             session = _read_local_session(session_json_path)
-        except (OSError, json.JSONDecodeError):
+            _validate_local_session(session, session_json_path.parent.name)
+        except (OSError, ValueError, json.JSONDecodeError):
             continue
         sessions.append(_session_summary(session, session_json_path))
 
@@ -537,9 +1557,11 @@ def list_local_clips(
     for clip_json_path in _local_clip_paths(clips_root):
         try:
             clip = _read_local_session(clip_json_path)
-        except (OSError, json.JSONDecodeError):
+            _validate_clip(clip, clip_json_path.parent.name)
+            summary = _clip_summary(clip, clip_json_path)
+        except (OSError, ValueError, json.JSONDecodeError):
             continue
-        clips.append(_clip_summary(clip, clip_json_path))
+        clips.append(summary)
 
     clips.sort(key=lambda clip: clip.get("started_at") or "", reverse=True)
     return clips[max(0, offset) : max(0, offset) + max(0, limit)]
@@ -548,25 +1570,17 @@ def list_local_clips(
 def _resolve_local_session_json(
     session_id: str, sessions_root: Optional[str] = None
 ) -> Path:
-    if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
-        raise ValueError("Invalid local session ID.")
-
-    session_json_path = (
-        _local_sessions_root(sessions_root) / session_id / "session.json"
+    root = _validated_local_root(
+        _local_sessions_root(sessions_root), "sessions", allow_missing=False
     )
-    if not session_json_path.exists():
-        raise FileNotFoundError(f"Local session not found: {session_id}")
-    return session_json_path
+    return _validated_bundle_json(root, session_id, "session.json", "local session")
 
 
 def _resolve_local_clip_json(clip_id: str, clips_root: Optional[str] = None) -> Path:
-    if "/" in clip_id or "\\" in clip_id or clip_id in {"", ".", ".."}:
-        raise ValueError("Invalid local CLIP ID.")
-
-    clip_json_path = _local_clips_root(clips_root) / clip_id / "clip.json"
-    if not clip_json_path.exists():
-        raise FileNotFoundError(f"Local CLIP not found: {clip_id}")
-    return clip_json_path
+    root = _validated_local_root(
+        _local_clips_root(clips_root), "clips", allow_missing=False
+    )
+    return _validated_bundle_json(root, clip_id, "clip.json", "local CLIP")
 
 
 def _transcript_markdown(session: dict) -> str:
@@ -587,6 +1601,7 @@ def get_local_session_transcript(
 ) -> dict:
     session_json_path = _resolve_local_session_json(session_id, sessions_root)
     session = _read_local_session(session_json_path)
+    _validate_local_session(session, session_id)
     segments = _session_segments(session)
     return {
         "id": str(session.get("id") or session_json_path.parent.name),
@@ -606,6 +1621,7 @@ def get_local_session_data(
 ) -> dict:
     session_json_path = _resolve_local_session_json(session_id, sessions_root)
     session = _read_local_session(session_json_path)
+    _validate_local_session(session, session_id)
     return {
         "id": str(session.get("id") or session_json_path.parent.name),
         "session": session,
@@ -617,35 +1633,78 @@ def get_local_session_data(
 def get_local_clip(clip_id: str, clips_root: Optional[str] = None) -> dict:
     clip_json_path = _resolve_local_clip_json(clip_id, clips_root)
     clip = _read_local_session(clip_json_path)
+    _validate_clip(clip, clip_id)
     clip_directory = clip_json_path.parent
+    artifact_readiness = _clip_artifact_readiness(clip, clip_directory, clip_id)
+    stored_status = clip.get("status")
+    effective_status = (
+        "failed"
+        if stored_status == "ready" and not artifact_readiness["ready"]
+        else stored_status
+    )
+    effective_clip = dict(clip)
+    effective_clip["status"] = effective_status
     return {
         "id": str(clip.get("id") or clip_json_path.parent.name),
-        "clip": clip,
+        "clip": effective_clip,
+        "status": effective_status,
+        "stored_status": stored_status,
+        "artifact_readiness": artifact_readiness,
         "transcript_segments": _clip_transcript_segments(clip),
         "post_notes": clip.get("postNotes") or "",
         "clip_directory": str(clip_directory),
         "clip_json_path": str(clip_json_path),
         "video_path": str(
-            clip_directory / str(clip.get("videoFileName") or "clip-video.mov")
+            _clip_artifact_path(
+                clip_directory,
+                clip.get("videoFileName"),
+                "videoFileName",
+                "clip-video.mov",
+            )
         ),
         "audio_path": str(
-            clip_directory / str(clip.get("audioFileName") or "clip-audio.wav")
+            _clip_artifact_path(
+                clip_directory,
+                clip.get("audioFileName"),
+                "audioFileName",
+                "clip-audio.wav",
+            )
         ),
         "transcript_path": str(
-            clip_directory / str(clip.get("transcriptFileName") or "transcript.json")
+            _clip_artifact_path(
+                clip_directory,
+                clip.get("transcriptFileName"),
+                "transcriptFileName",
+                "transcript.json",
+            )
         ),
         "notes_path": str(
-            clip_directory / str(clip.get("notesFileName") or "notes.md")
+            _clip_artifact_path(
+                clip_directory, clip.get("notesFileName"), "notesFileName", "notes.md"
+            )
         ),
     }
 
 
 def _file_inventory_entry(file_path: Path, session_directory: Path) -> dict:
-    stat = file_path.stat()
+    file_stat = file_path.lstat()
+    if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+        raise LocalSessionPathError(f"File inventory entry is unsafe: {file_path}")
+    if file_stat.st_nlink != 1:
+        raise LocalSessionPathError(
+            f"File inventory entry must not be hard-linked: {file_path}"
+        )
+    try:
+        resolved = file_path.resolve(strict=True)
+        resolved.relative_to(session_directory.resolve(strict=True))
+    except (OSError, ValueError) as error:
+        raise LocalSessionPathError(
+            f"File inventory entry is outside its bundle: {file_path}"
+        ) from error
     return {
         "path": str(file_path),
         "relative_path": file_path.relative_to(session_directory).as_posix(),
-        "size_bytes": stat.st_size,
+        "size_bytes": file_stat.st_size,
         "extension": file_path.suffix,
     }
 
@@ -657,8 +1716,12 @@ def list_local_session_files(
     session_directory = session_json_path.parent
     files = []
     for file_path in sorted(session_directory.rglob("*")):
-        if file_path.is_file() and file_path.name != "session.json":
+        if file_path.name == "session.json":
+            continue
+        try:
             files.append(_file_inventory_entry(file_path, session_directory))
+        except (OSError, LocalSessionPathError):
+            continue
     return {
         "id": session_id,
         "session_directory": str(session_directory),
@@ -671,8 +1734,10 @@ def list_local_clip_files(clip_id: str, clips_root: Optional[str] = None) -> dic
     clip_directory = clip_json_path.parent
     files = []
     for file_path in sorted(clip_directory.rglob("*")):
-        if file_path.is_file():
+        try:
             files.append(_file_inventory_entry(file_path, clip_directory))
+        except (OSError, LocalSessionPathError):
+            continue
     return {
         "id": clip_id,
         "clip_directory": str(clip_directory),
@@ -711,7 +1776,8 @@ def search_local_session_transcripts(
     for session_json_path in _local_session_paths(sessions_root):
         try:
             session = _read_local_session(session_json_path)
-        except (OSError, json.JSONDecodeError):
+            _validate_local_session(session, session_json_path.parent.name)
+        except (OSError, ValueError, json.JSONDecodeError):
             continue
 
         transcript_text = "\n".join(
@@ -743,17 +1809,21 @@ def update_local_session_title(
         raise ValueError("Local session title cannot be empty.")
 
     session_json_path = _resolve_local_session_json(session_id, sessions_root)
-    session = _read_local_session(session_json_path)
-    old_title = str(session.get("title") or "")
-    session["title"] = new_title
-    _write_local_session(session_json_path, session)
-
-    updated = _read_local_session(session_json_path)
-    summary = _session_summary(updated, session_json_path)
-    summary["old_title"] = old_title
-    summary["new_title"] = new_title
-    summary["session_json_path"] = str(session_json_path)
-    return summary
+    with _local_session_lock(session_json_path):
+        session = _read_local_session(session_json_path)
+        _validate_local_session(session, session_id)
+        old_title = str(session.get("title") or "")
+        candidate = dict(session)
+        candidate["title"] = new_title
+        candidate["titleOrigin"] = "user"
+        _validate_local_session(candidate, session_id)
+        summary = _session_summary(candidate, session_json_path)
+        _invalidate_generated_session_packages(session_json_path)
+        _write_local_session(session_json_path, candidate)
+        summary["old_title"] = old_title
+        summary["new_title"] = new_title
+        summary["session_json_path"] = str(session_json_path)
+        return summary
 
 
 def update_local_session_fields(
@@ -764,24 +1834,47 @@ def update_local_session_fields(
     if not isinstance(fields, dict) or not fields:
         raise ValueError("fields must be a non-empty object.")
 
-    protected_fields = {"id"}
+    _validate_json_value(fields, "fields")
+    if "id" in fields:
+        raise ValueError("Cannot update protected session field(s): id")
+
+    protected_fields = {
+        "status",
+        "startedAt",
+        "endedAt",
+        "transcriptSegments",
+        "segments",
+        "captureArtifacts",
+        "audioArtifacts",
+        "transcriptionEvidence",
+        "latestTranscriptionAttempt",
+    }
     blocked = sorted(protected_fields.intersection(fields.keys()))
-    if blocked:
-        raise ValueError(
-            f"Cannot update protected session field(s): {', '.join(blocked)}"
-        )
 
     session_json_path = _resolve_local_session_json(session_id, sessions_root)
-    session = _read_local_session(session_json_path)
-    for key, value in fields.items():
-        session[key] = value
-    _write_local_session(session_json_path, session)
-
-    updated = _read_local_session(session_json_path)
-    summary = _session_summary(updated, session_json_path)
-    summary["updated_fields"] = sorted(fields.keys())
-    summary["session_json_path"] = str(session_json_path)
-    return summary
+    with _local_session_lock(session_json_path):
+        session = _read_local_session(session_json_path)
+        _validate_local_session(session, session_id)
+        candidate = dict(session)
+        for key, value in fields.items():
+            candidate[key] = value
+        _validate_local_session(candidate, session_id)
+        changed_protected = [
+            key
+            for key in blocked
+            if key not in session or not _json_values_equal(session[key], fields[key])
+        ]
+        if changed_protected:
+            raise ValueError(
+                "Cannot update protected session field(s): "
+                + ", ".join(changed_protected)
+            )
+        summary = _session_summary(candidate, session_json_path)
+        _invalidate_generated_session_packages(session_json_path)
+        _write_local_session(session_json_path, candidate)
+        summary["updated_fields"] = sorted(fields.keys())
+        summary["session_json_path"] = str(session_json_path)
+        return summary
 
 
 def requires_omi_api_key(tool_name: str) -> bool:
@@ -878,7 +1971,7 @@ async def serve(uid: str | None) -> None:
             ),
             Tool(
                 name=OmiTools.UPDATE_LOCAL_SESSION_FIELDS,
-                description="Atomically merge top-level JSON fields into a local Cepessa session.json file for app-backed current and future features.",
+                description="Atomically merge user-editable top-level JSON fields into a local Cepessa session.json file. Title, recap, document notes, document chat, and future user metadata are supported; capture and transcription-owned fields are rejected when changed.",
                 inputSchema=UpdateLocalSessionFields.model_json_schema(),
             ),
             Tool(

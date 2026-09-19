@@ -15,11 +15,39 @@ struct CepessaSessionsApp: App {
         .withFontScaling()
         .frame(minWidth: 520, minHeight: 440)
     }
+    .commands {
+      CommandGroup(replacing: .appSettings) {
+        Button("Settings…") {
+          CepessaSessionsWindowController.shared.openSettings()
+        }
+        .keyboardShortcut(",", modifiers: .command)
+      }
+
+      CommandMenu("Sessions") {
+        Button("Browse All Sessions…") {
+          CepessaSessionsWindowController.shared.showLibrary()
+        }
+        .keyboardShortcut("o", modifiers: .command)
+
+        Button("Import Audio…") {
+          CepessaSessionsWindowController.shared.importAudio()
+        }
+        .keyboardShortcut("i", modifiers: [.command, .shift])
+
+        Divider()
+
+        Button("Show Clips") {
+          CepessaSessionsWindowController.shared.show(destination: .clips)
+        }
+        .keyboardShortcut("l", modifiers: [.command, .shift])
+      }
+    }
   }
 }
 
 private final class CepessaSessionsAppDelegate: NSObject, NSApplicationDelegate {
   private var debugHookTimer: Timer?
+  private var terminationPending = false
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
@@ -28,6 +56,23 @@ private final class CepessaSessionsAppDelegate: NSObject, NSApplicationDelegate 
     CepessaSessionStatusBarController.shared.connect(model: model)
     CepessaSessionFloatingBarController.shared.connect(model: model)
     installDebugHooks()
+  }
+
+  func applicationDidBecomeActive(_ notification: Notification) {
+    CepessaSessionsStore.shared.model.refreshLibraryIfIdle()
+  }
+
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    let store = CepessaSessionsStore.shared
+    guard store.captureLifecycle.isBusy else { return .terminateNow }
+    guard !terminationPending else { return .terminateLater }
+    terminationPending = true
+    Task { @MainActor in
+      await store.model.finishCaptureForTermination()
+      await store.clipModel.finishCaptureForTermination()
+      sender.reply(toApplicationShouldTerminate: true)
+    }
+    return .terminateLater
   }
 
   /// Debug-only remote control for UI verification (agent test harnesses).
@@ -104,6 +149,11 @@ final class CepessaSessionsWindowController: NSObject, NSWindowDelegate {
     show(destination: .sessions)
   }
 
+  func showLibrary() {
+    show(destination: .sessions)
+    CepessaSessionsStore.shared.model.isSessionLibraryPresented = true
+  }
+
   func openSettings() {
     CepessaSessionsSettingsWindowController.shared.show()
   }
@@ -119,6 +169,7 @@ final class CepessaSessionsWindowController: NSObject, NSWindowDelegate {
     panel.message = "Choose an audio file to normalize locally and transcribe on this Mac."
 
     guard panel.runModal() == .OK, let url = panel.url else { return }
+    show(destination: .sessions)
     Task {
       await CepessaSessionsStore.shared.model.importExistingRecording(from: url)
     }
@@ -160,6 +211,17 @@ final class CepessaSessionsWindowController: NSObject, NSWindowDelegate {
     let showsSessions = state.destination == .sessions
     window?.title = showsSessions ? "Cepessa Sessions" : "Cepessa Clips"
     readingToolbar?.setVisible(showsSessions)
+  }
+
+  /// SwiftUI's NavigationSplitView installs its own toolbar while Clips is
+  /// visible. Restore the retained reader toolbar after that hierarchy has
+  /// finished leaving the window, and only if Sessions is still selected.
+  func restoreReadingToolbarAfterTransition() {
+    guard state.destination == .sessions else { return }
+    DispatchQueue.main.async { [weak self] in
+      guard let self, self.state.destination == .sessions else { return }
+      self.refreshWindowChrome()
+    }
   }
 }
 
@@ -208,6 +270,9 @@ private struct CepessaSessionsWindowRootView: View {
       switch state.destination {
       case .sessions:
         CepessaSessionReadingView()
+          .onAppear {
+            CepessaSessionsWindowController.shared.restoreReadingToolbarAfterTransition()
+          }
       case .clips:
         LocalClipsPage()
       }
