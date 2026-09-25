@@ -180,9 +180,14 @@ struct LocalSessionTranscriptionModelValidator: @unchecked Sendable {
     return try? decoder.decode(LocalSessionTranscriptionModelManifest.self, from: data)
   }
 
-  private struct FileInfo {
+  struct FileInfo: Equatable {
     let size: Int64
     let modificationTimeNanoseconds: Int64
+  }
+
+  /// Size and modification time: which bytes are on disk, without reading them.
+  func fileVersion(of url: URL) -> FileInfo? {
+    Self.fileInfo(url)
   }
 
   private static func fileInfo(_ url: URL) -> FileInfo? {
@@ -382,6 +387,10 @@ final class LocalSessionTranscriptionModelProvisioner: ObservableObject {
   private let now: @Sendable () -> Date
   private var task: Task<Void, Never>?
   private var isInstallRequested = false
+  /// The file version that last failed verification, and why. Those exact
+  /// bytes are not hashed again (1.6 GB) each time Settings opens; installing
+  /// replaces them.
+  private var rejectedFile: (version: LocalSessionTranscriptionModelValidator.FileInfo, message: String)?
 
   init(
     fileLayout: LocalSessionFileLayout,
@@ -449,7 +458,10 @@ final class LocalSessionTranscriptionModelProvisioner: ObservableObject {
     cleanupInterruptedStaging()
     let status = hebrewStatus()
     apply(status)
-    if status == .needsVerification {
+    guard status == .needsVerification else { return }
+    if let rejectedFile, rejectedFile.version == validator.fileVersion(of: modelURL) {
+      if activeModel == nil { state = .failed(message: rejectedFile.message) }
+    } else {
       startProvisioning(install: false)
     }
   }
@@ -486,21 +498,27 @@ final class LocalSessionTranscriptionModelProvisioner: ObservableObject {
 
   private func provision() async {
     // 1. Recognise a file already on disk: verify it once and vouch for it with a manifest.
-    var adoptionError: Error?
-    if hebrewStatus() == .needsVerification {
+    var adoptionFailure: String?
+    let version = validator.fileVersion(of: modelURL)
+    if let rejectedFile, rejectedFile.version == version {
+      adoptionFailure = rejectedFile.message
+    } else if hebrewStatus() == .needsVerification {
       state = .verifying
       do {
         try await verifyInBackground(modelURL)
         try writeManifest()
+        rejectedFile = nil
         finish()
         return
       } catch {
-        adoptionError = error
+        let message = adoptionFailureMessage(error)
+        adoptionFailure = message
+        if let version { rejectedFile = (version, message) }
       }
     }
 
     guard isInstallRequested else {
-      finish(failure: adoptionError.map(adoptionFailureMessage(_:)))
+      finish(failure: adoptionFailure)
       return
     }
 

@@ -233,6 +233,11 @@ final class LocalSessionTranscriptionModelProvisionerTests: XCTestCase {
     var calls = await downloader.callCount()
     XCTAssertEqual(calls, 0, "Verification alone never downloads")
 
+    // Opening Settings again does not re-hash bytes that already failed.
+    relaunch.refreshState()
+    XCTAssertFalse(relaunch.isWorking, "the rejected file must not be verified again")
+    XCTAssertEqual(relaunch.state, .failed(message: message))
+
     relaunch.prepareIfNeeded()
     await waitUntilIdle(relaunch)
 
