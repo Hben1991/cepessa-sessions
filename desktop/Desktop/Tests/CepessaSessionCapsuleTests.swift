@@ -327,9 +327,14 @@ final class CepessaSessionCapsuleTests: XCTestCase {
     XCTAssertEqual(
       CepessaSessionIndicatorAccessibility.orbLabel(phase: .recording, isCompact: true),
       "Show recording controls")
+    // A transcription in progress or a problem on show never blocks the next
+    // recording: the orb still records, and the status text opens the session.
     XCTAssertEqual(
       CepessaSessionIndicatorAccessibility.orbLabel(phase: .processing, isCompact: false),
-      "Open the session being transcribed")
+      "Start another recording")
+    XCTAssertEqual(
+      CepessaSessionIndicatorAccessibility.orbLabel(phase: .attention, isCompact: false),
+      "Start recording")
   }
 
   func testTheCapsuleValueDescribesCaptureHealthWhileRecording() {

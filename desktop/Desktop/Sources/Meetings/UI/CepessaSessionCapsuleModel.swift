@@ -332,8 +332,8 @@ enum CepessaSessionIndicatorAccessibility {
     switch phase {
     case .idle: return "Start recording"
     case .recording: return isCompact ? "Show recording controls" : "Collapse recording controls"
-    case .processing: return "Open the session being transcribed"
-    case .attention: return "Open the session that needs attention"
+    case .processing: return "Start another recording"
+    case .attention: return "Start recording"
     case .preparing: return "Recording is starting or stopping"
     }
   }

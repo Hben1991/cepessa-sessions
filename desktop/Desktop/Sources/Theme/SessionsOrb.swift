@@ -5,9 +5,12 @@ import SwiftUI
 /// At rest it is a record mark lit from behind — a ring around a red core,
 /// waiting. While recording it becomes a living ember: it breathes on the
 /// Cepessa orb's period and its halo follows the *measured* audio level, so
-/// the light moving is the room being heard, never decoration. Transcribing
-/// dims it behind a gold arc that fills with real progress (or turns slowly
-/// when there is none to report).
+/// the light moving is the room being heard, never decoration.
+///
+/// Whenever nothing is recording the core stays the record mark, because one
+/// click records. What else is going on is its ring: a gold arc that fills
+/// with a transcript's real progress (or turns slowly when there is none to
+/// report), or an amber ring when something needs a look.
 ///
 /// It only runs a clock in the states that move, pauses under Reduce Motion,
 /// and is drawn with plain gradients: no offscreen passes, no shader.
@@ -23,9 +26,10 @@ struct SessionsOrb: View {
     case muted
     /// Capture is live but one source is missing.
     case degraded
-    /// A transcript is being made. `nil` when no fraction is known.
+    /// A transcript is being made. `nil` when no fraction is known. The
+    /// orb still records.
     case processing(Double?)
-    /// Something needs the owner's attention.
+    /// Something needs the owner's attention. The orb still records.
     case attention
   }
 
@@ -79,7 +83,9 @@ struct SessionsOrb: View {
       case .muted:
         mutedEmber
       case .processing(let progress):
-        dimSphere(opacity: 0.5)
+        glow
+        Circle()
+          .strokeBorder(SessionsPalette.cream.opacity(0.2), lineWidth: 1.4)
         if let progress {
           Circle()
             .trim(from: 0, to: CGFloat(min(max(progress, 0.03), 1)))
@@ -92,17 +98,13 @@ struct SessionsOrb: View {
         } else {
           turningArc(time: time, color: SessionsPalette.sunriseGold)
         }
+        recordCore
       case .attention:
+        glow
         Circle()
-          .fill(
-            RadialGradient(
-              colors: [SessionsPalette.attention.opacity(0.95), SessionsPalette.attention.opacity(0.6)],
-              center: UnitPoint(x: 0.4, y: 0.35),
-              startRadius: 0,
-              endRadius: diameter * 0.6))
-        Text("!")
-          .font(.system(size: diameter * 0.52, weight: .heavy, design: .rounded))
-          .foregroundStyle(SessionsPalette.nightSkyTop)
+          .strokeBorder(SessionsPalette.attention, lineWidth: 1.8)
+          .shadow(color: SessionsPalette.attention.opacity(0.55), radius: 3)
+        recordCore
       }
     }
   }
@@ -118,29 +120,39 @@ struct SessionsOrb: View {
 
   private var idle: some View {
     ZStack {
-      Circle()
-        .fill(
-          RadialGradient(
-            colors: [
-              SessionsPalette.sunriseGold.opacity(isHighlighted ? 0.34 : 0.2),
-              .clear,
-            ],
-            center: .center,
-            startRadius: 0,
-            endRadius: diameter * 0.62))
-        .scaleEffect(1.25)
+      glow
       Circle()
         .strokeBorder(SessionsPalette.cream.opacity(isHighlighted ? 0.85 : 0.6), lineWidth: 1.4)
-      Circle()
-        .fill(
-          RadialGradient(
-            colors: [SessionsPalette.cloudCoral, SessionsPalette.recording],
-            center: UnitPoint(x: 0.38, y: 0.32),
-            startRadius: 0,
-            endRadius: diameter * 0.3))
-        .frame(width: diameter * 0.44, height: diameter * 0.44)
-        .shadow(color: SessionsPalette.recording.opacity(0.55), radius: isHighlighted ? 5 : 3)
+      recordCore
     }
+  }
+
+  /// The light behind the record mark; brighter under the pointer.
+  private var glow: some View {
+    Circle()
+      .fill(
+        RadialGradient(
+          colors: [
+            SessionsPalette.sunriseGold.opacity(isHighlighted ? 0.34 : 0.2),
+            .clear,
+          ],
+          center: .center,
+          startRadius: 0,
+          endRadius: diameter * 0.62))
+      .scaleEffect(1.25)
+  }
+
+  /// The record mark's red core.
+  private var recordCore: some View {
+    Circle()
+      .fill(
+        RadialGradient(
+          colors: [SessionsPalette.cloudCoral, SessionsPalette.recording],
+          center: UnitPoint(x: 0.38, y: 0.32),
+          startRadius: 0,
+          endRadius: diameter * 0.3))
+      .frame(width: diameter * 0.44, height: diameter * 0.44)
+      .shadow(color: SessionsPalette.recording.opacity(0.55), radius: isHighlighted ? 5 : 3)
   }
 
   private func ember(breath: Double, heard: Double) -> some View {

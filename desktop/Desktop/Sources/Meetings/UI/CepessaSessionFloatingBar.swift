@@ -226,6 +226,11 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   private var transitionToken = 0
   /// Set while the controller resizes the panel itself, so its own frame
   /// changes cannot re-enter `updateLayout` through the move delegate.
+  /// Where the owner put the capsule: horizontal centre, top edge. Changes
+  /// only when they drag it. Every shape is placed from this, never from the
+  /// current frame, so a wide shape clamped at a screen edge does not move
+  /// where the capsule rests afterwards.
+  private var restingAnchor: NSPoint?
   private var isApplyingPanelFrame = false
 
   var currentPanel: NSWindow? {
@@ -293,23 +298,28 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     model?.toggleMicrophoneMute()
   }
 
-  /// The orb's one click. What it does follows what the capsule is showing:
-  /// record at rest, fold the controls while recording, open the session
-  /// that is being transcribed or needs a look.
+  /// The orb's one click: record whenever nothing is recording, including
+  /// while an earlier session is still being transcribed or a problem is
+  /// showing; fold the controls while recording. The status text beside the
+  /// orb opens the session it describes.
   func activateOrb() {
     switch state.phase {
-    case .idle:
+    case .idle, .processing, .attention:
       startRecording()
     case .recording:
       setCompact(!state.isCompact)
-    case .processing, .attention:
-      if let session = activeSession() ?? model?.selectedSession {
-        CepessaSessionsWindowController.shared.showSession(id: session.id)
-      } else {
-        CepessaSessionsWindowController.shared.showLibrary()
-      }
     case .preparing:
       return
+    }
+  }
+
+  /// The status text's click: the session being transcribed, or the one the
+  /// problem is about.
+  func openStatusSession() {
+    if let session = activeSession() ?? model?.selectedSession {
+      CepessaSessionsWindowController.shared.showSession(id: session.id)
+    } else {
+      CepessaSessionsWindowController.shared.showLibrary()
     }
   }
 
@@ -704,6 +714,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     refreshLayoutMetrics()
 
     let anchor = restoredAnchor() ?? defaultAnchor()
+    restingAnchor = anchor
     var frame = CepessaSessionCapsuleMetrics.panelFrame(
       anchor: anchor, contentSize: state.panelContentSize)
     frame.origin = clampedOrigin(for: frame)
@@ -868,8 +879,9 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
 
     // Grow and shrink around the anchor — horizontal centre, top edge — so the
     // capsule stays where the owner put it.
-    let anchor = CepessaSessionCapsuleMetrics.anchor(
-      ofPanelFrame: panel.frame, bleed: Constants.panelBleed)
+    let anchor =
+      restingAnchor
+      ?? CepessaSessionCapsuleMetrics.anchor(ofPanelFrame: panel.frame, bleed: Constants.panelBleed)
     var nextFrame = CepessaSessionCapsuleMetrics.panelFrame(
       anchor: anchor, contentSize: state.panelContentSize, bleed: Constants.panelBleed)
     nextFrame.origin = clampedOrigin(for: nextFrame)
@@ -905,6 +917,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
     }
     let anchor = CepessaSessionCapsuleMetrics.anchor(
       ofPanelFrame: frame, bleed: Constants.panelBleed)
+    restingAnchor = anchor
     UserDefaults.standard.set(NSStringFromPoint(anchor), forKey: Constants.anchorKey)
     updateInteractiveRect()
   }
@@ -1279,7 +1292,7 @@ private struct SessionCapsule: View {
               .padding(.leading, M.gap)
               .transition(contentTransition)
           case .preparing, .processing, .attention:
-            SessionCapsuleStatus(state: state)
+            SessionCapsuleStatus(controller: controller, state: state)
               .padding(.leading, M.gap)
               .transition(contentTransition)
           case .idle:
@@ -1423,15 +1436,17 @@ private struct SessionCapsuleOrb: View {
   }
 
   private var orbIdentifier: String {
-    state.phase == .idle ? "cepessa.floatingBar.record" : "cepessa.floatingBar.orb"
+    switch state.phase {
+    case .idle, .processing, .attention: return "cepessa.floatingBar.record"
+    case .recording, .preparing: return "cepessa.floatingBar.orb"
+    }
   }
 
   private var helpText: String {
     switch state.phase {
-    case .idle: return "Start recording. Drag to move."
+    case .idle, .attention: return "Start recording. Drag to move."
+    case .processing: return "Start another recording. Drag to move."
     case .recording: return state.isCompact ? "Show controls" : "Fold controls"
-    case .processing: return "Open the session being transcribed"
-    case .attention: return state.errorMessage ?? "Open for details"
     case .preparing: return state.isStopping ? "Saving the recording…" : "Starting…"
     }
   }
@@ -1511,16 +1526,45 @@ private struct SessionLevelBar: View {
   }
 }
 
+/// What the capsule is doing, in words. While a session is being transcribed
+/// or a problem is showing, the words open that session.
 private struct SessionCapsuleStatus: View {
+  let controller: CepessaSessionFloatingBarController
   @ObservedObject var state: CepessaSessionFloatingBarState
 
   var body: some View {
+    if state.phase == .processing || state.phase == .attention {
+      Button(action: controller.openStatusSession) { content }
+        .buttonStyle(SessionsPressStyle(scale: 0.98))
+        .help(
+          state.phase == .processing
+            ? "Open the session being transcribed"
+            : (state.errorMessage ?? "Open for details"))
+        .accessibilityHint(
+          state.phase == .processing
+            ? "Opens the session being transcribed"
+            : "Opens the session that needs attention")
+    } else {
+      content
+    }
+  }
+
+  private var content: some View {
     VStack(alignment: .leading, spacing: 1) {
-      Text(
-        CepessaSessionCapsuleStatus.title(
-          phase: state.phase, isStopping: state.isStopping))
-        .font(SessionsType.text(12.5, weight: .semibold))
-        .foregroundStyle(SessionsNight.ink)
+      HStack(spacing: 5) {
+        // The orb stays the record button; the problem is marked here.
+        if state.phase == .attention {
+          Image(systemName: "exclamationmark.circle.fill")
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(SessionsPalette.attention)
+            .accessibilityHidden(true)
+        }
+        Text(
+          CepessaSessionCapsuleStatus.title(
+            phase: state.phase, isStopping: state.isStopping))
+          .font(SessionsType.text(12.5, weight: .semibold))
+          .foregroundStyle(SessionsNight.ink)
+      }
       if let detail = CepessaSessionCapsuleStatus.detail(
         phase: state.phase, progress: state.processingProgress, stage: state.processingStage)
       {
@@ -1533,6 +1577,7 @@ private struct SessionCapsuleStatus: View {
     .lineLimit(1)
     .truncationMode(.tail)
     .frame(width: CepessaSessionCapsuleMetrics.statusColumn, alignment: .leading)
+    .contentShape(Rectangle())
     .accessibilityElement(children: .combine)
     .accessibilityIdentifier("cepessa.floatingBar.status")
   }

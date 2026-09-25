@@ -161,6 +161,32 @@ final class CepessaSessionFloatingPanelLifecycleTests: XCTestCase {
       CepessaSessionCapsuleMetrics.anchor(ofPanelFrame: panel.frame).y, anchor.y, accuracy: 1)
   }
 
+  /// Parked flush against the right edge, the capsule grows into a wider shape
+  /// that has to be pushed left to fit; when it shrinks back it returns to where
+  /// it was parked instead of resting where the wide shape was pushed.
+  func testAShapeClampedAtTheScreenEdgeDoesNotMoveTheRestingPlace() throws {
+    let visible = try XCTUnwrap(NSScreen.main ?? NSScreen.screens.first).visibleFrame
+    // Low enough that the panel's shadow margin stays clear of the menu bar.
+    let parked = CGPoint(x: visible.maxX - restingSize.width / 2, y: visible.maxY - 200)
+    UserDefaults.standard.set(
+      NSStringFromPoint(parked), forKey: "CepessaSessionsCapsuleAnchor")
+
+    let controller = try makeConnectedController()
+    let panel = try XCTUnwrap(controller.currentPanel)
+    XCTAssertEqual(CepessaSessionCapsuleMetrics.anchor(ofPanelFrame: panel.frame).x, parked.x, accuracy: 1)
+
+    controller.presentNotice("A notice wide enough to be pushed off the edge", style: .neutral)
+    pump(1.2)
+    XCTAssertLessThan(
+      CepessaSessionCapsuleMetrics.anchor(ofPanelFrame: panel.frame).x, parked.x - 1,
+      "the wide shape should have been pushed left to fit")
+    controller.dismissNotice()
+    pump(2.0)
+
+    XCTAssertEqual(CepessaSessionCapsuleMetrics.anchor(ofPanelFrame: panel.frame).x, parked.x, accuracy: 1)
+    XCTAssertEqual(CepessaSessionCapsuleMetrics.anchor(ofPanelFrame: panel.frame).y, parked.y, accuracy: 1)
+  }
+
   // MARK: - Hit testing
 
   /// The container filters points; it must never answer *as* the content.
