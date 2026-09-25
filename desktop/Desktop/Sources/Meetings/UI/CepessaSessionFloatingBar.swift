@@ -12,7 +12,10 @@ final class CepessaSessionsStore {
   private init() {
     let lifecycle = LocalCaptureLifecycle()
     self.captureLifecycle = lifecycle
-    self.model = LocalMeetingAppModel(captureLifecycle: lifecycle)
+    self.model = LocalMeetingAppModel(
+      installsTranscriptionModelOnDemand: true,
+      captureLifecycle: lifecycle
+    )
   }
 }
 

@@ -55,6 +55,12 @@ private final class CepessaSessionsAppDelegate: NSObject, NSApplicationDelegate 
     let model = CepessaSessionsStore.shared.model
     CepessaSessionStatusBarController.shared.connect(model: model)
     CepessaSessionFloatingBarController.shared.connect(model: model)
+    // Install the Hebrew speech model up front when no usable transcription model exists, so
+    // the first recording can be transcribed. A model already on disk is verified, not fetched.
+    let transcriptionModels = model.transcriptionModelProvisioner
+    if !transcriptionModels.hasUsableModel {
+      transcriptionModels.prepareIfNeeded()
+    }
     installDebugHooks()
   }
 

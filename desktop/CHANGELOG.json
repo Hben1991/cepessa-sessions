@@ -5,7 +5,8 @@
     "The recording capsule shows the measured microphone and system-audio levels and can be folded to just the orb and timer",
     "Hebrew titles, rows and transcripts read from the right throughout",
     "Removed Clips",
-    "Production builds are now Release builds with a new app icon"
+    "Production builds are now Release builds with a new app icon",
+    "Sessions now installs its Hebrew speech model by itself when no transcription model is on the Mac, and Settings shows the download, verification and install status"
   ],
   "releases": [
     {

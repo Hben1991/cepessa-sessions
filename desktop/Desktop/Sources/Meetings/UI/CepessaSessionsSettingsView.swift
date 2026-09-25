@@ -126,6 +126,8 @@ struct CepessaSessionsSettingsPage: View {
   @ObservedObject private var sessionModel = CepessaSessionsStore.shared.model
   @ObservedObject private var speakerModels =
     CepessaSessionsStore.shared.model.speakerModelProvisioner
+  @ObservedObject private var transcriptionModels =
+    CepessaSessionsStore.shared.model.transcriptionModelProvisioner
   @ObservedObject private var captureLifecycle = CepessaSessionsStore.shared.captureLifecycle
   @AppStorage("cepessa.sessions.preferredTranscriptLanguage") private var transcriptLanguage =
     "Mixed"
@@ -153,6 +155,7 @@ struct CepessaSessionsSettingsPage: View {
 
         Form {
           captureSection
+          transcriptionSection
           speakerRecognitionSection
           cloudAnalysisSection
           permissionsSection
@@ -166,6 +169,7 @@ struct CepessaSessionsSettingsPage: View {
       CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
       CepessaSessionStatusBarController.shared.connect(model: CepessaSessionsStore.shared.model)
       storageModel.refresh()
+      transcriptionModels.refreshState()
       refreshPermissions()
     }
     .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification))
@@ -173,6 +177,8 @@ struct CepessaSessionsSettingsPage: View {
       _ in
       refreshPermissions()
     }
+    .onChange(of: transcriptLanguage) { _, _ in transcriptionModels.refreshState() }
+    .onChange(of: transcriptionSpeedMode) { _, _ in transcriptionModels.refreshState() }
     .onChange(of: floatingBarEnabled) { _, _ in
       CepessaSessionFloatingBarController.shared.connect(model: CepessaSessionsStore.shared.model)
     }
@@ -233,6 +239,69 @@ struct CepessaSessionsSettingsPage: View {
         isGranted: screenRecordingPermissionGranted,
         openAnchor: "Privacy_ScreenCapture"
       )
+    }
+  }
+
+  private var transcriptionSection: some View {
+    Section {
+      LabeledContent("Hebrew speech model") {
+        HStack(spacing: 8) {
+          if case .downloading(let progress) = transcriptionModels.state {
+            ProgressView(value: progress)
+              .frame(width: 92)
+            Text("Downloading · \(Int((progress * 100).rounded()))%")
+              .monospacedDigit()
+              .foregroundStyle(.secondary)
+          } else {
+            Text(hebrewModelStatus)
+              .foregroundStyle(.secondary)
+          }
+
+          if canInstallHebrewModel {
+            Button("Install") { transcriptionModels.installHebrewModel() }
+          } else if case .failed = transcriptionModels.state {
+            Button("Retry") { transcriptionModels.retry() }
+          }
+        }
+      }
+
+      if let activeModel = transcriptionModels.activeModel, activeModel.kind == .other {
+        Text("Transcribing with \(activeModel.displayName) on this Mac.")
+          .font(SessionsType.text(12))
+          .foregroundStyle(SessionsPalette.inkTertiary)
+      }
+
+      if case .failed(let message) = transcriptionModels.state {
+        Text(message)
+          .font(SessionsType.text(12))
+          .foregroundStyle(SessionsPalette.attention)
+      }
+    } header: {
+      Text("Transcription")
+    } footer: {
+      Text(
+        "Installs automatically the first time it’s needed (about 1.6 GB, once). Transcription runs on this Mac; audio never leaves it."
+      )
+    }
+  }
+
+  private var hebrewModelStatus: String {
+    switch transcriptionModels.state {
+    case .notInstalled: return "Not installed"
+    case .downloading: return "Downloading"
+    case .verifying: return "Verifying"
+    case .ready:
+      return transcriptionModels.isHebrewModelInstalled ? "Ready on this Mac" : "Not installed"
+    case .failed: return "Needs attention"
+    }
+  }
+
+  /// Install stays available while another model does the transcribing.
+  private var canInstallHebrewModel: Bool {
+    switch transcriptionModels.state {
+    case .notInstalled: return true
+    case .ready: return !transcriptionModels.isHebrewModelInstalled
+    case .downloading, .verifying, .failed: return false
     }
   }
 
