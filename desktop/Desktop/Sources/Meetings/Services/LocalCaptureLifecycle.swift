@@ -1,7 +1,11 @@
 import Combine
 import Foundation
 
-/// Serializes ownership of local capture across Sessions and CLIPS.
+/// Serializes ownership of local capture.
+///
+/// A single `Kind` today; the lease model stays generic so another capture
+/// surface (for example a host app embedding Sessions) can share the same
+/// microphone and system-audio pipeline without racing it.
 ///
 /// Callers acquire a lease synchronously, before creating a `Task` or awaiting permission.
 /// The lease token prevents a late completion from changing or releasing a newer capture.
@@ -9,14 +13,11 @@ import Foundation
 final class LocalCaptureLifecycle: ObservableObject {
   enum Kind: String, Equatable, Sendable {
     case session
-    case clip
 
     var displayName: String {
       switch self {
       case .session:
         return "session"
-      case .clip:
-        return "CLIP"
       }
     }
   }

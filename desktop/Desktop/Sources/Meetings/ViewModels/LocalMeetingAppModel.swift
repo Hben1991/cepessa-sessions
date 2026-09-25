@@ -41,7 +41,6 @@ final class LocalSessionAppModel: ObservableObject {
   @Published var isSessionLibraryPresented = false
   @Published private(set) var isRecording = false
   @Published private(set) var isTranscribing = false
-  @Published private(set) var isGeneratingRecap = false
   @Published private(set) var isMicrophoneCaptureActive = false
   @Published private(set) var isMicrophoneMuted = false
   @Published private(set) var isSystemAudioCaptureActive = false
@@ -152,10 +151,6 @@ final class LocalSessionAppModel: ObservableObject {
 
   func processingSnapshot(for sessionID: LocalSession.ID) -> LocalSessionProcessingSnapshot? {
     processingSnapshots.first { $0.id == sessionID }
-  }
-
-  func isGeneratingRecap(for sessionID: LocalSession.ID) -> Bool {
-    false
   }
 
   func canRetranscribe(_ session: LocalSession) -> Bool {
@@ -655,16 +650,6 @@ final class LocalSessionAppModel: ObservableObject {
     return fileLayout.promptPackageJSONURL(for: resolvedSessionID)
   }
 
-  func sendDocumentChatMessage(_ text: String, for sessionID: LocalSession.ID? = nil) {}
-
-  func regenerateRecap(for sessionID: LocalSession.ID? = nil) {}
-
-  func applyPendingDocumentChatProposal(for sessionID: LocalSession.ID? = nil) {}
-
-  func undoLastDocumentChatEdit(for sessionID: LocalSession.ID? = nil) {}
-
-  func discardPendingDocumentChatProposal(for sessionID: LocalSession.ID? = nil) {}
-
   private func startRecording(lease: LocalCaptureLifecycle.Lease) async {
     do {
       let session = try await recorder.startRecording()
@@ -706,7 +691,7 @@ final class LocalSessionAppModel: ObservableObject {
   }
 
   func refreshLibraryIfIdle() {
-    guard !captureLifecycle.isBusy, !isTranscribing, !isGeneratingRecap else { return }
+    guard !captureLifecycle.isBusy, !isTranscribing else { return }
     loadStoredSessions()
   }
 
