@@ -1169,6 +1169,11 @@ private final class LocalMeetingWhisperContextCache {
       return cached
     }
 
+    guard FileManager.default.fileExists(atPath: modelURL.path) else {
+      throw LocalSessionTranscriptionServiceError.modelLoadFailed(
+        "No whisper model is installed at \(modelURL.path).")
+    }
+
     configureMetalResourcesIfNeeded()
 
     var contextParams = whisper_context_default_params()

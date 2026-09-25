@@ -830,7 +830,7 @@ struct LocalSessionFileLayout {
     return validGGMLFiles.count == 1 ? validGGMLFiles[0] : nil
   }
 
-  private func isValidGGMLModelFile(_ url: URL, fileManager: FileManager) -> Bool {
+  func isValidGGMLModelFile(_ url: URL, fileManager: FileManager) -> Bool {
     guard
       let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
       values.isRegularFile == true,

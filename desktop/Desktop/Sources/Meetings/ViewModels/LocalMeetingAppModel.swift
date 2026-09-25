@@ -62,8 +62,12 @@ final class LocalSessionAppModel: ObservableObject {
   @Published private(set) var isCaptureTransitioning = false
   let captureLifecycle: LocalCaptureLifecycle
   let speakerModelProvisioner: LocalSessionSpeakerModelProvisioner
+  let transcriptionModelProvisioner: LocalSessionTranscriptionModelProvisioner
 
   private let fileLayout: LocalSessionFileLayout
+  /// When set, a transcription that finds no usable speech model starts installing the pinned
+  /// Hebrew model and tells the owner so. Off by default so tests and previews never download.
+  private let installsTranscriptionModelOnDemand: Bool
   private let store: LocalSessionStore?
   private let insightStore: LocalSessionInsightStore
   private let insightProviderOverride: (any LocalSessionInsightProviding)?
@@ -90,6 +94,8 @@ final class LocalSessionAppModel: ObservableObject {
     transcriptionService: any LocalSessionTranscribing = LocalMeetingTranscriptionService(),
     audioImportService: any LocalSessionAudioImporting = LocalSessionAudioImportService(),
     speakerModelProvisioner: LocalSessionSpeakerModelProvisioner? = nil,
+    transcriptionModelProvisioner: LocalSessionTranscriptionModelProvisioner? = nil,
+    installsTranscriptionModelOnDemand: Bool = false,
     fileManager: FileManager = .default,
     captureLifecycle: LocalCaptureLifecycle? = nil,
     insightProvider: (any LocalSessionInsightProviding)? = nil
@@ -109,6 +115,13 @@ final class LocalSessionAppModel: ObservableObject {
         fileManager: fileManager
       )
     self.speakerModelProvisioner = resolvedSpeakerModelProvisioner
+    self.transcriptionModelProvisioner =
+      transcriptionModelProvisioner
+      ?? LocalSessionTranscriptionModelProvisioner(
+        fileLayout: resolvedFileLayout,
+        fileManager: fileManager
+      )
+    self.installsTranscriptionModelOnDemand = installsTranscriptionModelOnDemand
     self.recorder = LocalMeetingRecorder(fileLayout: resolvedFileLayout)
     self.transcriptionService = transcriptionService
     self.evidenceTranscriptionCoordinator = LocalSessionEvidenceTranscriptionCoordinator(
@@ -769,6 +782,14 @@ final class LocalSessionAppModel: ObservableObject {
     )
     let resolvedAudioURL =
       audioURL ?? self.resolvedAudioURL(for: session) ?? fileLayout.mixedAudioURL(for: sessionID)
+    // Without a usable speech model every source fails to load. Start installing the pinned
+    // model now (never twice) and explain a failure caused by it instead of the loader error.
+    let isMissingTranscriptionModel =
+      installsTranscriptionModelOnDemand
+      && !transcriptionModelProvisioner.isUsable(transcriptionPlan)
+    if isMissingTranscriptionModel {
+      transcriptionModelProvisioner.prepareIfNeeded()
+    }
 
     beginTranscription(for: sessionID)
     await warmUpTranscriptionModelIfNeeded(plan: transcriptionPlan)
@@ -822,6 +843,10 @@ final class LocalSessionAppModel: ObservableObject {
       )
 
       let isReady = result.envelope.run.disposition == .ready
+      // Evidence keeps the loader's own issue text; only the owner-facing message changes.
+      let missingModelMessage =
+        isMissingTranscriptionModel && result.envelope.run.disposition == .failed
+        ? transcriptionModelProvisioner.unavailableModelMessage : nil
       let retainsPriorTranscript =
         !isReady && !previouslySavedSession.transcriptText.isEmpty
         && (previouslySavedSession.status == .ready
@@ -834,12 +859,14 @@ final class LocalSessionAppModel: ObservableObject {
         updatedSession.latestTranscriptionAttempt = result.summary
         updatedSession.processingError =
           "The latest attempt needs review. Showing the previously saved transcript. "
-          + (result.summary.issues.first ?? "The recording could not be fully verified.")
+          + (missingModelMessage ?? result.summary.issues.first
+            ?? "The recording could not be fully verified.")
       } else {
         updatedSession.transcriptSegments = result.transcriptSegments
         updatedSession.transcriptionEvidence = result.summary
         updatedSession.latestTranscriptionAttempt = nil
-        updatedSession.processingError = isReady ? nil : result.summary.issues.first
+        updatedSession.processingError =
+          isReady ? nil : missingModelMessage ?? result.summary.issues.first
       }
       let latestSession = sessions.first { $0.id == sessionID } ?? session
       updatedSession.titleOrigin = latestSession.titleOrigin
@@ -850,7 +877,7 @@ final class LocalSessionAppModel: ObservableObject {
       upsertSession(updatedSession)
       if result.envelope.run.disposition != .ready {
         recorderErrorMessage =
-          result.summary.issues.first
+          missingModelMessage ?? result.summary.issues.first
           ?? "The transcript was saved as non-ready because its evidence was incomplete."
       }
       endTranscription(for: sessionID, clearSnapshot: true)
