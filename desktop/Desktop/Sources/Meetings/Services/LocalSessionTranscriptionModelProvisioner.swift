@@ -164,25 +164,13 @@ struct LocalSessionTranscriptionModelValidator: @unchecked Sendable {
   }
 
   func sha256(of url: URL) throws -> String {
-    let handle: FileHandle
     do {
-      handle = try FileHandle(forReadingFrom: url)
-    } catch {
-      throw LocalSessionTranscriptionModelValidationError.unreadable(error.localizedDescription)
-    }
-    defer { try? handle.close() }
-    var hasher = SHA256()
-    do {
-      while let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty {
-        try Task.checkCancellation()
-        hasher.update(data: chunk)
-      }
+      return try LocalFileDigest.sha256(of: url, checkingCancellation: true)
     } catch is CancellationError {
       throw CancellationError()
     } catch {
       throw LocalSessionTranscriptionModelValidationError.unreadable(error.localizedDescription)
     }
-    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }
 
   private func readManifest(_ url: URL) -> LocalSessionTranscriptionModelManifest? {
