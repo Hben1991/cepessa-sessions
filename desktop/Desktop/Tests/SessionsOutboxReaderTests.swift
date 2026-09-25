@@ -24,6 +24,7 @@ final class SessionsOutboxReaderTests: XCTestCase {
   }
 
   func testTheNewestVerifiedRevisionOfEachRecordingWins() throws {
+    // As the writer does, every run of the same recording has its own evidence ID.
     try write(envelope(evidenceID: "a", revision: 1, title: "First pass"), as: "a1.json")
     try write(envelope(evidenceID: "a", revision: 2, title: "Second pass"), as: "a2.json")
     try write(
@@ -35,6 +36,30 @@ final class SessionsOutboxReaderTests: XCTestCase {
     XCTAssertEqual(snapshot.rejected, [])
     XCTAssertEqual(snapshot.evidence.map(\.session.title), ["Other", "Second pass"])
     XCTAssertEqual(snapshot.evidence.last?.revision, 2)
+    XCTAssertEqual(snapshot.evidence.last?.evidenceID, "meeting:session-a:run:run-a-2")
+  }
+
+  func testAFailedRetryNeverHidesAReadyTranscript() throws {
+    try write(envelope(evidenceID: "a", revision: 1, title: "Good"), as: "a1.json")
+    try write(
+      envelope(evidenceID: "a", revision: 2, title: "Retry", disposition: "failed"),
+      as: "a2.json")
+
+    XCTAssertEqual(
+      try SessionsOutboxReader(baseDirectory: root).snapshot().evidence.map(\.revision), [1])
+
+    try write(envelope(evidenceID: "a", revision: 3, title: "Better"), as: "a3.json")
+    XCTAssertEqual(
+      try SessionsOutboxReader(baseDirectory: root).snapshot().evidence.map(\.revision), [3])
+  }
+
+  func testARecordingThatNeverSucceededStillAppearsWithItsNewestAttempt() throws {
+    try write(envelope(evidenceID: "a", revision: 1, title: "x", disposition: "failed"), as: "1.json")
+    try write(
+      envelope(evidenceID: "a", revision: 2, title: "x", disposition: "degraded"), as: "2.json")
+
+    let snapshot = try SessionsOutboxReader(baseDirectory: root).snapshot()
+    XCTAssertEqual(snapshot.evidence.map(\.revision), [2])
   }
 
   func testATamperedEnvelopeIsRejectedAndNamedNeverSilentlyDropped() throws {
@@ -86,14 +111,16 @@ final class SessionsOutboxReaderTests: XCTestCase {
 
   // MARK: - Fixtures
 
+  /// `evidenceID` names the recording; each revision gets the writer's
+  /// per-run evidence ID, `meeting:<session>:run:<run>`.
   private func envelope(
     evidenceID: String, revision: Int, title: String,
-    startedAt: String = "2026-09-25T08:00:00Z"
+    startedAt: String = "2026-09-25T08:00:00Z", disposition: String = "ready"
   ) -> [String: Any] {
     [
       "schemaVersion": SessionsHandoff.schemaVersion,
-      "evidenceId": evidenceID,
-      "sourceRef": "cepessa-sessions:\(evidenceID)",
+      "evidenceId": "meeting:session-\(evidenceID):run:run-\(evidenceID)-\(revision)",
+      "sourceRef": "cepessa-session://session-\(evidenceID)/transcript",
       "revision": revision,
       "session": [
         "id": "session-\(evidenceID)", "title": title, "startedAt": startedAt, "status": "ready",
@@ -102,7 +129,7 @@ final class SessionsOutboxReaderTests: XCTestCase {
         "id": "run-\(evidenceID)-\(revision)",
         "createdAt": "2026-09-25T09:00:0\(revision)Z",
         "completedAt": "2026-09-25T09:00:0\(revision)Z",
-        "disposition": "ready",
+        "disposition": disposition,
         "engine": "whisperCpp",
         "model": ["identifier": "hebrewTurbo", "modelBasename": "ggml-model.bin"],
         "requestedLanguage": "auto",

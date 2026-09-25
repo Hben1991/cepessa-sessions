@@ -36,11 +36,14 @@ Resolving the package also fetches Sessions' transcription dependencies
 - One immutable JSON envelope per transcription revision, schema
   `meeting-evidence/v1`. Sessions never rewrites or deletes one in place, so a
   reader needs no lock.
-- Identity: `evidenceId` is stable per recording; `revision` increases with
-  each transcription attempt; `contentHash` is SHA-256 over the canonical
-  envelope (sorted keys, bounded micro-unit numbers, the hash field removed).
-  Consumers should key on `evidenceId`, keep the highest verified revision, and
-  treat an identical `contentHash` as already ingested.
+- Identity: `session.id` names the recording. Each transcription attempt
+  writes a new envelope with its own `evidenceId` (`meeting:<session>:run:<run>`)
+  and a higher `revision`. `contentHash` is SHA-256 over the canonical envelope
+  (sorted keys, bounded micro-unit numbers, the hash field removed).
+  Consumers should key on `session.id` and keep what Sessions shows: the newest
+  verified revision whose `run.disposition` is `ready`, or the newest revision
+  when none is ready. `SessionsOutboxReader.snapshot()` applies exactly this
+  rule. Treat an identical `contentHash` as already ingested.
 - The canonicalizer lives in `SessionsHandoff` and Sessions' own writer calls
   it, so writer and reader cannot drift. A contract test
   (`testPublishedEvidenceIsReadAndVerifiedByTheHandoffLibrary`) writes evidence

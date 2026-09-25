@@ -5,8 +5,10 @@ import Foundation
 /// The outbox is append-only: Sessions writes one immutable envelope per
 /// evidence revision (`<event id>.json`) and never rewrites one in place. A
 /// reader therefore needs no lock; it lists the directory, verifies each
-/// envelope against its own content hash, and keeps the newest revision of
-/// each recording.
+/// envelope against its own content hash, and picks one revision per
+/// recording the way Sessions itself does: the newest ready revision, so a
+/// failed "Transcribe Again" never hides a good transcript, or the newest
+/// revision when none is ready yet.
 ///
 /// Nothing here writes, moves or deletes a file.
 public struct SessionsOutboxReader: Sendable {
@@ -30,7 +32,8 @@ public struct SessionsOutboxReader: Sendable {
   }
 
   public struct Snapshot: Equatable, Sendable {
-    /// The newest verified revision of each recording, newest recording first.
+    /// One verified revision per recording (see the type's notes), newest
+    /// recording first.
     public let evidence: [SessionsEvidence]
     /// Files that were skipped, with the reason. Never silently dropped.
     public let rejected: [RejectedFile]
@@ -66,16 +69,18 @@ public struct SessionsOutboxReader: Sendable {
     .filter { $0.pathExtension == "json" }
     .sorted { $0.lastPathComponent < $1.lastPathComponent }
 
-    var newest: [String: SessionsEvidence] = [:]
+    // Every run has its own evidence ID; the recording is the session.
+    var chosen: [String: SessionsEvidence] = [:]
     var rejected: [RejectedFile] = []
 
     for url in entries {
       switch Result(catching: { try evidence(at: url) }) {
       case .success(let evidence):
-        if let current = newest[evidence.evidenceID], !Self.isNewer(evidence, than: current) {
+        let recording = evidence.session.id.lowercased()
+        if let current = chosen[recording], !Self.isPreferred(evidence, over: current) {
           continue
         }
-        newest[evidence.evidenceID] = evidence
+        chosen[recording] = evidence
       case .failure(let error):
         rejected.append(
           RejectedFile(
@@ -84,7 +89,7 @@ public struct SessionsOutboxReader: Sendable {
       }
     }
 
-    let ordered = newest.values.sorted { $0.session.startedAt > $1.session.startedAt }
+    let ordered = chosen.values.sorted { $0.session.startedAt > $1.session.startedAt }
     return Snapshot(evidence: ordered, rejected: rejected)
   }
 
@@ -130,7 +135,11 @@ public struct SessionsOutboxReader: Sendable {
     return evidence
   }
 
-  static func isNewer(_ candidate: SessionsEvidence, than current: SessionsEvidence) -> Bool {
+  static func isPreferred(_ candidate: SessionsEvidence, over current: SessionsEvidence) -> Bool {
+    let candidateIsReady = candidate.run.disposition == "ready"
+    if candidateIsReady != (current.run.disposition == "ready") {
+      return candidateIsReady
+    }
     if candidate.revision != current.revision {
       return candidate.revision > current.revision
     }
