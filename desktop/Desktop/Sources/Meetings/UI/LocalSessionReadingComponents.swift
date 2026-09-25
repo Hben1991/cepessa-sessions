@@ -231,7 +231,7 @@ struct LocalSessionAttachmentsStrip: View {
   private func tile(for attachment: LocalSessionAttachment) -> some View {
     let url = LocalSessionAttachmentResolver.localURL(for: attachment, in: folder)
     let isImage = attachment.kind == .image || attachment.kind == .capture
-    let image = isImage ? url.flatMap { NSImage(contentsOf: $0) } : nil
+    let image = isImage ? url.flatMap { SessionsImageCache.image(at: $0) } : nil
 
     Button {
       if let image {

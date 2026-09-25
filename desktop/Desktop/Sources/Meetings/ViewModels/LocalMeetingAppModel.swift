@@ -51,9 +51,10 @@ final class LocalSessionAppModel: ObservableObject {
   @Published private(set) var isMicrophoneCaptureActive = false
   @Published private(set) var isMicrophoneMuted = false
   @Published private(set) var isSystemAudioCaptureActive = false
-  @Published private(set) var micLevel: Double = 0
-  @Published private(set) var systemLevel: Double = 0
-  @Published private(set) var recordingDurationText = LocalMeetingRecordingTimer.shared
+  // Live readouts: subscribed to through `$`, never redraw observing views.
+  @LiveReadout private(set) var micLevel: Double = 0
+  @LiveReadout private(set) var systemLevel: Double = 0
+  @LiveReadout private(set) var recordingDurationText = LocalMeetingRecordingTimer.shared
     .formattedDuration
   @Published private(set) var recorderErrorMessage: String?
   @Published private(set) var sessionSaveErrors: [LocalSession.ID: String] = [:]
