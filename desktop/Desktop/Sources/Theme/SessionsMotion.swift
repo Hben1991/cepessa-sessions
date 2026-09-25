@@ -58,12 +58,13 @@ extension EnvironmentValues {
 private struct SessionsArrival: ViewModifier {
   let order: Int
   let after: Double
+  let isEnabled: Bool
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.sessionsIsStill) private var isStill
   @State private var arrived = false
 
-  private var isShown: Bool { arrived || isStill }
+  private var isShown: Bool { arrived || isStill || !isEnabled }
 
   func body(content: Content) -> some View {
     content
@@ -71,7 +72,7 @@ private struct SessionsArrival: ViewModifier {
       .blur(radius: isShown || reduceMotion ? 0 : SessionsMotion.arrivalBlur)
       .offset(y: isShown || reduceMotion ? 0 : 6)
       .onAppear {
-        guard !arrived, !isStill else { return }
+        guard !arrived, !isStill, isEnabled else { return }
         let slot = Double(min(order, SessionsMotion.maximumStaggeredItems))
         let delay = after + SessionsMotion.arrivalDelay + slot * SessionsMotion.stagger
         withAnimation(
@@ -87,9 +88,10 @@ private struct SessionsArrival: ViewModifier {
 
 extension View {
   /// Staggered arrival: `order` is the line's place in its group; `after`
-  /// holds the whole group back.
-  func sessionsArrival(_ order: Int = 0, after: Double = 0) -> some View {
-    modifier(SessionsArrival(order: order, after: after))
+  /// holds the whole group back. A view with `isEnabled` false is simply
+  /// there, for rows of a lazy list that appear as the reader scrolls.
+  func sessionsArrival(_ order: Int = 0, after: Double = 0, isEnabled: Bool = true) -> some View {
+    modifier(SessionsArrival(order: order, after: after, isEnabled: isEnabled))
   }
 }
 

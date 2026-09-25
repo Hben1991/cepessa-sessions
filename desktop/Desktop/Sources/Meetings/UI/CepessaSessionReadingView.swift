@@ -9,6 +9,9 @@ import SwiftUI
 /// Long text is read, not watched: only the header and the first few turns
 /// arrive with motion, and they arrive in well under a second.
 struct CepessaSessionReadingView: View {
+  /// Turns that arrive with the staggered reveal when a session opens.
+  static let arrivingTurns = 6
+
   @ObservedObject var model: LocalMeetingAppModel
   let back: () -> Void
 
@@ -16,9 +19,11 @@ struct CepessaSessionReadingView: View {
   @AppStorage("cepessa.reading.textScale") private var textScale: Double = 1.0
   @GestureState private var pinch: CGFloat = 1
   @State private var enlargedImage: NSImage?
-  @State private var renameTarget: LocalSessionTranscriptSegment?
+  // Each rename remembers its session when it begins: starting a recording
+  // or pinning a screenshot while the alert is open changes the selection.
+  @State private var renameTarget: (segment: LocalSessionTranscriptSegment, sessionID: UUID)?
   @State private var proposedSpeakerName = ""
-  @State private var renameSession = false
+  @State private var renamingSessionID: UUID?
   @State private var proposedTitle = ""
   @State private var editError: String?
   @State private var isTitleHovered = false
@@ -52,13 +57,21 @@ struct CepessaSessionReadingView: View {
         lightbox(enlargedImage)
       }
     }
-    .alert("Rename session", isPresented: $renameSession) {
+    .alert(
+      "Rename session",
+      isPresented: Binding(
+        get: { renamingSessionID != nil },
+        set: { if !$0 { renamingSessionID = nil } }
+      ),
+      presenting: renamingSessionID
+    ) { sessionID in
       TextField("Session title", text: $proposedTitle)
-      Button("Cancel", role: .cancel) {}
+      Button("Cancel", role: .cancel) { renamingSessionID = nil }
       Button("Save") {
         editError =
-          model.updateSessionTitle(proposedTitle)
+          model.updateSessionTitle(proposedTitle, for: sessionID)
           ? nil : model.recorderErrorMessage ?? "The session title could not be saved."
+        renamingSessionID = nil
       }
       .disabled(proposedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
@@ -69,13 +82,14 @@ struct CepessaSessionReadingView: View {
         set: { if !$0 { renameTarget = nil } }
       ),
       presenting: renameTarget
-    ) { segment in
+    ) { target in
       TextField("Speaker name", text: $proposedSpeakerName)
       Button("Cancel", role: .cancel) { renameTarget = nil }
       Button("Save") {
-        if let speakerID = segment.speakerID {
+        if let speakerID = target.segment.speakerID {
           editError =
-            model.renameSpeaker(speakerID: speakerID, to: proposedSpeakerName)
+            model.renameSpeaker(
+              speakerID: speakerID, to: proposedSpeakerName, in: target.sessionID)
             ? nil : model.recorderErrorMessage ?? "The speaker name could not be saved."
         }
         renameTarget = nil
@@ -195,8 +209,21 @@ struct CepessaSessionReadingView: View {
         }
         .onChange(of: model.insightReveal?.generation) { _, _ in
           guard let reveal = model.insightReveal, reveal.sessionID == session.id else { return }
+          // The transcript is a lazy list of turns: only a turn is a row it can
+          // scroll to before it is built. Reach the turn, then the line in it.
+          let turnID =
+            SessionTranscriptTurn.group(session.transcriptTimelineItems)
+            .first { $0.items.contains { $0.segment.id == reveal.segmentID } }?.id
+            ?? reveal.segmentID
           withAnimation(.easeInOut(duration: 0.25)) {
-            scroller.scrollTo(reveal.segmentID, anchor: .center)
+            scroller.scrollTo(turnID, anchor: .center)
+          }
+          if turnID != reveal.segmentID {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+              withAnimation(.easeInOut(duration: 0.2)) {
+                scroller.scrollTo(reveal.segmentID, anchor: .center)
+              }
+            }
           }
         }
       }
@@ -219,7 +246,9 @@ struct CepessaSessionReadingView: View {
           renameButton(session)
         }
         SessionsRevealedLine(
-          text: session.displayTitle,
+          // Isolated in the direction it is aligned to, so "Q3 סיכום" reads
+          // right to left like its alignment says.
+          text: LocalTranscriptTextDirection.displayText(session.displayTitle),
           font: SessionsType.display(titleSize),
           alignment: isRTL ? .trailing : .leading,
           tracking: titleSize * -0.02
@@ -341,7 +370,7 @@ struct CepessaSessionReadingView: View {
 
   private func beginRename(_ session: LocalSession) {
     proposedTitle = session.title
-    renameSession = true
+    renamingSessionID = session.id
   }
 
   // MARK: Transcript
@@ -357,7 +386,9 @@ struct CepessaSessionReadingView: View {
       ForEach(Array(turns.enumerated()), id: \.element.id) { index, turn in
         turnView(turn, in: session, measure: measure, voices: voices)
           .modifier(SessionsTurnHighlight())
-          .sessionsArrival(index + 4)
+          // Only the opening turns arrive; later ones are simply there when
+          // scrolled to, never blank while a delayed reveal catches up.
+          .sessionsArrival(index + 4, isEnabled: index < Self.arrivingTurns)
       }
     }
   }
@@ -420,7 +451,7 @@ struct CepessaSessionReadingView: View {
           Menu {
             Button("Rename Speaker…") {
               proposedSpeakerName = speaker
-              renameTarget = segment
+              renameTarget = (segment, session.id)
             }
             if segment.identityStatus == .confirmed {
               Button("Undo Latest Rename") {
@@ -496,7 +527,7 @@ struct CepessaSessionReadingView: View {
         attachment.kind == .image || attachment.kind == .capture,
         let url = LocalSessionAttachmentResolver.localURL(
           for: attachment, in: model.sessionFolderURL(for: session.id)),
-        let image = NSImage(contentsOf: url)
+        let image = SessionsImageCache.image(at: url)
       else {
         return nil
       }
