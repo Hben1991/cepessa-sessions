@@ -20,7 +20,8 @@ struct CepessaSessionCapsuleMenuItem: Identifiable {
   }
 
   static func header(_ title: String) -> Self { Self(kind: .header(title)) }
-  static let separator = Self(kind: .separator)
+  /// A new one each time: every row, separators included, needs its own id.
+  static var separator: Self { Self(kind: .separator) }
 
   var isSelectable: Bool {
     if case .action(_, _, _, let isEnabled, _) = kind { return isEnabled }
@@ -43,6 +44,7 @@ final class CepessaSessionCapsuleMenuController {
   private var closedByClickAt = Date.distantPast
 
   var isOpen: Bool { panel?.isVisible == true }
+  var currentPanel: NSPanel? { panel }
 
   /// A click outside closes the menu before the control under it sees the
   /// click. When that control is the one that opened the menu, the click
@@ -97,24 +99,27 @@ final class CepessaSessionCapsuleMenuController {
       panel.animator().alphaValue = 1
     }
 
+    // Each close is for this menu only: a click that opens the next menu
+    // (a right-click on the capsule) must not be closed by this one's
+    // queued close.
     outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
       matching: [.leftMouseDown, .rightMouseDown]
-    ) { [weak self] _ in
-      Task { @MainActor in self?.closeAfterClick() }
+    ) { [weak self, weak panel] _ in
+      Task { @MainActor in self?.closeAfterClick(panel) }
     }
     localClickMonitor = NSEvent.addLocalMonitorForEvents(
       matching: [.leftMouseDown, .rightMouseDown]
-    ) { [weak self] event in
-      if event.window !== self?.panel {
+    ) { [weak self, weak panel] event in
+      if event.window !== panel {
         self?.closedByClickAt = Date()
-        Task { @MainActor in self?.closeAfterClick() }
+        Task { @MainActor in self?.closeAfterClick(panel) }
       }
       return event
     }
   }
 
-  private func closeAfterClick() {
-    guard isOpen else { return }
+  func closeAfterClick(_ opened: NSPanel?) {
+    guard let opened, opened === panel, isOpen else { return }
     closedByClickAt = Date()
     close()
   }
