@@ -10,9 +10,10 @@ import SwiftUI
 ///   reflows while a clock runs.
 ///
 /// Neither Cal Sans nor Geist draws Hebrew. Each face therefore carries a
-/// cascade to the matching system face, so a Hebrew title or transcript
-/// renders in SF at the same size and weight instead of the system's generic
-/// last-resort font. Both faces ship inside the app (SIL OFL 1.1, see
+/// cascade: the matching system face, then that face's own fallbacks for
+/// Hebrew and English. A Hebrew title or transcript renders in SF Hebrew at
+/// the same size and weight. (SF itself has no Hebrew glyphs, so a cascade of
+/// SF alone ended in Lucida Grande.) Both faces ship inside the app (SIL OFL 1.1, see
 /// `Resources/Fonts/OFL.txt`); if registration ever fails, every call falls
 /// back to the system face and nothing else changes.
 enum SessionsType {
@@ -23,11 +24,18 @@ enum SessionsType {
   static func registerBundledFonts(bundle: Bundle = .module) {
     guard !didRegister else { return }
     didRegister = true
-    let urls = bundle.urls(forResourcesWithExtension: "otf", subdirectory: "Fonts")
-      ?? bundle.urls(forResourcesWithExtension: "otf", subdirectory: nil) ?? []
-    for url in urls {
+    for url in bundledFontURLs(in: bundle) {
       CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
     }
+  }
+
+  /// The packaged faces. SwiftPM flattens processed resources, so the fonts
+  /// sit at the bundle's top level, not in `Fonts/` (and a missing
+  /// subdirectory answers with an empty list, not nil).
+  static func bundledFontURLs(in bundle: Bundle = .module) -> [URL] {
+    let nested = bundle.urls(forResourcesWithExtension: "otf", subdirectory: "Fonts") ?? []
+    return nested.isEmpty
+      ? bundle.urls(forResourcesWithExtension: "otf", subdirectory: nil) ?? [] : nested
   }
 
   static func display(_ size: CGFloat) -> Font {
@@ -74,7 +82,7 @@ enum SessionsType {
   @MainActor private static var didRegister = false
   nonisolated(unsafe) private static let cache = NSCache<NSString, CTFont>()
 
-  private static func cachedFont(
+  static func cachedFont(
     name: String, size: CGFloat, weight: Font.Weight, rounded: Bool
   ) -> CTFont {
     let key = "\(name)|\(size)|\(rounded)" as NSString
@@ -87,8 +95,11 @@ enum SessionsType {
 
     let font: CTFont
     if let face = NSFont(name: name, size: size) {
+      let fallbacks =
+        CTFontCopyDefaultCascadeListForLanguages(system as CTFont, ["he", "en"] as CFArray)
+        as? [NSFontDescriptor] ?? []
       let descriptor = face.fontDescriptor.addingAttributes([
-        .cascadeList: [system.fontDescriptor]
+        .cascadeList: [system.fontDescriptor] + fallbacks
       ])
       font = (NSFont(descriptor: descriptor, size: size) ?? face) as CTFont
     } else {
