@@ -11,7 +11,8 @@
   `SessionsHandoff` (Cepessa reads finished sessions through it); helper
   `CepessaMicrophoneCaptureHelper`; tests `CepessaSessionsTests`.
 - `desktop/run.sh` — the only build/package/install path for the app.
-- `mcp/` — local MCP server over the Sessions store and its evidence outbox.
+- `mcp/` — read-only MCP server that lists, reads and searches session
+  transcripts (`cepessa-sessions-mcp`). It never writes to the Sessions store.
 - `DESIGN.md`, `PRODUCT.md` — the design system and product principles. Read
   them before any UI change.
 - `desktop/CEPESSA-INTEGRATION.md` — the Sessions → Cepessa handoff contract.
@@ -74,7 +75,7 @@ Use for the running Sessions Dev app (`agent-swift connect --bundle-id me.cepess
 - Pass a stable `--scratch-path` per agent lane (Claude:
   `/private/tmp/claude-derived-data/<name>`). No UUID/timestamp copies.
 - `desktop/scripts/test-run-safety.sh` checks run.sh's guards; run it after
-  editing run.sh. `desktop/scripts/` is gitignored — add new files with `git add -f`.
+  editing run.sh.
 
 ## Test
 
@@ -82,7 +83,8 @@ Use for the running Sessions Dev app (`agent-swift connect --bundle-id me.cepess
   Live TypeSafe tests skip without `TYPESAFE_API_KEY`.
 - Design review renders (every surface, light and dark):
   `CEPESSA_RENDER_FIXTURES=/abs/dir xcrun swift test ... --filter SessionsFixtureRenderTests`.
-- MCP: `cd mcp && uv run --frozen pytest -q`; lint with `uv run --frozen ruff check`.
+- MCP: `cd mcp && uv run --frozen pytest -q`; lint with `uv run --frozen ruff check`
+  and `uv run --frozen ruff format --check` (CI runs the same on every MCP change).
 - A green test run is source evidence, not proof of the installed app. Report
   source, tests, installed app, and live runs separately.
 
