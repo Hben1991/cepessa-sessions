@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Cepessa Sessions is a floating-bar-first accessory app: no dock icon, no
-/// window at launch. The floating bar and the status bar item are the app;
-/// the sessions window and Settings open on demand from their menus.
+/// Cepessa Sessions is a recorder first: no Dock icon, no window at launch.
+/// The floating capsule and the menu-bar item are the app; the sessions
+/// window and Settings open on demand from their menus.
 @main
 struct CepessaSessionsApp: App {
   @NSApplicationDelegateAdaptor(CepessaSessionsAppDelegate.self) private var appDelegate
@@ -12,8 +12,7 @@ struct CepessaSessionsApp: App {
   var body: some Scene {
     Settings {
       CepessaSessionsSettingsPage()
-        .withFontScaling()
-        .frame(minWidth: 520, minHeight: 440)
+        .frame(width: 560, height: 620)
     }
     .commands {
       CommandGroup(replacing: .appSettings) {
@@ -24,7 +23,7 @@ struct CepessaSessionsApp: App {
       }
 
       CommandMenu("Sessions") {
-        Button("Browse All Sessions…") {
+        Button("All Sessions") {
           CepessaSessionsWindowController.shared.showLibrary()
         }
         .keyboardShortcut("o", modifiers: .command)
@@ -36,10 +35,10 @@ struct CepessaSessionsApp: App {
 
         Divider()
 
-        Button("Show Clips") {
-          CepessaSessionsWindowController.shared.show(destination: .clips)
+        Button("Export Transcript…") {
+          CepessaSessionsWindowController.shared.exportSelectedTranscript()
         }
-        .keyboardShortcut("l", modifiers: [.command, .shift])
+        .keyboardShortcut("e", modifiers: .command)
       }
     }
   }
@@ -51,6 +50,7 @@ private final class CepessaSessionsAppDelegate: NSObject, NSApplicationDelegate 
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
+    SessionsType.registerBundledFonts()
     CepessaSessionFloatingBarPreferences.installDefaults()
     let model = CepessaSessionsStore.shared.model
     CepessaSessionStatusBarController.shared.connect(model: model)
@@ -69,16 +69,13 @@ private final class CepessaSessionsAppDelegate: NSObject, NSApplicationDelegate 
     terminationPending = true
     Task { @MainActor in
       await store.model.finishCaptureForTermination()
-      await store.clipModel.finishCaptureForTermination()
       sender.reply(toApplicationShouldTerminate: true)
     }
     return .terminateLater
   }
 
   /// Debug-only remote control for UI verification (agent test harnesses).
-  /// Distributed notifications don't reach the app under the sandbox, so this
-  /// watches for a marker file inside the app's own container instead. The
-  /// path is printed at launch; writing the file toggles recording.
+  /// Writing the marker file toggles recording; the path is printed at launch.
   private func installDebugHooks() {
     #if DEBUG
       let configuredMarker = ProcessInfo.processInfo.environment[
@@ -113,16 +110,18 @@ private final class CepessaSessionsAppDelegate: NSObject, NSApplicationDelegate 
   }
 }
 
-// MARK: - Session window (on demand)
+// MARK: - Sessions window (on demand)
 
-enum CepessaSessionsWindowDestination {
-  case sessions
-  case clips
-}
-
+/// Where the sessions window is: the library of every recording, or one
+/// recording being read.
 @MainActor
 final class CepessaSessionsWindowState: ObservableObject {
-  @Published var destination: CepessaSessionsWindowDestination = .sessions
+  enum Place: Equatable {
+    case library
+    case session
+  }
+
+  @Published var place: Place = .library
 }
 
 @MainActor
@@ -132,26 +131,24 @@ final class CepessaSessionsWindowController: NSObject, NSWindowDelegate {
   let state = CepessaSessionsWindowState()
 
   private var window: NSWindow?
-  private var readingToolbar: CepessaSessionReadingToolbar?
+  private let exporter = LocalSessionRecapExporter()
 
-  func show(destination: CepessaSessionsWindowDestination? = nil) {
-    if let destination {
-      state.destination = destination
-    }
+  func show() {
     ensureWindow()
-    refreshWindowChrome()
     NSApp.activate(ignoringOtherApps: true)
     window?.makeKeyAndOrderFront(nil)
   }
 
   func showSession(id: UUID) {
     CepessaSessionsStore.shared.model.selectSession(id: id)
-    show(destination: .sessions)
+    state.place = .session
+    show()
   }
 
   func showLibrary() {
-    show(destination: .sessions)
-    CepessaSessionsStore.shared.model.isSessionLibraryPresented = true
+    state.place = .library
+    show()
+    CepessaSessionsStore.shared.model.refreshLibraryIfIdle()
   }
 
   func openSettings() {
@@ -166,62 +163,76 @@ final class CepessaSessionsWindowController: NSObject, NSWindowDelegate {
     panel.allowsMultipleSelection = false
     panel.allowedContentTypes = [.audio]
     panel.prompt = "Transcribe"
-    panel.message = "Choose an audio file to normalize locally and transcribe on this Mac."
+    panel.message = "Choose a recording to transcribe on this Mac."
 
     guard panel.runModal() == .OK, let url = panel.url else { return }
-    show(destination: .sessions)
+    state.place = .session
+    show()
     Task {
       await CepessaSessionsStore.shared.model.importExistingRecording(from: url)
+    }
+  }
+
+  /// Saves the open session's transcript as Markdown.
+  func exportSelectedTranscript() {
+    guard state.place == .session,
+      let session = CepessaSessionsStore.shared.model.selectedSession,
+      !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else {
+      NSSound.beep()
+      return
+    }
+    show()
+    guard let window else { return }
+
+    let panel = NSSavePanel()
+    panel.title = "Export Transcript"
+    panel.nameFieldStringValue =
+      LocalSessionRecapMarkdownDocument.title(for: session, language: .english) + " Transcript.md"
+    if let markdownType = UTType(filenameExtension: "md") {
+      panel.allowedContentTypes = [markdownType]
+    }
+
+    panel.beginSheetModal(for: window) { [weak self] response in
+      guard response == .OK, let destination = panel.url, let self else { return }
+      do {
+        _ = try self.exporter.exportTranscriptMarkdown(session: session, toFile: destination)
+      } catch {
+        let alert = NSAlert(error: error)
+        alert.messageText = "The transcript could not be exported"
+        alert.informativeText = error.localizedDescription
+        alert.beginSheetModal(for: window)
+      }
     }
   }
 
   private func ensureWindow() {
     guard window == nil else { return }
 
-    // Standard titled window: system title bar, traffic lights, toolbar and
-    // resizing behave exactly as macOS users expect, and the window follows
-    // the system appearance instead of being pinned to light.
+    // Full-size content with a transparent title bar: the atmosphere runs to
+    // the top edge and the traffic lights sit on it, while resizing, full
+    // screen and the window menu behave exactly as macOS users expect.
     let window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 1080, height: 760),
-      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      contentRect: NSRect(x: 0, y: 0, width: 1080, height: 780),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
       backing: .buffered,
       defer: false
     )
     window.title = "Cepessa Sessions"
-    window.titlebarAppearsTransparent = false
-    window.titleVisibility = .visible
+    window.titleVisibility = .hidden
+    window.titlebarAppearsTransparent = true
     window.isReleasedWhenClosed = false
-    window.minSize = NSSize(width: 720, height: 520)
+    window.minSize = NSSize(width: 760, height: 560)
     window.center()
     window.setFrameAutosaveName("CepessaSessionsWindow")
     window.delegate = self
+    window.backgroundColor = .windowBackgroundColor
 
-    let root = CepessaSessionsWindowRootView(state: state)
-      .withFontScaling()
-    window.contentView = NSHostingView(rootView: root)
-
-    readingToolbar = CepessaSessionReadingToolbar(
-      model: CepessaSessionsStore.shared.model, window: window)
+    window.contentView = NSHostingView(
+      rootView: CepessaSessionsWindowRootView(
+        state: state, model: CepessaSessionsStore.shared.model))
 
     self.window = window
-    refreshWindowChrome()
-  }
-
-  private func refreshWindowChrome() {
-    let showsSessions = state.destination == .sessions
-    window?.title = showsSessions ? "Cepessa Sessions" : "Cepessa Clips"
-    readingToolbar?.setVisible(showsSessions)
-  }
-
-  /// SwiftUI's NavigationSplitView installs its own toolbar while Clips is
-  /// visible. Restore the retained reader toolbar after that hierarchy has
-  /// finished leaving the window, and only if Sessions is still selected.
-  func restoreReadingToolbarAfterTransition() {
-    guard state.destination == .sessions else { return }
-    DispatchQueue.main.async { [weak self] in
-      guard let self, self.state.destination == .sessions else { return }
-      self.refreshWindowChrome()
-    }
   }
 }
 
@@ -241,42 +252,63 @@ final class CepessaSessionsSettingsWindowController: NSObject, NSWindowDelegate 
     guard window == nil else { return }
 
     let window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 560, height: 560),
-      styleMask: [.titled, .closable, .miniaturizable],
+      contentRect: NSRect(x: 0, y: 0, width: 560, height: 660),
+      styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
       backing: .buffered,
       defer: false
     )
     window.title = "Sessions Settings"
-    window.titlebarAppearsTransparent = false
+    window.titleVisibility = .hidden
+    window.titlebarAppearsTransparent = true
     window.isReleasedWhenClosed = false
-    window.minSize = NSSize(width: 520, height: 440)
     window.center()
     window.setFrameAutosaveName("CepessaSessionsSettingsWindow")
     window.delegate = self
-    window.contentView = NSHostingView(
-      rootView: CepessaSessionsSettingsPage()
-        .withFontScaling()
-        .frame(minWidth: 520, minHeight: 440)
-    )
+    window.contentView = NSHostingView(rootView: CepessaSessionsSettingsPage())
     self.window = window
   }
 }
 
 private struct CepessaSessionsWindowRootView: View {
   @ObservedObject var state: CepessaSessionsWindowState
+  @ObservedObject var model: LocalMeetingAppModel
+
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
-    Group {
-      switch state.destination {
-      case .sessions:
-        CepessaSessionReadingView()
-          .onAppear {
-            CepessaSessionsWindowController.shared.restoreReadingToolbarAfterTransition()
+    ZStack {
+      SessionsAtmosphere()
+
+      Group {
+        switch resolvedPlace {
+        case .library:
+          CepessaSessionLibraryView(model: model) { id in
+            model.selectSession(id: id)
+            state.place = .session
           }
-      case .clips:
-        LocalClipsPage()
+          .transition(.sessionsRecede(reduceMotion: reduceMotion))
+        case .session:
+          CepessaSessionReadingView(model: model) {
+            state.place = .library
+          }
+          .transition(.sessionsRecede(reduceMotion: reduceMotion))
+        }
       }
+      .animation(reduceMotion ? nil : SessionsMotion.depart, value: resolvedPlace)
     }
-    .background(CepessaColors.backgroundPrimary)
+    .frame(minWidth: 760, minHeight: 560)
+    .onChange(of: model.isSessionLibraryPresented) { _, isPresented in
+      // The toolbar-era flag still arrives from older call sites.
+      guard isPresented else { return }
+      state.place = .library
+      model.isSessionLibraryPresented = false
+    }
+  }
+
+  /// A reader with nothing selected has nothing to read; the library is the
+  /// honest place to be.
+  private var resolvedPlace: CepessaSessionsWindowState.Place {
+    if state.place == .session, model.selectedSession != nil { return .session }
+    return .library
   }
 }
