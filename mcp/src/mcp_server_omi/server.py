@@ -83,7 +83,6 @@ if not base_url or base_url == "":
 DEFAULT_CEPESSA_SESSIONS_ROOT = (
     Path.home() / "Library/Application Support/Cepessa/Sessions"
 )
-DEFAULT_CEPESSA_CLIPS_ROOT = Path.home() / "Library/Application Support/Cepessa/Clips"
 MAX_LOCAL_JSON_BYTES = 32 * 1024 * 1024
 GENERATED_SESSION_PACKAGE_DIRECTORY = "Exports"
 GENERATED_SESSION_PACKAGE_NAMES = ("session-package.md", "session-package.json")
@@ -148,9 +147,6 @@ class OmiTools(str, Enum):
     GET_LOCAL_SESSION_DATA = "get_local_session_data"
     LIST_LOCAL_SESSION_FILES = "list_local_session_files"
     UPDATE_LOCAL_SESSION_FIELDS = "update_local_session_fields"
-    LIST_LOCAL_CLIPS = "list_local_clips"
-    GET_LOCAL_CLIP = "get_local_clip"
-    LIST_LOCAL_CLIP_FILES = "list_local_clip_files"
     BRAIN_STATUS = "brain_status"
     SEARCH_MEETING_BRAIN = "search_meeting_brain"
     PREPARE_AGENT_CONTEXT = "prepare_agent_context"
@@ -309,37 +305,6 @@ class UpdateLocalSessionFields(BaseModel):
     )
 
 
-class ListLocalClips(BaseModel):
-    clips_root: Optional[str] = Field(
-        description="Path to the Cepessa CLIPS root. Defaults to CEPESSA_CLIPS_ROOT or ~/Library/Application Support/Cepessa/Clips.",
-        default=None,
-    )
-    limit: int = Field(description="The number of local CLIPS to retrieve.", default=20)
-    offset: int = Field(
-        description="The offset of the local CLIPS to retrieve.", default=0
-    )
-
-
-class GetLocalClip(BaseModel):
-    clip_id: str = Field(description="The local Cepessa CLIP ID to retrieve.")
-    clips_root: Optional[str] = Field(
-        description="Path to the Cepessa CLIPS root. Defaults to CEPESSA_CLIPS_ROOT or ~/Library/Application Support/Cepessa/Clips.",
-        default=None,
-    )
-
-
-class ListLocalClipFiles(BaseModel):
-    clip_id: str = Field(description="The local Cepessa CLIP ID to inspect.")
-    clips_root: Optional[str] = Field(
-        description="Path to the Cepessa CLIPS root. Defaults to CEPESSA_CLIPS_ROOT or ~/Library/Application Support/Cepessa/Clips.",
-        default=None,
-    )
-    sessions_root: Optional[str] = Field(
-        description="Path to the Cepessa Sessions root. Defaults to CEPESSA_SESSIONS_ROOT or ~/Library/Application Support/Cepessa/Sessions.",
-        default=None,
-    )
-
-
 class BrainStatus(BaseModel):
     pass
 
@@ -484,13 +449,6 @@ def _local_sessions_root(sessions_root: Optional[str] = None) -> Path:
     if raw_root:
         return Path(raw_root).expanduser()
     return DEFAULT_CEPESSA_SESSIONS_ROOT
-
-
-def _local_clips_root(clips_root: Optional[str] = None) -> Path:
-    raw_root = clips_root or os.getenv("CEPESSA_CLIPS_ROOT")
-    if raw_root:
-        return Path(raw_root).expanduser()
-    return DEFAULT_CEPESSA_CLIPS_ROOT
 
 
 def _validated_local_root(root: Path, label: str, *, allow_missing: bool) -> Path:
@@ -778,36 +736,6 @@ def _local_session_paths(sessions_root: Optional[str] = None) -> list[Path]:
                 _validated_regular_file(
                     child / "session.json",
                     label="session manifest",
-                    max_bytes=MAX_LOCAL_JSON_BYTES,
-                )
-            )
-        except (
-            FileNotFoundError,
-            LocalSessionPathError,
-            LocalSessionValidationError,
-            OSError,
-        ):
-            continue
-    return sorted(paths)
-
-
-def _local_clip_paths(clips_root: Optional[str] = None) -> list[Path]:
-    root = _validated_local_root(
-        _local_clips_root(clips_root), "clips", allow_missing=True
-    )
-    if not root.exists():
-        return []
-    paths = []
-    for child in root.iterdir():
-        try:
-            child_stat = child.lstat()
-            if stat.S_ISLNK(child_stat.st_mode) or not stat.S_ISDIR(child_stat.st_mode):
-                continue
-            _validate_local_id(child.name, "CLIP ID")
-            paths.append(
-                _validated_regular_file(
-                    child / "clip.json",
-                    label="CLIP manifest",
                     max_bytes=MAX_LOCAL_JSON_BYTES,
                 )
             )
@@ -1260,197 +1188,6 @@ def _safe_bundle_filename(value: Any, path: str) -> str:
     return value
 
 
-def _validate_clip(clip: Any, clip_id: Optional[str] = None) -> dict:
-    clip = _expect_object(clip, "CLIP")
-    _validate_json_value(clip, "CLIP")
-    identifier = _validate_local_id(clip.get("id"), "CLIP.id")
-    if (
-        clip_id is not None
-        and identifier.casefold() != _validate_local_id(clip_id, "CLIP ID").casefold()
-    ):
-        raise LocalSessionValidationError("CLIP.id must match its directory ID.")
-    _expect_string(clip.get("title"), "CLIP.title")
-    _expect_date(clip.get("startedAt"), "CLIP.startedAt")
-    if clip.get("endedAt") is not None:
-        _expect_date(clip.get("endedAt"), "CLIP.endedAt")
-    _expect_enum(
-        clip.get("status"),
-        {"recording", "processing", "ready", "failed"},
-        "CLIP.status",
-    )
-    if clip.get("intent") is not None:
-        _expect_string(clip.get("intent"), "CLIP.intent")
-    for key in ("videoFileName", "transcriptFileName", "notesFileName"):
-        _safe_bundle_filename(clip.get(key), f"CLIP.{key}")
-    if clip.get("audioFileName") is not None:
-        _safe_bundle_filename(clip.get("audioFileName"), "CLIP.audioFileName")
-    for index, segment in enumerate(
-        _expect_list(clip.get("transcriptSegments"), "CLIP.transcriptSegments")
-    ):
-        segment = _expect_object(segment, f"CLIP.transcriptSegments[{index}]")
-        _validate_local_id(segment.get("id"), f"CLIP.transcriptSegments[{index}].id")
-        _expect_number(
-            segment.get("startOffset"), f"CLIP.transcriptSegments[{index}].startOffset"
-        )
-        _expect_number(
-            segment.get("endOffset"), f"CLIP.transcriptSegments[{index}].endOffset"
-        )
-        _expect_string(segment.get("text"), f"CLIP.transcriptSegments[{index}].text")
-    _expect_string(clip.get("postNotes"), "CLIP.postNotes")
-    if clip.get("errorMessage") is not None:
-        _expect_string(clip.get("errorMessage"), "CLIP.errorMessage")
-    return clip
-
-
-def _clip_artifact_path(
-    clip_directory: Path, value: Any, field: str, fallback: str
-) -> Path:
-    filename = _safe_bundle_filename(
-        value if value is not None else fallback, f"CLIP.{field}"
-    )
-    path = clip_directory / filename
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return path
-    return _validated_regular_file(path, label=f"CLIP.{field}")
-
-
-def _read_clip_artifact_prefix(path: Path, limit: int = 64 * 1024) -> bytes:
-    try:
-        file_stat = path.lstat()
-        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
-            return b""
-        with path.open("rb") as file:
-            return file.read(limit)
-    except OSError:
-        return b""
-
-
-def _has_valid_wav_container(path: Path) -> bool:
-    size = path.stat().st_size
-    if size < 44:
-        return False
-    data = _read_clip_artifact_prefix(path)
-    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
-        return False
-    declared_size = int.from_bytes(data[4:8], "little") + 8
-    if declared_size > size:
-        return False
-
-    offset = 12
-    has_format = False
-    has_audio = False
-    while offset + 8 <= len(data) and offset + 8 <= declared_size:
-        chunk_name = data[offset : offset + 4]
-        chunk_size = int.from_bytes(data[offset + 4 : offset + 8], "little")
-        chunk_end = offset + 8 + chunk_size
-        if chunk_end > declared_size:
-            return False
-        if chunk_name == b"fmt " and chunk_size >= 16:
-            has_format = True
-        if chunk_name == b"data" and chunk_size > 0:
-            has_audio = True
-        offset = chunk_end + (chunk_size % 2)
-    return has_format and has_audio
-
-
-def _has_valid_mov_container(path: Path) -> bool:
-    size = path.stat().st_size
-    if size < 16:
-        return False
-    data = _read_clip_artifact_prefix(path, limit=32)
-    if len(data) < 12 or data[4:8] != b"ftyp":
-        return False
-    atom_size = int.from_bytes(data[:4], "big")
-    if atom_size == 1:
-        if len(data) < 16:
-            return False
-        atom_size = int.from_bytes(data[8:16], "big")
-    return atom_size >= 16 and atom_size <= size
-
-
-def _valid_clip_transcript_artifact(path: Path, clip_id: str) -> bool:
-    try:
-        transcript = _read_local_session(path)
-        if transcript.get("id") != clip_id:
-            return False
-        segments = transcript.get("segments")
-        if not isinstance(segments, list):
-            return False
-        for index, segment in enumerate(segments):
-            segment_path = f"CLIP.transcript.segments[{index}]"
-            segment = _expect_object(segment, segment_path)
-            _validate_local_id(segment.get("id"), f"{segment_path}.id")
-            _expect_number(segment.get("startOffset"), f"{segment_path}.startOffset")
-            _expect_number(segment.get("endOffset"), f"{segment_path}.endOffset")
-            _expect_string(segment.get("text"), f"{segment_path}.text")
-        _expect_string(transcript.get("text"), "CLIP.transcript.text")
-        return True
-    except (OSError, ValueError, json.JSONDecodeError):
-        return False
-
-
-def _clip_artifact_readiness(clip: dict, clip_directory: Path, clip_id: str) -> dict:
-    issues = []
-    artifacts = (
-        (
-            "video",
-            _clip_artifact_path(
-                clip_directory,
-                clip.get("videoFileName"),
-                "videoFileName",
-                "clip-video.mov",
-            ),
-        ),
-        (
-            "audio",
-            _clip_artifact_path(
-                clip_directory,
-                clip.get("audioFileName"),
-                "audioFileName",
-                "clip-audio.wav",
-            ),
-        ),
-        (
-            "transcript",
-            _clip_artifact_path(
-                clip_directory,
-                clip.get("transcriptFileName"),
-                "transcriptFileName",
-                "transcript.json",
-            ),
-        ),
-    )
-    for kind, path in artifacts:
-        try:
-            _validated_regular_file(path, label=f"CLIP {kind}")
-            if path.stat().st_size == 0:
-                raise LocalSessionPathError(f"CLIP {kind} is empty: {path}")
-            if kind == "video" and path.suffix.lower() == ".mov":
-                if not _has_valid_mov_container(path):
-                    raise LocalSessionValidationError(
-                        "CLIP video container is incomplete"
-                    )
-            elif kind == "audio" and path.suffix.lower() == ".wav":
-                if not _has_valid_wav_container(path):
-                    raise LocalSessionValidationError(
-                        "CLIP audio container is incomplete"
-                    )
-            elif kind == "transcript" and not _valid_clip_transcript_artifact(
-                path, clip_id
-            ):
-                raise LocalSessionValidationError("CLIP transcript artifact is invalid")
-        except (OSError, ValueError, json.JSONDecodeError):
-            issues.append(f"{kind} artifact is missing or invalid")
-
-    return {
-        "ready": not issues,
-        "issues": issues,
-        "media_playability": "unverified",
-    }
-
-
 def _session_segments(session: dict) -> list[dict]:
     segments = session.get("transcriptSegments")
     if segments is None:
@@ -1491,49 +1228,6 @@ def _session_summary(session: dict, session_json_path: Path) -> dict:
     }
 
 
-def _clip_transcript_segments(clip: dict) -> list[dict]:
-    segments = clip.get("transcriptSegments")
-    return segments if isinstance(segments, list) else []
-
-
-def _clip_summary(clip: dict, clip_json_path: Path) -> dict:
-    segments = _clip_transcript_segments(clip)
-    artifact_readiness = _clip_artifact_readiness(
-        clip, clip_json_path.parent, clip_json_path.parent.name
-    )
-    stored_status = clip.get("status")
-    effective_status = (
-        "failed"
-        if stored_status == "ready" and not artifact_readiness["ready"]
-        else stored_status
-    )
-    video_path = _clip_artifact_path(
-        clip_json_path.parent,
-        clip.get("videoFileName"),
-        "videoFileName",
-        "clip-video.mov",
-    )
-    preview = " ".join(
-        str(segment.get("text") or "").strip()
-        for segment in segments
-        if str(segment.get("text") or "").strip()
-    )
-    return {
-        "id": str(clip.get("id") or clip_json_path.parent.name),
-        "title": str(clip.get("title") or "Untitled CLIP"),
-        "started_at": str(clip.get("startedAt") or ""),
-        "ended_at": clip.get("endedAt"),
-        "status": effective_status,
-        "stored_status": stored_status,
-        "artifact_readiness": artifact_readiness,
-        "intent": clip.get("intent"),
-        "transcript_segment_count": len(segments),
-        "transcript_preview": preview[:500],
-        "clip_directory": str(clip_json_path.parent),
-        "video_path": str(video_path),
-    }
-
-
 def list_local_sessions(
     sessions_root: Optional[str] = None, limit: int = 20, offset: int = 0
 ) -> list[dict]:
@@ -1550,23 +1244,6 @@ def list_local_sessions(
     return sessions[max(0, offset) : max(0, offset) + max(0, limit)]
 
 
-def list_local_clips(
-    clips_root: Optional[str] = None, limit: int = 20, offset: int = 0
-) -> list[dict]:
-    clips = []
-    for clip_json_path in _local_clip_paths(clips_root):
-        try:
-            clip = _read_local_session(clip_json_path)
-            _validate_clip(clip, clip_json_path.parent.name)
-            summary = _clip_summary(clip, clip_json_path)
-        except (OSError, ValueError, json.JSONDecodeError):
-            continue
-        clips.append(summary)
-
-    clips.sort(key=lambda clip: clip.get("started_at") or "", reverse=True)
-    return clips[max(0, offset) : max(0, offset) + max(0, limit)]
-
-
 def _resolve_local_session_json(
     session_id: str, sessions_root: Optional[str] = None
 ) -> Path:
@@ -1574,13 +1251,6 @@ def _resolve_local_session_json(
         _local_sessions_root(sessions_root), "sessions", allow_missing=False
     )
     return _validated_bundle_json(root, session_id, "session.json", "local session")
-
-
-def _resolve_local_clip_json(clip_id: str, clips_root: Optional[str] = None) -> Path:
-    root = _validated_local_root(
-        _local_clips_root(clips_root), "clips", allow_missing=False
-    )
-    return _validated_bundle_json(root, clip_id, "clip.json", "local CLIP")
 
 
 def _transcript_markdown(session: dict) -> str:
@@ -1630,62 +1300,6 @@ def get_local_session_data(
     }
 
 
-def get_local_clip(clip_id: str, clips_root: Optional[str] = None) -> dict:
-    clip_json_path = _resolve_local_clip_json(clip_id, clips_root)
-    clip = _read_local_session(clip_json_path)
-    _validate_clip(clip, clip_id)
-    clip_directory = clip_json_path.parent
-    artifact_readiness = _clip_artifact_readiness(clip, clip_directory, clip_id)
-    stored_status = clip.get("status")
-    effective_status = (
-        "failed"
-        if stored_status == "ready" and not artifact_readiness["ready"]
-        else stored_status
-    )
-    effective_clip = dict(clip)
-    effective_clip["status"] = effective_status
-    return {
-        "id": str(clip.get("id") or clip_json_path.parent.name),
-        "clip": effective_clip,
-        "status": effective_status,
-        "stored_status": stored_status,
-        "artifact_readiness": artifact_readiness,
-        "transcript_segments": _clip_transcript_segments(clip),
-        "post_notes": clip.get("postNotes") or "",
-        "clip_directory": str(clip_directory),
-        "clip_json_path": str(clip_json_path),
-        "video_path": str(
-            _clip_artifact_path(
-                clip_directory,
-                clip.get("videoFileName"),
-                "videoFileName",
-                "clip-video.mov",
-            )
-        ),
-        "audio_path": str(
-            _clip_artifact_path(
-                clip_directory,
-                clip.get("audioFileName"),
-                "audioFileName",
-                "clip-audio.wav",
-            )
-        ),
-        "transcript_path": str(
-            _clip_artifact_path(
-                clip_directory,
-                clip.get("transcriptFileName"),
-                "transcriptFileName",
-                "transcript.json",
-            )
-        ),
-        "notes_path": str(
-            _clip_artifact_path(
-                clip_directory, clip.get("notesFileName"), "notesFileName", "notes.md"
-            )
-        ),
-    }
-
-
 def _file_inventory_entry(file_path: Path, session_directory: Path) -> dict:
     file_stat = file_path.lstat()
     if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
@@ -1725,22 +1339,6 @@ def list_local_session_files(
     return {
         "id": session_id,
         "session_directory": str(session_directory),
-        "files": files,
-    }
-
-
-def list_local_clip_files(clip_id: str, clips_root: Optional[str] = None) -> dict:
-    clip_json_path = _resolve_local_clip_json(clip_id, clips_root)
-    clip_directory = clip_json_path.parent
-    files = []
-    for file_path in sorted(clip_directory.rglob("*")):
-        try:
-            files.append(_file_inventory_entry(file_path, clip_directory))
-        except (OSError, LocalSessionPathError):
-            continue
-    return {
-        "id": clip_id,
-        "clip_directory": str(clip_directory),
         "files": files,
     }
 
@@ -1886,9 +1484,6 @@ def requires_omi_api_key(tool_name: str) -> bool:
         OmiTools.GET_LOCAL_SESSION_DATA.value,
         OmiTools.LIST_LOCAL_SESSION_FILES.value,
         OmiTools.UPDATE_LOCAL_SESSION_FIELDS.value,
-        OmiTools.LIST_LOCAL_CLIPS.value,
-        OmiTools.GET_LOCAL_CLIP.value,
-        OmiTools.LIST_LOCAL_CLIP_FILES.value,
         OmiTools.BRAIN_STATUS.value,
         OmiTools.SEARCH_MEETING_BRAIN.value,
         OmiTools.PREPARE_AGENT_CONTEXT.value,
@@ -1973,21 +1568,6 @@ async def serve(uid: str | None) -> None:
                 name=OmiTools.UPDATE_LOCAL_SESSION_FIELDS,
                 description="Atomically merge user-editable top-level JSON fields into a local Cepessa session.json file. Title, recap, document notes, document chat, and future user metadata are supported; capture and transcription-owned fields are rejected when changed.",
                 inputSchema=UpdateLocalSessionFields.model_json_schema(),
-            ),
-            Tool(
-                name=OmiTools.LIST_LOCAL_CLIPS,
-                description="List local Cepessa CLIPS stored on this Mac. CLIPS include screen video, transcript, and post notes.",
-                inputSchema=ListLocalClips.model_json_schema(),
-            ),
-            Tool(
-                name=OmiTools.GET_LOCAL_CLIP,
-                description="Retrieve a local Cepessa CLIP bundle, including manifest JSON, transcript segments, notes, and media file paths.",
-                inputSchema=GetLocalClip.model_json_schema(),
-            ),
-            Tool(
-                name=OmiTools.LIST_LOCAL_CLIP_FILES,
-                description="List every file inside a local Cepessa CLIP directory, including video, audio, transcript, and notes artifacts.",
-                inputSchema=ListLocalClipFiles.model_json_schema(),
             ),
             Tool(
                 name=OmiTools.BRAIN_STATUS,
@@ -2094,40 +1674,6 @@ async def serve(uid: str | None) -> None:
                 session_id=arguments["session_id"],
                 fields=arguments["fields"],
                 sessions_root=arguments.get("sessions_root"),
-            )
-            return [
-                TextContent(
-                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
-                )
-            ]
-
-        elif name == OmiTools.LIST_LOCAL_CLIPS:
-            result = list_local_clips(
-                clips_root=arguments.get("clips_root"),
-                limit=arguments.get("limit", 20),
-                offset=arguments.get("offset", 0),
-            )
-            return [
-                TextContent(
-                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
-                )
-            ]
-
-        elif name == OmiTools.GET_LOCAL_CLIP:
-            result = get_local_clip(
-                clip_id=arguments["clip_id"],
-                clips_root=arguments.get("clips_root"),
-            )
-            return [
-                TextContent(
-                    type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
-                )
-            ]
-
-        elif name == OmiTools.LIST_LOCAL_CLIP_FILES:
-            result = list_local_clip_files(
-                clip_id=arguments["clip_id"],
-                clips_root=arguments.get("clips_root"),
             )
             return [
                 TextContent(

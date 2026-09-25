@@ -2,11 +2,8 @@ import json
 from uuid import NAMESPACE_URL, uuid5
 
 from mcp_server_omi.server import (
-    get_local_clip,
     get_local_session_data,
     get_local_session_transcript,
-    list_local_clip_files,
-    list_local_clips,
     list_local_session_files,
     list_local_sessions,
     requires_omi_api_key,
@@ -24,9 +21,6 @@ OLDER_SESSION_ID = fixture_id("session:older")
 NEWER_SESSION_ID = fixture_id("session:newer")
 SESSION_ONE_ID = fixture_id("session:one")
 SESSION_TWO_ID = fixture_id("session:two")
-OLDER_CLIP_ID = fixture_id("clip:older")
-NEWER_CLIP_ID = fixture_id("clip:newer")
-CLIP_ONE_ID = fixture_id("clip:one")
 
 
 def write_session(root, session_id, title, started_at, segments, extra=None):
@@ -49,67 +43,6 @@ def write_session(root, session_id, title, started_at, segments, extra=None):
     if extra:
         payload.update(extra)
     (session_dir / "session.json").write_text(json.dumps(payload), encoding="utf-8")
-
-
-def write_clip(root, clip_id, title, started_at, segments=None, extra=None):
-    clip_dir = root / clip_id
-    clip_dir.mkdir(parents=True)
-    normalized_segments = [
-        {
-            **segment,
-            "id": segment.get("id") or fixture_id(f"{clip_id}:segment:{index}"),
-        }
-        for index, segment in enumerate(segments or [])
-    ]
-    payload = {
-        "id": clip_id,
-        "title": title,
-        "startedAt": started_at,
-        "endedAt": "2026-06-11T08:02:00Z",
-        "status": "ready",
-        "intent": "Show the agent what changed on screen",
-        "videoFileName": "clip-video.mov",
-        "audioFileName": "clip-audio.wav",
-        "transcriptFileName": "transcript.json",
-        "notesFileName": "notes.md",
-        "transcriptSegments": normalized_segments,
-        "postNotes": "Additional post-recording context.",
-    }
-    if extra:
-        payload.update(extra)
-    (clip_dir / "clip.json").write_text(json.dumps(payload), encoding="utf-8")
-    wav_body = (
-        b"WAVE"
-        + b"fmt "
-        + (16).to_bytes(4, "little")
-        + (1).to_bytes(2, "little")
-        + (1).to_bytes(2, "little")
-        + (8_000).to_bytes(4, "little")
-        + (16_000).to_bytes(4, "little")
-        + (2).to_bytes(2, "little")
-        + (16).to_bytes(2, "little")
-        + b"data"
-        + (2).to_bytes(4, "little")
-        + b"\0\0"
-    )
-    (clip_dir / "clip-video.mov").write_bytes(
-        (16).to_bytes(4, "big") + b"ftypqt  \0\0\0\0"
-    )
-    (clip_dir / "clip-audio.wav").write_bytes(
-        b"RIFF" + (len(wav_body)).to_bytes(4, "little") + wav_body
-    )
-    (clip_dir / "transcript.json").write_text(
-        json.dumps(
-            {
-                "id": clip_id,
-                "title": title,
-                "segments": normalized_segments,
-                "text": "\n".join(segment["text"] for segment in normalized_segments),
-            }
-        ),
-        encoding="utf-8",
-    )
-    (clip_dir / "notes.md").write_text(payload["postNotes"], encoding="utf-8")
 
 
 def test_list_local_sessions_returns_recent_transcript_summaries(tmp_path):
@@ -221,98 +154,12 @@ def test_local_session_tools_do_not_require_omi_api_key():
     assert requires_omi_api_key("get_local_session_data") is False
     assert requires_omi_api_key("list_local_session_files") is False
     assert requires_omi_api_key("update_local_session_fields") is False
-    assert requires_omi_api_key("list_local_clips") is False
-    assert requires_omi_api_key("get_local_clip") is False
-    assert requires_omi_api_key("list_local_clip_files") is False
     assert requires_omi_api_key("brain_status") is False
     assert requires_omi_api_key("search_meeting_brain") is False
     assert requires_omi_api_key("prepare_agent_context") is False
     assert requires_omi_api_key("get_meeting_evidence") is False
     assert requires_omi_api_key("resolve_participant") is False
     assert requires_omi_api_key("get_conversations") is True
-
-
-def test_list_local_clips_returns_recent_agent_handoff_summaries(tmp_path):
-    write_clip(
-        tmp_path,
-        OLDER_CLIP_ID,
-        "Older CLIP",
-        "2026-06-10T08:00:00Z",
-        [
-            {
-                "id": fixture_id("clip:older:segment"),
-                "startOffset": 0,
-                "endOffset": 2,
-                "text": "Old clip",
-            }
-        ],
-    )
-    write_clip(
-        tmp_path,
-        NEWER_CLIP_ID,
-        "Newer CLIP",
-        "2026-06-11T08:00:00Z",
-        [
-            {
-                "id": fixture_id("clip:newer:segment"),
-                "startOffset": 0,
-                "endOffset": 5,
-                "text": "Agent should inspect the screen change",
-            }
-        ],
-    )
-
-    result = list_local_clips(str(tmp_path))
-
-    assert [clip["id"] for clip in result] == [NEWER_CLIP_ID, OLDER_CLIP_ID]
-    assert result[0]["transcript_segment_count"] == 1
-    assert "screen change" in result[0]["transcript_preview"]
-    assert result[0]["video_path"].endswith(f"{NEWER_CLIP_ID}/clip-video.mov")
-
-
-def test_get_local_clip_exposes_video_transcript_and_notes(tmp_path):
-    write_clip(
-        tmp_path,
-        CLIP_ONE_ID,
-        "Agent visual handoff",
-        "2026-06-11T08:00:00Z",
-        [
-            {
-                "id": fixture_id("clip:one:segment"),
-                "startOffset": 1,
-                "endOffset": 3,
-                "text": "Look at this button",
-            }
-        ],
-    )
-
-    result = get_local_clip(CLIP_ONE_ID, str(tmp_path))
-
-    assert result["id"] == CLIP_ONE_ID
-    assert result["clip"]["title"] == "Agent visual handoff"
-    assert result["transcript_segments"][0]["text"] == "Look at this button"
-    assert result["post_notes"] == "Additional post-recording context."
-    assert result["video_path"].endswith(f"{CLIP_ONE_ID}/clip-video.mov")
-
-
-def test_list_local_clip_files_returns_agent_packet_inventory(tmp_path):
-    write_clip(tmp_path, CLIP_ONE_ID, "Files", "2026-06-11T08:00:00Z")
-    video_path = tmp_path / CLIP_ONE_ID / "clip-video.mov"
-    notes_path = tmp_path / CLIP_ONE_ID / "notes.md"
-    video_path.write_bytes(b"mov")
-    notes_path.write_text("note", encoding="utf-8")
-
-    result = list_local_clip_files(CLIP_ONE_ID, str(tmp_path))
-
-    assert result["id"] == CLIP_ONE_ID
-    relative_paths = [file["relative_path"] for file in result["files"]]
-    assert relative_paths == [
-        "clip-audio.wav",
-        "clip-video.mov",
-        "clip.json",
-        "notes.md",
-        "transcript.json",
-    ]
 
 
 def test_update_local_session_title_writes_session_json(tmp_path):

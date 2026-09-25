@@ -101,40 +101,18 @@ A Model Context Protocol server for Omi interaction and automation. This server 
      - `sessions_root` (string, optional): Override local sessions root
    - Returns: Updated local session metadata and changed field names. Protected identity fields such as `id` are rejected.
 
-14. `list_local_clips`
-   - List Cepessa CLIPS stored locally on this Mac
-   - Inputs:
-     - `clips_root` (string, optional): Path to the Cepessa CLIPS root. Defaults to `CEPESSA_CLIPS_ROOT` or `~/Library/Application Support/Cepessa/Clips`
-     - `limit` (number, optional): Maximum number of clips to retrieve (default: 20)
-     - `offset` (number, optional): Pagination offset (default: 0)
-   - Returns: CLIP IDs, titles, timestamps, status, transcript counts, previews, and media paths
-
-15. `get_local_clip`
-   - Retrieve a local Cepessa CLIP bundle for agent inspection
-   - Inputs:
-     - `clip_id` (string): Local Cepessa CLIP ID
-     - `clips_root` (string, optional): Override local CLIPS root
-   - Returns: CLIP manifest JSON, transcript segments, post notes, and paths to video/audio/transcript/notes files
-
-16. `list_local_clip_files`
-   - List every file in a local Cepessa CLIP directory
-   - Inputs:
-     - `clip_id` (string): Local Cepessa CLIP ID
-     - `clips_root` (string, optional): Override local CLIPS root
-   - Returns: Local paths, relative paths, sizes, and extensions for the CLIP agent packet
-
-17. `brain_status`
+14. `brain_status`
    - Refresh and report the rebuildable local meeting-evidence index
    - Returns: Index schema, session/segment counts, incremental refresh counts, and safety flags
 
-18. `search_meeting_brain`
+15. `search_meeting_brain`
    - Search Hebrew, English, or mixed meeting evidence
    - Inputs:
      - `query` (string): Terms to find in transcript evidence
      - `limit` (number, optional): Maximum matching segments (default: 10)
    - Returns: Exact cited segments. Every citation includes logical source reference, session, revision, segment, time, and source kind.
 
-19. `prepare_agent_context`
+16. `prepare_agent_context`
    - Build a bounded context packet for another agent
    - Inputs:
      - `query` (string): Question or topic
@@ -142,7 +120,7 @@ A Model Context Protocol server for Omi interaction and automation. This server 
      - `limit` (number, optional): Maximum search hits considered (default: 20)
    - Returns: Cited transcript segments and an explicit instruction-injection policy
 
-20. `get_meeting_evidence`
+17. `get_meeting_evidence`
    - Retrieve cited evidence from an exact session or transcript segment
    - Inputs:
      - `session_id` (string): Local Cepessa Session ID
@@ -150,7 +128,7 @@ A Model Context Protocol server for Omi interaction and automation. This server 
      - `context_segments` (number, optional): Neighboring segments around the anchor (default: 2)
    - Returns: Session revision and cited transcript evidence
 
-21. `resolve_participant`
+18. `resolve_participant`
    - Explain possible stored speaker-label matches with transcript citations
    - Inputs:
      - `name` (string): Name or speaker label to investigate
@@ -169,17 +147,10 @@ The local Cepessa Session tools do not require `OMI_API_KEY`; they read/write `s
 ~/Library/Application Support/Cepessa/Sessions
 ```
 
-The local Cepessa CLIPS tools also do not require `OMI_API_KEY`; they read local CLIP packets from:
-
-```bash
-~/Library/Application Support/Cepessa/Clips
-```
-
 To point agents at another local app build or a test fixture:
 
 ```bash
 export CEPESSA_SESSIONS_ROOT="/path/to/Cepessa/Sessions"
-export CEPESSA_CLIPS_ROOT="/path/to/Cepessa/Clips"
 ```
 
 The meeting-brain tools build a retained in-memory SQLite projection and never open
@@ -264,7 +235,7 @@ args = ["--from", "/Users/ben/Documents/App/General/Cepessa Sessions/mcp", "mcp-
 startup_timeout_sec = 30
 ```
 
-After restarting Codex, ask it to use the `cepessa_sessions` MCP server, then call `list_local_sessions`, `search_local_session_transcripts`, `get_local_session_transcript`, `list_local_clips`, or `get_local_clip`.
+After restarting Codex, ask it to use the `cepessa_sessions` MCP server, then call `list_local_sessions`, `search_local_session_transcripts`, or `get_local_session_transcript`.
 </details>
 
 <details>
