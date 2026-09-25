@@ -61,8 +61,9 @@ class SearchTranscriptsInput(BaseModel):
         min_length=1,
         max_length=store.MAX_QUERY_LENGTH,
         description=(
-            "Case-insensitive text to find. A session matches when it contains "
-            "the whole phrase or every word of it."
+            "Case-insensitive text to find in session titles and spoken text. "
+            "A session matches when it contains the whole phrase or every word "
+            "of it. Speaker names are not searched."
         ),
     )
     limit: int = Field(
@@ -70,6 +71,9 @@ class SearchTranscriptsInput(BaseModel):
         ge=1,
         le=store.MAX_SEARCH_LIMIT,
         description="Maximum number of matching sessions to return.",
+    )
+    offset: int = Field(
+        default=0, ge=0, description="Number of newest matching sessions to skip."
     )
 
 
@@ -100,8 +104,9 @@ def tool_definitions() -> list[Tool]:
         Tool(
             name=ToolName.SEARCH_TRANSCRIPTS.value,
             description=(
-                "Search all transcripts case-insensitively and return matching "
-                "sessions, newest first, with up to three snippets each."
+                "Search session titles and transcript text case-insensitively and "
+                "return matching sessions, newest first, with up to three "
+                "snippets each. totalMatches counts every match; page with offset."
             ),
             inputSchema=SearchTranscriptsInput.model_json_schema(),
             annotations=_READ_ONLY,
@@ -120,7 +125,9 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict:
         return store.get_transcript(request.session_id)
     if name == ToolName.SEARCH_TRANSCRIPTS:
         request = SearchTranscriptsInput.model_validate(arguments)
-        return store.search_transcripts(request.query, limit=request.limit)
+        return store.search_transcripts(
+            request.query, limit=request.limit, offset=request.offset
+        )
     raise ValueError(f"Unknown tool: {name}")
 
 

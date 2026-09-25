@@ -77,6 +77,7 @@ def test_tool_output_is_utf8_json(sessions_root):
         ("get_transcript", {"session_id": "../etc"}, "Input validation error"),
         ("search_transcripts", {"query": ""}, "Input validation error"),
         ("search_transcripts", {"query": "   "}, "blank"),
+        ("search_transcripts", {"query": "x", "offset": -1}, "Input validation error"),
         ("get_transcript", {"session_id": make_id("missing")}, "not found"),
         ("update_local_session_title", {}, "Unknown tool"),
         ("get_memories", {}, "Unknown tool"),
@@ -114,3 +115,50 @@ def test_stdio_handshake_end_to_end(sessions_root):
     assert {tool.name for tool in tools.tools} == EXPECTED_TOOLS
     assert json.loads(listed.content[0].text)["sessions"][0]["id"] == SESSION_ID
     assert json.loads(found.content[0].text)["results"][0]["id"] == SESSION_ID
+
+
+def test_an_unreadable_session_does_not_stop_the_server(sessions_root):
+    broken = make_id("server:surrogate")
+    (sessions_root / broken).mkdir()
+    (sessions_root / broken / "session.json").write_text(
+        json.dumps(
+            {
+                "id": broken,
+                "title": "x",
+                "startedAt": "2026-06-11T08:00:00Z",
+                "status": "ready",
+                "transcriptSegments": [
+                    {
+                        "id": make_id("s"),
+                        "speaker": "A",
+                        "text": "\ud800",
+                        "timestamp": "2026-06-11T08:00:01Z",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_session(sessions_root, SESSION_ID, segments=[segment("דנה", HEBREW_TEXT)])
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "cepessa_sessions_mcp"],
+        env={**os.environ, "CEPESSA_SESSIONS_ROOT": str(sessions_root)},
+    )
+
+    async def run() -> tuple:
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                failed = await session.call_tool(
+                    "get_transcript", {"session_id": broken}
+                )
+                listed = await session.call_tool("list_sessions", {})
+                return failed, listed
+
+    failed, listed = asyncio.run(asyncio.wait_for(run(), timeout=60))
+
+    assert failed.isError is True
+    listing = json.loads(listed.content[0].text)
+    assert [s["id"] for s in listing["sessions"]] == [SESSION_ID]
+    assert listing["skippedCount"] == 1

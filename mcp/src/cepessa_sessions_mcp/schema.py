@@ -60,16 +60,34 @@ def validate_session_id(value: Any, field: str) -> str:
     return value
 
 
-LEGACY_OFFSET_PATTERN = re.compile(r"^\d+(?:\.\d+)?(?::\d+(?:\.\d+)?){0,2}$")
+# Swift's JSONDecoder reads 512 levels of nesting and refuses the 513th.
+MAX_JSON_DEPTH = 512
+
+# One part of an earliest-format offset, as Swift's ``Double(String)`` reads it:
+# ASCII decimal forms such as "05", ".5", "5." and "1e2", or inf/nan; never
+# whitespace, underscores or other digits. (Swift also reads hexadecimal
+# floats; no recording ever stored one, and such a session is skipped here.)
+LEGACY_OFFSET_PART = re.compile(
+    r"[+-]?(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|inf(?:inity)?|nan)",
+    re.IGNORECASE,
+)
 
 
-def legacy_offset_seconds(value: str) -> float | None:
+def legacy_offset_seconds(value: Any) -> float | None:
     """Seconds for the earliest format's "SS", "MM:SS" or "H:MM:SS" segment times."""
-    if not isinstance(value, str) or not LEGACY_OFFSET_PATTERN.match(value):
+    if not isinstance(value, str):
+        return None
+    parts = value.split(":")
+    if not 1 <= len(parts) <= 3:
         return None
     seconds = 0.0
-    for part in value.split(":"):
-        seconds = seconds * 60 + float(part)
+    for part in parts:
+        if not LEGACY_OFFSET_PART.fullmatch(part):
+            return None
+        number = float(part)
+        if not number >= 0:
+            return None
+        seconds = seconds * 60 + number
     return seconds
 
 
@@ -140,22 +158,41 @@ def _expect_date(value: Any, path: str) -> str:
     return value
 
 
-def _validate_json_value(value: Any, path: str = "value") -> None:
-    if value is None or isinstance(value, (str, bool, int)):
+def _expect_unicode(value: str, path: str) -> None:
+    # json.loads turns an escaped lone surrogate ("\ud800") into a string that
+    # is not valid Unicode; Swift's JSONDecoder refuses the whole document.
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise SessionValidationError(
+            f"{path} contains an unpaired surrogate."
+        ) from error
+
+
+def _validate_json_value(value: Any, path: str = "value", depth: int = 0) -> None:
+    if isinstance(value, str):
+        _expect_unicode(value, path)
+        return
+    if value is None or isinstance(value, (bool, int)):
         return
     if isinstance(value, float):
         if not math.isfinite(value):
             raise SessionValidationError(f"{path} contains a non-finite number.")
         return
+    if isinstance(value, (list, dict)) and depth >= MAX_JSON_DEPTH:
+        raise SessionValidationError(
+            f"{path} is nested deeper than {MAX_JSON_DEPTH} levels."
+        )
     if isinstance(value, list):
         for index, item in enumerate(value):
-            _validate_json_value(item, f"{path}[{index}]")
+            _validate_json_value(item, f"{path}[{index}]", depth + 1)
         return
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str):
                 raise SessionValidationError(f"{path} has a non-string object key.")
-            _validate_json_value(item, f"{path}.{key}")
+            _expect_unicode(key, path)
+            _validate_json_value(item, f"{path}.{key}", depth + 1)
         return
     raise SessionValidationError(
         f"{path} contains a value that cannot be represented as JSON."
@@ -184,14 +221,12 @@ def _safe_bundle_filename(value: Any, path: str) -> str:
 
 def _validate_transcript_segment(segment: Any, path: str) -> None:
     segment = _expect_object(segment, path)
-    # The earliest recordings have no segment id and store the time as an
-    # offset from the start; the app converts both on load, and so does this.
+    # A missing id is derived on load, by the app and by the store here.
     if segment.get("id") is not None:
         validate_session_id(segment["id"], f"{path}.id")
     _expect_string(segment.get("speaker"), f"{path}.speaker")
     _expect_string(segment.get("text"), f"{path}.text")
-    if legacy_offset_seconds(segment.get("timestamp")) is None:
-        _expect_date(segment.get("timestamp"), f"{path}.timestamp")
+    _expect_date(segment.get("timestamp"), f"{path}.timestamp")
     if segment.get("endTimestamp") is not None:
         _expect_date(segment["endTimestamp"], f"{path}.endTimestamp")
     if segment.get("speakerID") is not None:
@@ -207,6 +242,43 @@ def _validate_transcript_segment(segment: Any, path: str) -> None:
             _expect_list(segment["uncertainty"], f"{path}.uncertainty")
         ):
             _expect_string(item, f"{path}.uncertainty[{index}]")
+
+
+def decode_transcript_segments(session: dict) -> tuple[bool, list[dict]]:
+    """The app's reading of a session's segments: ``(earliest_format, segments)``.
+
+    As in Swift, the first key present wins, a null value included. The array
+    is read as current segments when every element decodes as one; otherwise
+    as the earliest format, which keeps only speaker, text and an offset time
+    ("SS", "MM:SS" or "H:MM:SS") for each element. If neither reading works,
+    the session cannot be read.
+    """
+    for key in ("transcriptSegments", "segments"):
+        if key not in session:
+            continue
+        path = f"session.{key}"
+        try:
+            segments = _expect_list(session[key], path)
+            for index, segment in enumerate(segments):
+                _validate_transcript_segment(segment, f"{path}[{index}]")
+        except SessionValidationError as current_error:
+            if not isinstance(session[key], list) or not all(
+                isinstance(segment, dict)
+                and all(
+                    isinstance(segment.get(field), str)
+                    for field in ("speaker", "text", "timestamp")
+                )
+                for segment in session[key]
+            ):
+                raise
+            for index, segment in enumerate(session[key]):
+                if legacy_offset_seconds(segment["timestamp"]) is None:
+                    raise SessionValidationError(
+                        f"{path}[{index}].timestamp is neither a date nor an offset."
+                    ) from current_error
+            return True, session[key]
+        return False, segments
+    return False, []
 
 
 def _validate_recap_section(section: Any, path: str) -> None:
@@ -454,12 +526,7 @@ def validate_session(session: Any, session_id: str | None = None) -> dict:
         _expect_string(session["processingError"], "session.processingError")
     _expect_date(session.get("startedAt"), "session.startedAt")
     _expect_enum(session.get("status"), SESSION_STATUS_VALUES, "session.status")
-    for key in ("transcriptSegments", "segments"):
-        if session.get(key) is not None:
-            for index, segment in enumerate(
-                _expect_list(session[key], f"session.{key}")
-            ):
-                _validate_transcript_segment(segment, f"session.{key}[{index}]")
+    decode_transcript_segments(session)
     if session.get("recap") is not None:
         _validate_recap(session["recap"], "session.recap")
     if session.get("attachments") is not None:

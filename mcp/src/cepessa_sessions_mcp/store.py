@@ -1,12 +1,15 @@
 """Read-only access to the Cepessa Sessions store on disk.
 
-Layout: ``<root>/<session UUID>/session.json``. Every read goes through the same
-checks: the root is not a symlink, the session ID is a UUID, the session
-directory is a real directory directly under the root, and ``session.json`` is a
-single-link regular file under the size limit, opened without following links.
-Nothing in this module creates, modifies, locks or deletes a file.
+Layout: ``<root>/<session UUID>/session.json``. The app reads its current store
+and, behind it, the store it used before the rename; so does this module.
+Every read walks directory descriptors: the root, then the session directory,
+then ``session.json``, each opened without following a link. No component can
+be swapped for a link between a check and the read. The manifest must be a
+single-link regular file under the size limit. Nothing in this module creates,
+modifies, locks or deletes a file.
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -14,12 +17,15 @@ import re
 import stat
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
 from .schema import (
     SessionValidationError,
+    decode_transcript_segments,
     legacy_offset_seconds,
     parse_date,
     validate_session,
@@ -27,7 +33,9 @@ from .schema import (
 )
 
 SESSIONS_ROOT_ENV = "CEPESSA_SESSIONS_ROOT"
-DEFAULT_SESSIONS_ROOT = Path.home() / "Library/Application Support/Cepessa/Sessions"
+_APPLICATION_SUPPORT = Path.home() / "Library/Application Support"
+DEFAULT_SESSIONS_ROOT = _APPLICATION_SUPPORT / "Cepessa/Sessions"
+LEGACY_SESSIONS_ROOT = _APPLICATION_SUPPORT / "Cepessa Legacy/Meetings/Sessions"
 MANIFEST_NAME = "session.json"
 MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 
@@ -40,12 +48,9 @@ MAX_SNIPPETS_PER_SESSION = 3
 SNIPPET_RADIUS = 120
 UNNAMED_SPEAKER = "Speaker"
 
-_READ_FLAGS = (
-    os.O_RDONLY
-    | getattr(os, "O_NOFOLLOW", 0)
-    | getattr(os, "O_NONBLOCK", 0)
-    | getattr(os, "O_CLOEXEC", 0)
-)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | _CLOEXEC
 
 
 class SessionPathError(ValueError):
@@ -55,150 +60,171 @@ class SessionPathError(ValueError):
 # Paths and safe reads
 
 
-def sessions_root(override: str | os.PathLike[str] | None = None) -> Path:
-    """Return the root: override, then $CEPESSA_SESSIONS_ROOT, then the default."""
+def sessions_roots(override: str | os.PathLike[str] | None = None) -> list[Path]:
+    """The stores to read, in order: the override, else $CEPESSA_SESSIONS_ROOT,
+    else the app's current store followed by its pre-rename store."""
     raw = override if override is not None else os.getenv(SESSIONS_ROOT_ENV)
-    return Path(raw).expanduser() if raw else DEFAULT_SESSIONS_ROOT
+    if raw:
+        return [Path(raw).expanduser()]
+    return [DEFAULT_SESSIONS_ROOT, LEGACY_SESSIONS_ROOT]
 
 
-def _validated_root(root: Path) -> Path:
-    """Return the canonical root, rejecting a symlink or non-directory root."""
+def _unsafe(what: str, path: Path, error: OSError) -> SessionPathError:
+    if error.errno == errno.ELOOP:
+        return SessionPathError(f"{what} must not be a symlink: {path}")
+    if error.errno == errno.ENOTDIR:
+        return SessionPathError(f"{what} is not a directory: {path}")
+    return SessionPathError(f"Cannot open {what.lower()}: {path}")
+
+
+@contextmanager
+def _open_root(root: Path) -> Iterator[int]:
+    """A descriptor for the root directory, which must not itself be a link."""
     if not root.is_absolute():
         root = Path.cwd() / root
     try:
-        root_stat = root.lstat()
+        descriptor = os.open(root, _DIRECTORY_FLAGS)
     except FileNotFoundError:
         raise FileNotFoundError(f"Sessions root not found: {root}") from None
     except OSError as error:
-        raise SessionPathError(f"Cannot inspect sessions root: {root}") from error
-    if stat.S_ISLNK(root_stat.st_mode):
-        raise SessionPathError(f"Sessions root must not be a symlink: {root}")
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise SessionPathError(f"Sessions root is not a directory: {root}")
+        raise _unsafe("Sessions root", root, error) from error
     try:
-        return root.resolve(strict=True)
-    except OSError as error:
-        raise SessionPathError(f"Cannot resolve sessions root: {root}") from error
-
-
-def _regular_file_stat(path: Path) -> os.stat_result:
-    try:
-        file_stat = path.lstat()
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Session manifest not found: {path}") from None
-    except OSError as error:
-        raise SessionPathError(f"Cannot inspect session manifest: {path}") from error
-    if stat.S_ISLNK(file_stat.st_mode):
-        raise SessionPathError(f"Session manifest must not be a symlink: {path}")
-    if not stat.S_ISREG(file_stat.st_mode):
-        raise SessionPathError(f"Session manifest must be a regular file: {path}")
-    if file_stat.st_nlink != 1:
-        raise SessionPathError(f"Session manifest must not be hard-linked: {path}")
-    if file_stat.st_size > MAX_MANIFEST_BYTES:
-        raise SessionPathError(
-            f"Session manifest exceeds the {MAX_MANIFEST_BYTES}-byte limit: {path}"
-        )
-    return file_stat
-
-
-def _manifest_path(root: Path, session_id: str) -> Path:
-    """Return ``<root>/<id>/session.json`` after checking every path component."""
-    session_id = validate_session_id(session_id, "session ID")
-    bundle = root / session_id
-    try:
-        bundle_stat = bundle.lstat()
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Session not found: {session_id}") from None
-    except OSError as error:
-        raise SessionPathError(f"Cannot inspect session: {session_id}") from error
-    if stat.S_ISLNK(bundle_stat.st_mode):
-        raise SessionPathError(f"Session directory must not be a symlink: {bundle}")
-    if not stat.S_ISDIR(bundle_stat.st_mode):
-        raise SessionPathError(f"Session path is not a directory: {bundle}")
-    try:
-        if bundle.resolve(strict=True).parent != root:
-            raise SessionPathError("Session directory is outside the sessions root.")
-    except OSError as error:
-        raise SessionPathError(f"Cannot resolve session directory: {bundle}") from error
-    manifest = bundle / MANIFEST_NAME
-    _regular_file_stat(manifest)
-    return manifest
+        yield descriptor
+    finally:
+        os.close(descriptor)
 
 
 def _reject_json_constant(value: str) -> NoReturn:
     raise ValueError(f"Non-finite JSON number is not supported: {value}")
 
 
-def _read_manifest(path: Path) -> dict:
-    """Read and decode one manifest without following links or blocking."""
-    expected = _regular_file_stat(path)
+def _read_manifest(root: Path, root_fd: int, session_id: str) -> dict:
+    """Read and decode ``<root>/<id>/session.json`` without following links."""
+    bundle = root / session_id
+    manifest = bundle / MANIFEST_NAME
     try:
-        file_descriptor = os.open(path, _READ_FLAGS)
+        bundle_fd = os.open(session_id, _DIRECTORY_FLAGS, dir_fd=root_fd)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Session not found: {session_id}") from None
     except OSError as error:
-        raise SessionPathError(
-            f"Cannot securely open session manifest: {path}"
-        ) from error
+        raise _unsafe("Session directory", bundle, error) from error
     try:
-        opened = os.fstat(file_descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_nlink != 1
-            or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
-        ):
-            raise SessionPathError(f"Session manifest changed while opening: {path}")
-        with os.fdopen(file_descriptor, "rb") as file:
-            file_descriptor = -1
+        file_fd = os.open(MANIFEST_NAME, _READ_FLAGS, dir_fd=bundle_fd)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Session manifest not found: {manifest}") from None
+    except OSError as error:
+        raise _unsafe("Session manifest", manifest, error) from error
+    finally:
+        os.close(bundle_fd)
+    try:
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise SessionPathError(
+                f"Session manifest must be a regular file: {manifest}"
+            )
+        if opened.st_nlink != 1:
+            raise SessionPathError(
+                f"Session manifest must not be hard-linked: {manifest}"
+            )
+        if opened.st_size > MAX_MANIFEST_BYTES:
+            raise SessionPathError(
+                f"Session manifest exceeds the {MAX_MANIFEST_BYTES}-byte limit: {manifest}"
+            )
+        with os.fdopen(file_fd, "rb") as file:
+            file_fd = -1
             raw = file.read(MAX_MANIFEST_BYTES + 1)
     finally:
-        if file_descriptor >= 0:
-            os.close(file_descriptor)
+        if file_fd >= 0:
+            os.close(file_fd)
     if len(raw) > MAX_MANIFEST_BYTES:
         raise SessionPathError(
-            f"Session manifest exceeds the {MAX_MANIFEST_BYTES}-byte limit: {path}"
+            f"Session manifest exceeds the {MAX_MANIFEST_BYTES}-byte limit: {manifest}"
         )
     try:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise SessionValidationError(
-            f"Session manifest is not UTF-8: {path}"
+            f"Session manifest is not UTF-8: {manifest}"
         ) from error
     try:
         value = json.loads(decoded, parse_constant=_reject_json_constant)
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         raise SessionValidationError(
-            f"Invalid session manifest JSON: {path}"
+            f"Invalid session manifest JSON: {manifest}"
         ) from error
     if not isinstance(value, dict):
-        raise SessionValidationError(f"Session manifest must be an object: {path}")
+        raise SessionValidationError(f"Session manifest must be an object: {manifest}")
     return value
 
 
-def _load_session(manifest: Path) -> dict:
-    return validate_session(_read_manifest(manifest), manifest.parent.name)
+@dataclass(frozen=True)
+class _Session:
+    manifest: dict
+    segments: list[dict]
+
+
+def _load(root: Path, root_fd: int, session_id: str) -> _Session:
+    """One session as the app reads it, or an error saying why it cannot be."""
+    manifest = validate_session(_read_manifest(root, root_fd, session_id), session_id)
+    try:
+        return _Session(manifest, _segments(manifest))
+    except OverflowError as error:
+        raise SessionValidationError(
+            f"Session {session_id} has times outside the representable range."
+        ) from error
 
 
 def _scan_sessions(
     root_override: str | os.PathLike[str] | None,
-) -> Iterator[dict | None]:
-    """Yield each valid session under the root, or None for one that was skipped.
+) -> tuple[list[_Session], int]:
+    """Every readable session across the stores, and how many were skipped.
 
     Entries whose name is not a UUID are ignored. A UUID-named entry that is a
-    symlink, lacks a safe manifest, or fails validation is skipped. A missing
-    root yields nothing.
+    link, lacks a safe manifest, or cannot be read the way the app reads it is
+    skipped and counted; it never fails the whole scan. A missing store yields
+    nothing. As in the app, a session in an earlier store hides the same ID in
+    a later one.
     """
-    try:
-        root = _validated_root(sessions_root(root_override))
-    except FileNotFoundError:
-        return
-    for child in sorted(root.iterdir()):
+    found: dict[str, _Session] = {}
+    skipped = 0
+    for root in sessions_roots(root_override):
         try:
-            validate_session_id(child.name, "session ID")
-        except SessionValidationError:
+            with _open_root(root) as root_fd:
+                for name in sorted(os.listdir(root_fd)):
+                    try:
+                        validate_session_id(name, "session ID")
+                    except SessionValidationError:
+                        continue
+                    try:
+                        session = _load(root, root_fd, name)
+                    except (OSError, ValueError):
+                        skipped += 1
+                        continue
+                    found.setdefault(session.manifest["id"].upper(), session)
+        except FileNotFoundError:
             continue
+    return list(found.values()), skipped
+
+
+def _find_session(
+    session_id: str, root_override: str | os.PathLike[str] | None
+) -> _Session:
+    """The first store holding a readable copy wins, as in the app. Otherwise the
+    first reason a copy could not be read, or not found."""
+    session_id = validate_session_id(session_id, "session ID")
+    failure: Exception | None = None
+    for root in sessions_roots(root_override):
         try:
-            yield _load_session(_manifest_path(root, child.name))
-        except (OSError, ValueError):
-            yield None
+            with _open_root(root) as root_fd:
+                return _load(root, root_fd, session_id)
+        except FileNotFoundError as error:
+            failure = failure or error
+        except (OSError, ValueError) as error:
+            if failure is None or isinstance(failure, FileNotFoundError):
+                failure = error
+    if isinstance(failure, FileNotFoundError) or failure is None:
+        raise FileNotFoundError(f"Session not found: {session_id}")
+    raise failure
 
 
 # Session views
@@ -221,41 +247,51 @@ def _iso(moment: datetime) -> str:
     return text.replace(".000+00:00", "Z").replace("+00:00", "Z")
 
 
-def _normalized(segment: dict, index: int, started_at: datetime) -> dict:
-    """A segment as the app reads it: earliest-format offsets become dates and
-    a missing id is derived exactly the way the app derives it."""
-    segment = dict(segment)
-    offset = legacy_offset_seconds(segment["timestamp"])
-    if offset is not None:
-        segment["timestamp"] = _iso(started_at + timedelta(seconds=offset))
-        segment["id"] = segment.get("id") or _stable_id(
-            "legacy-offset-transcript-segment",
-            [f"{started_at.timestamp():.3f}", str(index), segment["text"]],
-        )
-    elif not segment.get("id"):
-        segment["id"] = _stable_id(
-            "legacy-transcript-segment",
-            [
-                segment["speaker"],
-                segment["text"],
-                f"{parse_date(segment['timestamp']).timestamp():.3f}",
-            ],
-        )
-    return segment
-
-
 def _segments(session: dict) -> list[dict]:
-    """Current key first, then the legacy ``segments`` key."""
-    segments = session.get("transcriptSegments")
-    if segments is None:
-        segments = session.get("segments")
-    if not isinstance(segments, list):
-        return []
+    """The segments as the app reads them. Earliest-format offsets become dates
+    and every id is derived, ignoring anything else stored with them; a current
+    segment without an id gets the one the app derives."""
+    earliest, stored = decode_transcript_segments(session)
     started_at = parse_date(session["startedAt"])
+    if earliest:
+        return [
+            {
+                "id": _stable_id(
+                    "legacy-offset-transcript-segment",
+                    [f"{started_at.timestamp():.3f}", str(index), segment["text"]],
+                ),
+                "speaker": segment["speaker"],
+                "text": segment["text"],
+                "timestamp": _iso(
+                    started_at
+                    + timedelta(seconds=legacy_offset_seconds(segment["timestamp"]))
+                ),
+            }
+            for index, segment in enumerate(stored)
+        ]
     return [
-        _normalized(segment, index, started_at)
-        for index, segment in enumerate(segments)
+        {
+            **segment,
+            "id": segment.get("id")
+            or _stable_id(
+                "legacy-transcript-segment",
+                [
+                    segment["speaker"],
+                    segment["text"],
+                    f"{parse_date(segment['timestamp']).timestamp():.3f}",
+                ],
+            ),
+        }
+        for segment in stored
     ]
+
+
+def _display_title(session: dict) -> str:
+    """The title the app shows: "Meeting …" records read as "Session …"."""
+    title = session["title"]
+    return (
+        "Session " + title[len("Meeting ") :] if title.startswith("Meeting ") else title
+    )
 
 
 def _speaker(segment: dict) -> str:
@@ -270,19 +306,18 @@ def _spoken(segments: list[dict]) -> list[dict]:
     return [segment for segment in segments if segment["text"].strip()]
 
 
-def _sort_key(session: dict) -> tuple[datetime, str]:
-    return parse_date(session["startedAt"]), session["id"]
+def _sort_key(session: _Session) -> tuple[datetime, str]:
+    return parse_date(session.manifest["startedAt"]), session.manifest["id"]
 
 
-def _summary(session: dict) -> dict:
-    segments = _segments(session)
+def _summary(session: _Session) -> dict:
     return {
-        "id": session["id"],
-        "title": session["title"],
-        "startedAt": session["startedAt"],
-        "status": session["status"],
-        "segmentCount": len(segments),
-        "hasTranscript": bool(_spoken(segments)),
+        "id": session.manifest["id"],
+        "title": _display_title(session.manifest),
+        "startedAt": session.manifest["startedAt"],
+        "status": session.manifest["status"],
+        "segmentCount": len(session.segments),
+        "hasTranscript": bool(_spoken(session.segments)),
     }
 
 
@@ -308,20 +343,16 @@ def list_sessions(
     """Recent sessions, newest first."""
     limit = _bounded(limit, "limit", 1, MAX_LIST_LIMIT)
     offset = _bounded(offset, "offset", 0)
-    summaries = []
-    skipped = 0
-    for session in _scan_sessions(root):
-        if session is None:
-            skipped += 1
-        else:
-            summaries.append(_summary(session))
-    summaries.sort(key=_sort_key, reverse=True)
+    sessions, skipped = _scan_sessions(root)
+    sessions.sort(key=_sort_key, reverse=True)
     return {
-        "total": len(summaries),
+        "total": len(sessions),
         "offset": offset,
         "limit": limit,
         "skippedCount": skipped,
-        "sessions": summaries[offset : offset + limit],
+        "sessions": [
+            _summary(session) for session in sessions[offset : offset + limit]
+        ],
     }
 
 
@@ -329,14 +360,13 @@ def get_transcript(
     session_id: str, *, root: str | os.PathLike[str] | None = None
 ) -> dict:
     """One session's transcript, as stored, plus a plain ``Speaker: text`` rendering."""
-    manifest = _manifest_path(_validated_root(sessions_root(root)), session_id)
-    session = _load_session(manifest)
-    segments = _segments(session)
+    session = _find_session(session_id, root)
+    segments = session.segments
     return {
-        "id": session["id"],
-        "title": session["title"],
-        "startedAt": session["startedAt"],
-        "status": session["status"],
+        "id": session.manifest["id"],
+        "title": _display_title(session.manifest),
+        "startedAt": session.manifest["startedAt"],
+        "status": session.manifest["status"],
         "segmentCount": len(segments),
         "segments": [
             {
@@ -368,10 +398,15 @@ def _first_match(line: str, patterns: list[re.Pattern[str]]) -> re.Match[str] | 
 def search_transcripts(
     query: str,
     limit: int = DEFAULT_SEARCH_LIMIT,
+    offset: int = 0,
     *,
     root: str | os.PathLike[str] | None = None,
 ) -> dict:
-    """Case-insensitive search; a session matches the whole phrase or all its words."""
+    """Case-insensitive search of titles and spoken text, as the app searches.
+
+    A session matches when its title and text contain the whole phrase or every
+    word of it. Speaker names are not searched. Snippets come from the text.
+    """
     if not isinstance(query, str):
         raise ValueError("query must be a string.")
     needle = query.strip()
@@ -380,32 +415,33 @@ def search_transcripts(
     if len(needle) > MAX_QUERY_LENGTH:
         raise ValueError(f"query must be at most {MAX_QUERY_LENGTH} characters.")
     limit = _bounded(limit, "limit", 1, MAX_SEARCH_LIMIT)
+    offset = _bounded(offset, "offset", 0)
 
     phrase = re.compile(re.escape(needle), re.IGNORECASE)
     words = [re.compile(re.escape(word), re.IGNORECASE) for word in needle.split()]
+    sessions, skipped = _scan_sessions(root)
+    sessions.sort(key=_sort_key, reverse=True)
     results = []
-    skipped = 0
-    for session in _scan_sessions(root):
-        if session is None:
-            skipped += 1
-            continue
-        spoken = _spoken(_segments(session))
-        lines = [_line(segment) for segment in spoken]
-        full_text = "\n".join(lines)
-        if not phrase.search(full_text) and not all(
-            word.search(full_text) for word in words
+    for session in sessions:
+        spoken = _spoken(session.segments)
+        searchable = "\n".join(
+            [_display_title(session.manifest), *(s["text"] for s in spoken)]
+        )
+        if not phrase.search(searchable) and not all(
+            word.search(searchable) for word in words
         ):
             continue
         snippets = []
-        for segment, line in zip(spoken, lines, strict=True):
-            match = phrase.search(line) or _first_match(line, words)
+        for segment in spoken:
+            text = segment["text"].strip()
+            match = phrase.search(text) or _first_match(text, words)
             if match:
                 snippets.append(
                     {
                         "segmentId": segment["id"],
-                        "speaker": segment["speaker"],
+                        "speaker": _speaker(segment),
                         "timestamp": segment["timestamp"],
-                        "snippet": _snippet(line, match),
+                        "snippet": _snippet(text, match),
                     }
                 )
         results.append(
@@ -416,10 +452,11 @@ def search_transcripts(
             }
         )
 
-    results.sort(key=_sort_key, reverse=True)
     return {
         "query": needle,
         "totalMatches": len(results),
+        "offset": offset,
+        "limit": limit,
         "skippedCount": skipped,
-        "results": results[:limit],
+        "results": results[offset : offset + limit],
     }

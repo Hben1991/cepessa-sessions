@@ -130,14 +130,16 @@ def test_missing_root_lists_nothing(tmp_path, monkeypatch):
         get_transcript(OLDER_ID)
 
 
-def test_root_comes_from_env_then_default(tmp_path, monkeypatch):
+def test_root_comes_from_env_then_the_apps_two_stores(tmp_path, monkeypatch):
     monkeypatch.setenv("CEPESSA_SESSIONS_ROOT", str(tmp_path / "custom"))
-    assert store.sessions_root() == tmp_path / "custom"
+    assert store.sessions_roots() == [tmp_path / "custom"]
 
     monkeypatch.delenv("CEPESSA_SESSIONS_ROOT")
-    assert store.sessions_root() == (
-        Path.home() / "Library" / "Application Support" / "Cepessa" / "Sessions"
-    )
+    support = Path.home() / "Library" / "Application Support"
+    assert store.sessions_roots() == [
+        support / "Cepessa" / "Sessions",
+        support / "Cepessa Legacy" / "Meetings" / "Sessions",
+    ]
 
 
 # get_transcript
@@ -261,7 +263,7 @@ def test_search_is_case_insensitive_and_returns_snippets(sessions_root):
             ),
             "speaker": "Dana",
             "timestamp": "2026-06-12T08:00:02Z",
-            "snippet": "Dana: Codex should connect and Pull Transcripts directly",
+            "snippet": "Codex should connect and Pull Transcripts directly",
         }
     ]
 
@@ -278,8 +280,8 @@ def test_search_matches_all_words_across_segments(sessions_root):
 
     [match] = search_transcripts("july budget")["results"]
     assert [s["snippet"] for s in match["snippets"]] == [
-        "You: The budget is approved",
-        "Dana: Hiring starts in July",
+        "The budget is approved",
+        "Hiring starts in July",
     ]
     assert search_transcripts("july invoices")["results"] == []
 
@@ -291,7 +293,7 @@ def test_search_finds_hebrew(sessions_root):
     result = search_transcripts("התקציב")
 
     assert [match["id"] for match in result["results"]] == [HEBREW_ID]
-    assert result["results"][0]["snippets"][0]["snippet"] == f"דנה: {HEBREW_TEXT}"
+    assert result["results"][0]["snippets"][0]["snippet"] == HEBREW_TEXT
 
 
 def test_search_trims_long_lines_around_the_match(sessions_root):
@@ -585,3 +587,184 @@ def test_a_segment_without_an_id_gets_the_apps_stable_id(sessions_root):
     transcript = store.get_transcript(session_id)
     assert transcript["segments"][0]["id"] == "7F9932CB-DD98-563C-AC56-7EDC93577679"
     assert store.get_transcript(session_id) == transcript
+
+
+def test_offset_segments_are_decoded_as_a_whole_array_like_the_app(sessions_root):
+    session_id = make_id("legacy-array")
+    started = "2026-08-20T18:40:48Z"
+    write_session(
+        sessions_root,
+        session_id,
+        started_at=started,
+        segments=[
+            # A stored id and an offset end time are ignored, as in the app.
+            {
+                "id": make_id("stored"),
+                "speaker": "Speaker 1",
+                "text": "בוקר טוב",
+                "timestamp": "00:05",
+                "endTimestamp": "00:09",
+            },
+            {"speaker": "Speaker 2", "text": "Morning", "timestamp": "1:02:03"},
+        ],
+    )
+
+    first, second = get_transcript(session_id)["segments"]
+    assert first["id"] == "D1178BFA-F017-5F83-83FF-06391CB0F226"
+    assert first["endTimestamp"] is None
+    assert second["timestamp"] == "2026-08-20T19:42:51Z"
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "seconds"),
+    [(".5", 0.5), ("5.", 5), ("1e2", 100), ("+5", 5), ("1:00.5", 60.5)],
+)
+def test_offsets_accept_what_swift_double_accepts(timestamp, seconds):
+    assert store.legacy_offset_seconds(timestamp) == seconds
+
+
+@pytest.mark.parametrize(
+    "timestamp", ["٠٥", "12:34\n", " 5", "5 ", "1_0", "-5", "nan", "", "1:2:3:4", "1e"]
+)
+def test_offsets_reject_what_swift_double_rejects(timestamp):
+    assert store.legacy_offset_seconds(timestamp) is None
+
+
+@pytest.mark.parametrize(
+    ("label", "segments_value", "extra"),
+    [
+        (
+            "mixed-date-and-offset",
+            [
+                segment("A", "dated"),
+                {"speaker": "B", "text": "offset", "timestamp": "00:05"},
+            ],
+            {},
+        ),
+        ("null-with-legacy-key", None, {"segments": [segment("A", "hidden words")]}),
+        (
+            "offset-overflows",
+            [{"speaker": "A", "text": "hidden words", "timestamp": "99999999999:00"}],
+            {},
+        ),
+        (
+            "start-at-year-one",
+            [{"speaker": "A", "text": "hidden words", "timestamp": "00:05"}],
+            {"startedAt": "0001-01-01T00:30:00+01:00"},
+        ),
+        (
+            "unpaired-surrogate",
+            [segment("A", "hidden words \ud800", label="surrogate")],
+            {},
+        ),
+    ],
+)
+def test_sessions_the_app_cannot_read_are_skipped_not_fatal(
+    sessions_root, label, segments_value, extra
+):
+    bad_id = make_id(f"unreadable:{label}")
+    payload = {**session_payload(bad_id), "transcriptSegments": segments_value, **extra}
+    # ASCII-escaped, as a surrogate would appear in a real file.
+    _write_raw(sessions_root, bad_id, json.dumps(payload).encode())
+    write_session(sessions_root, HEALTHY_ID, segments=[segment("You", "hidden words")])
+
+    listed = list_sessions()
+    assert [s["id"] for s in listed["sessions"]] == [HEALTHY_ID]
+    assert listed["skippedCount"] == 1
+    assert search_transcripts("hidden words")["skippedCount"] == 1
+    with pytest.raises(SessionValidationError):
+        get_transcript(bad_id)
+
+
+def test_nesting_stops_where_swift_stops(sessions_root):
+    def nested(depth: int) -> bytes:
+        # The session object is the first level.
+        body = "[" * (depth - 1) + "]" * (depth - 1)
+        return (
+            json.dumps(session_payload(make_id(f"depth:{depth}"))).encode()[:-1]
+            + f', "x": {body}}}'.encode()
+        )
+
+    for depth in (512, 513, 100_000):
+        _write_raw(sessions_root, make_id(f"depth:{depth}"), nested(depth))
+
+    listed = list_sessions()
+    assert [s["id"] for s in listed["sessions"]] == [make_id("depth:512")]
+    assert listed["skippedCount"] == 2
+
+
+def test_the_pre_rename_store_is_read_behind_the_current_one(tmp_path, monkeypatch):
+    current = tmp_path / "Cepessa" / "Sessions"
+    legacy = tmp_path / "Cepessa Legacy" / "Meetings" / "Sessions"
+    current.mkdir(parents=True)
+    legacy.mkdir(parents=True)
+    monkeypatch.delenv("CEPESSA_SESSIONS_ROOT")
+    monkeypatch.setattr(store, "DEFAULT_SESSIONS_ROOT", current)
+    monkeypatch.setattr(store, "LEGACY_SESSIONS_ROOT", legacy)
+
+    shared, only_legacy, broken_here = (make_id(f"stores:{n}") for n in range(3))
+    write_session(current, shared, title="Current copy")
+    write_session(legacy, shared, title="Legacy copy")
+    write_session(legacy, only_legacy, title="Only in legacy")
+    _write_raw(current, broken_here, b"{")
+    write_session(legacy, broken_here, title="Readable in legacy")
+
+    titles = {s["id"]: s["title"] for s in list_sessions()["sessions"]}
+    assert titles == {
+        shared: "Current copy",
+        only_legacy: "Only in legacy",
+        broken_here: "Readable in legacy",
+    }
+    assert get_transcript(only_legacy)["title"] == "Only in legacy"
+    assert get_transcript(broken_here)["title"] == "Readable in legacy"
+
+
+def test_a_directory_swapped_for_a_link_mid_read_is_never_followed(
+    sessions_root, tmp_path, monkeypatch
+):
+    write_session(sessions_root, HEALTHY_ID, segments=[segment("You", "inside")])
+    outside = tmp_path / "outside"
+    write_session(outside, HEALTHY_ID, segments=[segment("You", "OUTSIDE")])
+    real_open = os.open
+    bundle = sessions_root / HEALTHY_ID
+
+    def swapping_open(path, flags, *args, **kwargs):
+        # Just before the manifest is opened, the session directory becomes a
+        # link to a directory outside the store.
+        if os.fspath(path).endswith(store.MANIFEST_NAME) and not bundle.is_symlink():
+            bundle.rename(sessions_root / "moved-away")
+            os.symlink(outside / HEALTHY_ID, bundle)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(store.os, "open", swapping_open)
+    assert get_transcript(HEALTHY_ID)["transcript"] == "You: inside"
+
+
+def test_search_reads_titles_and_text_but_not_speaker_names(sessions_root):
+    write_session(
+        sessions_root,
+        OLDER_ID,
+        title="Meeting 20 Aug",
+        segments=[segment("", "hello"), segment("Dana", "hello again")],
+    )
+
+    assert search_transcripts("speaker")["results"] == []
+    assert search_transcripts("dana")["results"] == []
+    [by_title] = search_transcripts("session 20 aug")["results"]
+    assert by_title["title"] == "Session 20 Aug"
+    assert by_title["matchingSegmentCount"] == 0
+
+
+def test_search_pages_with_offset(sessions_root):
+    for day in range(1, 4):
+        write_session(
+            sessions_root,
+            make_id(f"page:{day}"),
+            started_at=f"2026-06-0{day}T08:00:00Z",
+            segments=[segment("You", "roadmap", f"2026-06-0{day}T08:00:01Z")],
+        )
+
+    page = search_transcripts("roadmap", limit=2, offset=2)
+    assert page["totalMatches"] == 3
+    assert page["offset"] == 2
+    assert [r["id"] for r in page["results"]] == [make_id("page:1")]

@@ -82,9 +82,12 @@ Inputs:
 
 - `query` (string, 1–500 characters)
 - `limit` (integer, 1–50, default 10)
+- `offset` (integer, ≥ 0, default 0)
 
-A session matches when its transcript contains the whole query, or every word
-of it, case-insensitively. Speaker labels are searched too.
+As in the app, the search covers each session's title and spoken text,
+case-insensitively; speaker names are not searched. A session matches when that
+text contains the whole query or every word of it. `totalMatches` counts every
+matching session; use `offset` to page past `limit`.
 
 Output:
 
@@ -92,6 +95,8 @@ Output:
 {
   "query": "תקציב",
   "totalMatches": 3,
+  "offset": 0,
+  "limit": 10,
   "skippedCount": 0,
   "results": [
     {
@@ -107,7 +112,7 @@ Output:
           "segmentId": "5C2A…",
           "speaker": "דנה",
           "timestamp": "2026-06-11T08:00:01Z",
-          "snippet": "דנה: נתחיל בתקציב."
+          "snippet": "נתחיל בתקציב."
         }
       ]
     }
@@ -115,15 +120,20 @@ Output:
 }
 ```
 
-At most three snippets are returned per session; each is cut to about 120
-characters on either side of the match.
+At most three snippets are returned per session, taken from the spoken text;
+each is cut to about 120 characters on either side of the match. A session
+that matched on its title alone has none.
 
 ## Sessions root
 
-The server reads `<root>/<session UUID>/session.json`. The root is:
+The server reads `<root>/<session UUID>/session.json`. The roots are:
 
-1. `CEPESSA_SESSIONS_ROOT`, when set;
-2. otherwise `~/Library/Application Support/Cepessa/Sessions`.
+1. `CEPESSA_SESSIONS_ROOT`, when set, and nothing else;
+2. otherwise the app's two stores, in the app's order:
+   `~/Library/Application Support/Cepessa/Sessions`, then
+   `~/Library/Application Support/Cepessa Legacy/Meetings/Sessions`. A session
+   in the first hides one with the same ID in the second, unless the first copy
+   cannot be read.
 
 Tools cannot choose a different root per call. To serve a fixture or a dev
 build's data, set `CEPESSA_SESSIONS_ROOT` in the server's environment.
@@ -137,14 +147,17 @@ build's data, set `CEPESSA_SESSIONS_ROOT` in the server's environment.
   always sees a whole file.
 - The root must be a real directory, not a symlink.
 - Session IDs must be UUIDs; any other name (including `../`) is rejected.
-- A session folder must be a real directory directly under the root, and
-  `session.json` must be a regular file with a single hard link, at most 32 MiB,
-  opened with no-follow and checked again after opening.
-- `session.json` must be UTF-8 JSON (no `NaN`/`Infinity`) and must decode
-  under the same rules as the app's Swift models, including matching its folder
-  ID. A session that fails any check is skipped by `list_sessions` and
-  `search_transcripts` (and counted in `skippedCount`); `get_transcript` returns
-  an error for it.
+- Each read opens the root, then the session folder, then `session.json`, each
+  relative to the one before and none through a link. No folder can be swapped
+  for a link between a check and the read. `session.json` must be a regular
+  file with a single hard link, at most 32 MiB.
+- `session.json` must be UTF-8 JSON (no `NaN`/`Infinity`, no unpaired
+  surrogates, at most 512 levels deep) and must decode under the same rules as
+  the app's Swift models, including matching its folder ID. The earliest
+  recordings' offset times (`"12:34"`) and missing segment IDs are converted
+  the way the app converts them. A session that fails any check is skipped by
+  `list_sessions` and `search_transcripts` (and counted in `skippedCount`);
+  `get_transcript` returns an error for it.
 - Transcript text is meeting content. Clients should treat it as data, not as
   instructions.
 
