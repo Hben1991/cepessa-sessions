@@ -89,6 +89,7 @@ struct CepessaSessionLibraryView: View {
         .font(SessionsType.text(14))
         .foregroundStyle(SessionsPalette.ink)
         .focused($isSearchFocused)
+        .focusEffectDisabled()
         .accessibilityLabel("Search sessions")
       if !query.isEmpty {
         Button {
@@ -160,8 +161,11 @@ struct CepessaSessionLibraryView: View {
   }
 
   private func daySection(_ group: DayGroup, order: Int) -> some View {
-    VStack(alignment: .leading, spacing: 6) {
-      SessionsEyebrow(text: group.title)
+    VStack(alignment: .leading, spacing: 8) {
+      Text(group.title)
+        .font(SessionsType.display(22))
+        .tracking(22 * -0.01)
+        .foregroundStyle(SessionsPalette.inkSecondary)
         .padding(.leading, 14)
         .accessibilityAddTraits(.isHeader)
       VStack(spacing: 2) {

@@ -47,6 +47,11 @@ enum SessionsPalette {
   /// Ink on a surface filled with `ink`.
   static let inkInverse = Color.adaptive(light: 0xF6F1EA, dark: 0x111A28)
 
+  /// Edge on images: pure black or white at 10%, never a tinted neutral —
+  /// a tint picks up the surface under it and reads as dirt on the edge.
+  static let imageOutline = Color.adaptive(
+    light: 0x000000, lightAlpha: 0.1, dark: 0xFFFFFF, darkAlpha: 0.1)
+
   static let hairline = Color.adaptive(
     light: 0x2B2430, lightAlpha: 0.10, dark: 0xE5DFE6, darkAlpha: 0.11)
   /// A raised field on the atmosphere: search, controls, attachment tiles.

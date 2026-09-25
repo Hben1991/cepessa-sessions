@@ -21,6 +21,7 @@ struct CepessaSessionReadingView: View {
   @State private var renameSession = false
   @State private var proposedTitle = ""
   @State private var editError: String?
+  @State private var isTitleHovered = false
 
   private let baseMeasure: CGFloat = 680
   private let minScale = 0.8
@@ -102,6 +103,14 @@ struct CepessaSessionReadingView: View {
       SessionsBackButton(title: "Sessions", action: back)
     } trailing: {
       if let session = model.selectedSession {
+        if hasText(session), !LocalSessionInsightsView.isShown(for: session, model: model) {
+          SessionsRoundIconButton(
+            symbol: "sparkles", title: "Find Decisions with TypeSafe (Experimental)…"
+          ) {
+            model.requestInsightAnalysis(for: session.id)
+          }
+        }
+
         SessionsRoundIconButton(
           symbol: "arrow.clockwise", title: "Transcribe Again"
         ) {
@@ -130,7 +139,7 @@ struct CepessaSessionReadingView: View {
         ScrollView {
           VStack(alignment: .leading, spacing: 0) {
             header(session, isRTL: isRTL)
-              .padding(.bottom, 26)
+              .padding(.bottom, 34)
 
             if let audioURL = model.audioPlaybackURL(for: session), session.status != .recording {
               LocalSessionAudioPlayer(
@@ -140,13 +149,13 @@ struct CepessaSessionReadingView: View {
                 seekGeneration: model.insightReveal?.generation
               )
               .sessionsArrival(2)
-              .padding(.bottom, 22)
+              .padding(.bottom, 30)
             }
 
             if LocalSessionInsightsView.isShown(for: session, model: model) {
               LocalSessionInsightsView(model: model, session: session)
                 .sessionsArrival(3)
-                .padding(.bottom, 26)
+                .padding(.bottom, 34)
             }
 
             if !session.attachments.isEmpty {
@@ -156,21 +165,34 @@ struct CepessaSessionReadingView: View {
                 enlargedImage = image
               }
               .sessionsArrival(3)
-              .padding(.bottom, 30)
+              .padding(.bottom, 34)
             }
 
             if hasText(session) {
               transcript(session, measure: measure)
+              transcriptEnd(session)
+                .padding(.top, 56)
             } else {
               pendingState(session, status: status)
             }
           }
           .frame(width: measure, alignment: .leading)
           .frame(maxWidth: .infinity)
-          .padding(.top, 12)
-          .padding(.bottom, 96)
+          .padding(.top, 20)
+          .padding(.bottom, 120)
         }
         .scrollIndicators(.automatic)
+        // Words fade under the top strip and into the bottom edge instead of
+        // being cut by them.
+        .mask {
+          VStack(spacing: 0) {
+            LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+              .frame(height: 28)
+            Color.black
+            LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+              .frame(height: 44)
+          }
+        }
         .onChange(of: model.insightReveal?.generation) { _, _ in
           guard let reveal = model.insightReveal, reveal.sessionID == session.id else { return }
           withAnimation(.easeInOut(duration: 0.25)) {
@@ -187,55 +209,68 @@ struct CepessaSessionReadingView: View {
     let notice = LocalSessionReadingNotice.resolve(session)
     let progress = model.processingSnapshot(for: session.id)
     let saveError = model.sessionSaveErrors[session.id]
-    let status = CepessaStatusStyle.resolve(session.status)
-    let titleSize = 44 * min(zoom, 1.3)
+    let titleSize = 48 * min(zoom, 1.3)
+    let edge: Alignment = isRTL ? .trailing : .leading
 
-    return VStack(alignment: .leading, spacing: 14) {
-      SessionsEyebrow(text: dateLine(for: session), color: SessionsPalette.accent)
-        .sessionsArrival(0)
-
-      SessionsRevealedLine(
-        text: session.displayTitle,
-        font: SessionsType.display(titleSize),
-        alignment: isRTL ? .trailing : .leading,
-        tracking: titleSize * -0.015
-      )
-      .frame(maxWidth: .infinity, alignment: isRTL ? .trailing : .leading)
-      .onTapGesture(count: 2) { beginRename(session) }
-      .contextMenu {
-        Button("Rename…") { beginRename(session) }
-      }
-      .accessibilityAddTraits(.isHeader)
-      .accessibilityAction(named: "Rename") { beginRename(session) }
-
-      // Before there are words, the pending block below tells the story; the
-      // status line only qualifies a transcript that exists.
-      if hasText(session) || saveError != nil {
-      HStack(alignment: .center, spacing: 10) {
-        if saveError != nil || status != .ready {
-          SessionsStatusLight(style: saveError != nil ? .needsAttention : status)
+    return VStack(alignment: isRTL ? .trailing : .leading, spacing: 12) {
+      HStack(alignment: .firstTextBaseline, spacing: 12) {
+        if isRTL {
+          Spacer(minLength: 0)
+          renameButton(session)
         }
-        VStack(alignment: .leading, spacing: 3) {
-          Text(saveError != nil ? "Changes not saved" : progress?.title ?? notice.title)
-            .font(SessionsType.text(14, weight: .semibold))
-            .foregroundStyle(SessionsPalette.ink)
-          Text(saveError ?? progress?.detail ?? notice.detail)
-            .font(SessionsType.text(13))
-            .foregroundStyle(SessionsPalette.inkSecondary)
-            .fixedSize(horizontal: false, vertical: true)
+        SessionsRevealedLine(
+          text: session.displayTitle,
+          font: SessionsType.display(titleSize),
+          alignment: isRTL ? .trailing : .leading,
+          tracking: titleSize * -0.02
+        )
+        .onTapGesture(count: 2) { beginRename(session) }
+        .contextMenu {
+          Button("Rename…") { beginRename(session) }
         }
-        Spacer(minLength: 12)
-        Button("Rename") { beginRename(session) }
-          .buttonStyle(SessionsLinkButtonStyle(size: 12.5))
-          .accessibilityLabel("Rename session")
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityAction(named: "Rename") { beginRename(session) }
+        if !isRTL {
+          renameButton(session)
+          Spacer(minLength: 0)
+        }
       }
-      .accessibilityElement(children: .combine)
-      .sessionsArrival(1)
+      .onHover { isTitleHovered = $0 }
+
+      Text(metaLine(for: session))
+        .font(SessionsType.text(14))
+        .foregroundStyle(SessionsPalette.inkTertiary)
+        .monospacedDigit()
+        .frame(maxWidth: .infinity, alignment: edge)
+        .sessionsArrival(1)
+
+      // Only what changes how the words should be trusted earns a line here:
+      // work in progress, a transcript that needs review, a failed save.
+      if saveError != nil || progress != nil || (notice.needsReview && hasText(session)) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+          Image(systemName: saveError != nil || notice.needsReview ? "exclamationmark.triangle.fill" : "waveform")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(
+              saveError != nil || notice.needsReview ? SessionsPalette.attention : SessionsPalette.accent)
+          VStack(alignment: .leading, spacing: 3) {
+            Text(saveError != nil ? "Changes not saved" : progress?.title ?? notice.title)
+              .font(SessionsType.text(14, weight: .semibold))
+              .foregroundStyle(SessionsPalette.ink)
+            Text(saveError ?? progress?.detail ?? notice.detail)
+              .font(SessionsType.text(13))
+              .foregroundStyle(SessionsPalette.inkSecondary)
+              .fixedSize(horizontal: false, vertical: true)
+          }
+        }
+        .padding(.top, 6)
+        .accessibilityElement(children: .combine)
+        .sessionsArrival(2)
       }
 
       if let fraction = progress?.progress {
         SessionsLightProgress(fraction: fraction)
           .frame(height: 3)
+          .padding(.top, 4)
           .accessibilityLabel("Transcription progress")
           .accessibilityValue("\(Int((fraction * 100).rounded())) percent")
       }
@@ -248,15 +283,60 @@ struct CepessaSessionReadingView: View {
     }
   }
 
-  private func dateLine(for session: LocalSession) -> String {
-    let day = session.startedAt.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
+  /// A pencil that appears beside the title on hover. Double-click and the
+  /// context menu rename too; this makes the action findable.
+  private func renameButton(_ session: LocalSession) -> some View {
+    Button {
+      beginRename(session)
+    } label: {
+      Image(systemName: "pencil")
+        .font(.system(size: 13, weight: .semibold))
+    }
+    .buttonStyle(SessionsRoundButtonStyle(diameter: 28))
+    .opacity(isTitleHovered ? 1 : 0)
+    .animation(SessionsMotion.hover, value: isTitleHovered)
+    .help("Rename")
+    .accessibilityLabel("Rename session")
+  }
+
+  /// When it was, and who was there: one quiet line under the title.
+  private func metaLine(for session: LocalSession) -> String {
+    let day = session.startedAt.formatted(.dateTime.weekday(.wide).day().month(.wide))
     let time = session.startedAt.formatted(date: .omitted, time: .shortened)
     var parts = [day, time]
     let speakers = Set(session.transcriptSegments.map(\.speaker).filter { !$0.isEmpty })
     if speakers.count > 1 {
       parts.append("\(speakers.count) speakers")
     }
-    return parts.joined(separator: " · ")
+    if !session.attachments.isEmpty {
+      parts.append("\(session.attachments.count) pinned")
+    }
+    return parts.joined(separator: "  ·  ")
+  }
+
+  /// The close of a transcript: a point of light, and — for a transcript made
+  /// before completeness checks existed — the honest footnote.
+  private func transcriptEnd(_ session: LocalSession) -> some View {
+    let notice = LocalSessionReadingNotice.resolve(session)
+    let isLegacy = !notice.needsReview && session.transcriptionEvidence?.isComplete != true
+    return VStack(spacing: 12) {
+      Circle()
+        .fill(SessionsPalette.sunriseGold)
+        .frame(width: 5, height: 5)
+        .shadow(color: SessionsPalette.sunriseGold.opacity(0.8), radius: 6)
+      Text("End of transcript")
+        .font(SessionsType.text(12.5, weight: .medium))
+        .foregroundStyle(SessionsPalette.inkQuiet)
+      if isLegacy {
+        Text(notice.detail)
+          .font(SessionsType.text(12.5))
+          .foregroundStyle(SessionsPalette.inkQuiet)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: 420)
+      }
+    }
+    .frame(maxWidth: .infinity)
+    .accessibilityElement(children: .combine)
   }
 
   private func beginRename(_ session: LocalSession) {
@@ -276,6 +356,7 @@ struct CepessaSessionReadingView: View {
     return LazyVStack(alignment: .leading, spacing: 30 * zoom) {
       ForEach(Array(turns.enumerated()), id: \.element.id) { index, turn in
         turnView(turn, in: session, measure: measure, voices: voices)
+          .modifier(SessionsTurnHighlight())
           .sessionsArrival(index + 4)
       }
     }
@@ -289,16 +370,16 @@ struct CepessaSessionReadingView: View {
       turn.items.map(\.segment.text).joined(separator: " "))
     let alignment: HorizontalAlignment = isRTL ? .trailing : .leading
 
-    return VStack(alignment: alignment, spacing: 12 * zoom) {
-      turnLabel(turn, in: session, voices: voices)
+    return VStack(alignment: alignment, spacing: 10 * zoom) {
+      turnLabel(turn, in: session, voices: voices, isRTL: isRTL)
         .frame(maxWidth: .infinity, alignment: isRTL ? .trailing : .leading)
 
       ForEach(turn.items) { item in
         VStack(alignment: alignment, spacing: 14 * zoom) {
           highlightedTranscript(item.segment, isRightToLeft: isRTL)
-            .font(SessionsType.text(17 * zoom))
+            .font(SessionsType.text(18 * zoom))
             .foregroundStyle(SessionsPalette.ink)
-            .lineSpacing(17 * zoom * 0.5)
+            .lineSpacing(18 * zoom * 0.5)
             .textSelection(.enabled)
             .multilineTextAlignment(isRTL ? .trailing : .leading)
             .frame(maxWidth: .infinity, alignment: isRTL ? .trailing : .leading)
@@ -319,14 +400,21 @@ struct CepessaSessionReadingView: View {
   }
 
   private func turnLabel(
-    _ turn: SessionTranscriptTurn, in session: LocalSession, voices: [String: Int]
+    _ turn: SessionTranscriptTurn, in session: LocalSession, voices: [String: Int],
+    isRTL: Bool
   ) -> some View {
     let segment = turn.items[0].segment
     let speaker = segment.speaker.trimmingCharacters(in: .whitespacesAndNewlines)
     let color = SessionsPalette.speakerColor(
       at: voices[SessionTranscriptTurn.speakerKey(segment)] ?? 0)
 
-    return HStack(spacing: 10) {
+    return HStack(spacing: 9) {
+      // The voice's own light, then its name.
+      Circle()
+        .fill(color)
+        .frame(width: 6, height: 6)
+        .shadow(color: color.opacity(0.75), radius: 5)
+        .accessibilityHidden(true)
       if !speaker.isEmpty {
         if let speakerID = segment.speakerID, session.transcriptionEvidence != nil {
           Menu {
@@ -343,7 +431,7 @@ struct CepessaSessionReadingView: View {
               }
             }
           } label: {
-            SessionsEyebrow(text: speaker, color: color, size: 11 * min(zoom, 1.3))
+            SessionsEyebrow(text: speaker, color: color, size: 12 * min(zoom, 1.3))
           }
           .menuStyle(.button)
           .buttonStyle(.plain)
@@ -351,28 +439,31 @@ struct CepessaSessionReadingView: View {
           .fixedSize()
           .accessibilityLabel("Speaker actions for \(speaker)")
         } else {
-          SessionsEyebrow(text: speaker, color: color, size: 11 * min(zoom, 1.3))
+          SessionsEyebrow(text: speaker, color: color, size: 12 * min(zoom, 1.3))
         }
       }
 
       Text(timestampLabel(for: segment, in: session))
-        .font(SessionsType.figure(11.5 * min(zoom, 1.3)))
+        .font(SessionsType.figure(12 * min(zoom, 1.3)))
         .foregroundStyle(SessionsPalette.inkQuiet)
     }
+    // Right-to-left turns read name-first from the right.
+    .environment(\.layoutDirection, isRTL ? .rightToLeft : .leftToRight)
   }
 
   private func inlineImage(_ image: NSImage, title: String, measure: CGFloat) -> some View {
     Button {
       enlargedImage = image
     } label: {
+      // The outline and shadow belong to the picture, not to the column, so
+      // the picture is sized to fit exactly before they are drawn.
       Image(nsImage: image)
         .resizable()
-        .scaledToFit()
-        .frame(maxWidth: measure, maxHeight: 340, alignment: .leading)
+        .frame(width: fitted(image, measure: measure).width, height: fitted(image, measure: measure).height)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
           RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .strokeBorder(SessionsPalette.hairline, lineWidth: 1)
+            .strokeBorder(SessionsPalette.imageOutline, lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -380,6 +471,13 @@ struct CepessaSessionReadingView: View {
     .buttonStyle(SessionsPressStyle(scale: 0.99))
     .help("Open \(title)")
     .accessibilityLabel("Open attachment \(title)")
+  }
+
+  private func fitted(_ image: NSImage, measure: CGFloat) -> CGSize {
+    let size = image.size
+    guard size.width > 0, size.height > 0 else { return CGSize(width: measure, height: 200) }
+    let scale = min(measure / size.width, 340 / size.height, 1)
+    return CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
   }
 
   /// Screenshots and image attachments pinned to this moment.
@@ -632,6 +730,26 @@ struct SessionTranscriptTurn: Identifiable, Equatable {
 
   static func speakerKey(_ segment: LocalSessionTranscriptSegment) -> String {
     segment.speakerID ?? segment.speaker.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+}
+
+/// A turn lifts softly under the pointer, so the eye can hold its place in a
+/// long transcript. The lift never changes layout.
+struct SessionsTurnHighlight: ViewModifier {
+  @State private var isHovered = false
+
+  func body(content: Content) -> some View {
+    content
+      .padding(.horizontal, 18)
+      .padding(.vertical, 14)
+      .background(
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+          .fill(isHovered ? SessionsPalette.raised.opacity(0.6) : .clear)
+      )
+      .padding(.horizontal, -18)
+      .padding(.vertical, -14)
+      .onHover { isHovered = $0 }
+      .animation(SessionsMotion.hover, value: isHovered)
   }
 }
 

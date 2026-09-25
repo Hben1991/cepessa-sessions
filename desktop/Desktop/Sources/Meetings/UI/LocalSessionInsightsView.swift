@@ -9,11 +9,13 @@ struct LocalSessionInsightsView: View {
   @ObservedObject var model: LocalMeetingAppModel
   let session: LocalSession
 
-  /// Analysis needs words; a saved analysis stays visible either way.
+  /// Shown once there is an analysis (or a broken one to explain). Until
+  /// then the reader offers it from the top bar, so an experimental cloud
+  /// feature never sits between the owner and their transcript.
   static func isShown(for session: LocalSession, model: LocalMeetingAppModel) -> Bool {
     model.insightRecord(for: session.id) != nil
       || model.insightMalformedSessionIDs.contains(session.id)
-      || !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      || model.pendingInsightConsentSessionID == session.id
   }
 
   var body: some View {
@@ -32,8 +34,10 @@ struct LocalSessionInsightsView: View {
         emptyLine(record)
       }
     }
-    .padding(18)
-    .sessionsRaised(radius: 18)
+    .padding(.top, 22)
+    .overlay(alignment: .top) {
+      Rectangle().fill(SessionsPalette.hairline).frame(height: 1)
+    }
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Decisions, commitments, and open questions")
   }

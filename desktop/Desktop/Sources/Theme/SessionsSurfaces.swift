@@ -18,16 +18,26 @@ struct SessionsAtmosphere: View {
         startPoint: .top,
         endPoint: .bottom
       )
-      // First light along the top edge.
+      // First light along the top edge: gold at the centre, coral drifting
+      // to one side, the way a horizon warms unevenly.
       RadialGradient(
         colors: [
-          SessionsPalette.sunriseGold.opacity(colorScheme == .dark ? 0.16 : 0.14),
-          SessionsPalette.cloudCoral.opacity(colorScheme == .dark ? 0.06 : 0.05),
+          SessionsPalette.sunriseGold.opacity(colorScheme == .dark ? 0.2 : 0.15),
+          SessionsPalette.cloudCoral.opacity(colorScheme == .dark ? 0.07 : 0.05),
           .clear,
         ],
-        center: UnitPoint(x: 0.5, y: -0.12),
+        center: UnitPoint(x: 0.5, y: -0.14),
         startRadius: 0,
-        endRadius: 620
+        endRadius: 640
+      )
+      RadialGradient(
+        colors: [
+          SessionsPalette.cloudCoral.opacity(colorScheme == .dark ? 0.1 : 0.06),
+          .clear,
+        ],
+        center: UnitPoint(x: 0.86, y: -0.06),
+        startRadius: 0,
+        endRadius: 420
       )
       // The night's cool side, low and to the leading edge.
       RadialGradient(
@@ -163,7 +173,7 @@ extension View {
 
 /// Press feedback shared by every custom control: a small give, never a bounce.
 struct SessionsPressStyle: ButtonStyle {
-  var scale: CGFloat = 0.95
+  var scale: CGFloat = 0.96
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -190,10 +200,13 @@ struct SessionsRoundButtonStyle: ButtonStyle {
       .background(Circle().fill(isHovered && isEnabled ? SessionsPalette.raisedHover : SessionsPalette.raised))
       .overlay(Circle().strokeBorder(SessionsPalette.hairline, lineWidth: 1))
       .contentShape(Circle())
-      .scaleEffect(configuration.isPressed ? 0.94 : 1)
+      .scaleEffect(configuration.isPressed ? 0.96 : 1)
       .animation(SessionsMotion.press, value: configuration.isPressed)
       .animation(SessionsMotion.hover, value: isHovered)
       .onHover { isHovered = $0 }
+      // A 40pt target around a smaller disc.
+      .padding((max(40, diameter) - diameter) / 2)
+      .contentShape(Circle())
   }
 }
 
@@ -211,7 +224,7 @@ struct SessionsCapsuleButtonStyle: ButtonStyle {
       .background(
         Capsule().fill(SessionsPalette.ink.opacity(isEnabled ? (isHovered ? 1 : 0.92) : 0.3)))
       .contentShape(Capsule())
-      .scaleEffect(configuration.isPressed ? 0.97 : 1)
+      .scaleEffect(configuration.isPressed ? 0.96 : 1)
       .animation(SessionsMotion.press, value: configuration.isPressed)
       .onHover { isHovered = $0 }
   }

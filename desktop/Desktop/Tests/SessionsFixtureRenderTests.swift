@@ -143,6 +143,18 @@ final class SessionsFixtureRenderTests: XCTestCase {
     }
   }
 
+  func testRenderSettings() throws {
+    // The settings page reads the shared store; point it at an empty root
+    // before anything creates it, so no real data is ever loaded.
+    setenv("CEPESSA_SESSIONS_TEST_ROOT", root.path, 1)
+    for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+      try render(
+        CepessaSessionsSettingsPage(),
+        size: CGSize(width: 560, height: 660),
+        name: "settings-\(appearance == .aqua ? "light" : "dark")", appearance: appearance)
+    }
+  }
+
   // MARK: - Fixtures
 
   private func fixtureModel() throws -> LocalMeetingAppModel {
@@ -195,7 +207,34 @@ final class SessionsFixtureRenderTests: XCTestCase {
       status: .failed, transcriptSegments: [], audioArtifacts: .empty)
     failed.processingError = "The Hebrew speech model could not be loaded on this Mac."
 
-    for session in [failed, english, hebrew] {
+    // The English session carries real audio and a pinned screenshot, so the
+    // player and the attachments render with content.
+    var withMedia = english
+    try layout.ensureDirectories(for: withMedia.id)
+    let writer = try LocalMeetingWaveFileWriter(fileURL: layout.micAudioURL(for: withMedia.id))
+    try writer.append(samples: [Int16](repeating: 0, count: 16_000 * 42))
+    try writer.close()
+    withMedia.audioArtifacts = LocalSessionAudioArtifacts(
+      micFileName: "mic.wav", systemFileName: nil, mixedFileName: nil)
+    let iconURL = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("Branding/AppIcon-1024.png")
+    let screenshotURL = layout.attachmentsDirectory(for: withMedia.id)
+      .appendingPathComponent("screen-demo.png")
+    try FileManager.default.copyItem(at: iconURL, to: screenshotURL)
+    let pinnedAt = morning.addingTimeInterval(10)
+    let attachment = LocalSessionAttachment(
+      id: UUID(), kind: .image, source: .floatingBar, title: "Screenshot", timestamp: pinnedAt,
+      sessionOffset: 10, fileName: "screen-demo.png", mimeType: "image/png",
+      urlString: screenshotURL.path, note: nil)
+    withMedia.attachments = [attachment]
+    withMedia.captureArtifacts = [
+      LocalSessionCaptureArtifact(
+        id: UUID(), kind: .screenCapture, title: "Screenshot", capturedAt: pinnedAt,
+        sessionOffset: 10, attachmentIDs: [attachment.id], notes: nil)
+    ]
+
+    for session in [failed, withMedia, hebrew] {
       model.upsertSession(session)
     }
     return model
