@@ -2,11 +2,12 @@
 
 This directory contains a local-only, dependency-free harness for protected
 transcription evaluation. It does not include private recordings or transcripts.
+Run the commands below from the repository root.
 
 ## Inventory without reading file content
 
 ```bash
-python3 tools/transcription_eval/freeze_corpus.py inventory \
+python3 desktop/tools/transcription_eval/freeze_corpus.py inventory \
   --source "/path/to/source" \
   --output "/path/outside/source/corpus.json" \
   --mode metadata
@@ -29,7 +30,7 @@ copy is a separate operation.
 ## Validate a frozen inventory
 
 ```bash
-python3 tools/transcription_eval/freeze_corpus.py validate \
+python3 desktop/tools/transcription_eval/freeze_corpus.py validate \
   --manifest "/path/to/corpus.json" \
   --source "/path/to/source"
 ```
@@ -40,7 +41,7 @@ set, sizes, modification times, modes, and safe filesystem topology.
 ## Score JSONL
 
 ```bash
-python3 tools/transcription_eval/report.py \
+python3 desktop/tools/transcription_eval/report.py \
   --gold "/path/to/gold.jsonl" \
   --hypothesis "/path/to/hypothesis.jsonl" \
   --output "/tmp/transcription-quality.json" \
