@@ -1,5 +1,12 @@
 {
-  "unreleased": [],
+  "unreleased": [
+    "Redesigned Sessions in Cepessa's First Light language: a night-glass recording capsule with a living orb, a library by day and a cinematic transcript reader",
+    "Start recording with one click on the orb, and capture a screen region with one click while recording",
+    "The recording capsule shows the measured microphone and system-audio levels and can be folded to just the orb and timer",
+    "Hebrew titles, rows and transcripts read from the right throughout",
+    "Removed Clips",
+    "Production builds are now Release builds with a new app icon"
+  ],
   "releases": [
     {
       "version": "0.11.314",

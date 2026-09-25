@@ -1,104 +1,145 @@
 # Cepessa Sessions desktop design
 
-This document describes the current native macOS interface. The source of
-truth is `desktop/Desktop/Sources`, especially `Theme`, the session reader,
-Clips, Settings, and the floating session bar.
+Sessions is Cepessa's recorder. Its visual language is Cepessa's First Light
+onboarding, carried into a tool that is used many times a day: a night sky, the
+orb's warm light, cream ink, words that arrive out of focus and settle. It is
+restrained where First Light is theatrical — no sky shader behind text, no
+sound — because a transcript is read for minutes at a time and the recorder
+sits on top of real work all day.
+
+The source of truth is `desktop/Desktop/Sources`: `Theme/` for the system,
+`Meetings/UI/` for the surfaces.
 
 ## Product shape
 
-Cepessa Sessions is an accessory app. It has no Dock icon and opens no main
-window at launch. The menu bar item is its persistent entry point; the floating
-recording indicator is optional. Sessions, Clips, and Settings open on demand.
+An accessory app: no Dock icon, no window at launch. Two surfaces are always
+there — the **floating capsule** and the **menu-bar mark** — and two open on
+demand: the **sessions window** (library and reader) and **Settings**.
 
-The application menu also exposes the core destinations through native
-commands:
+Commands: All Sessions `⌘O`, Import Audio `⇧⌘I`, Export Transcript `⌘E`,
+Settings `⌘,`. In the reader: back `⌘[`, text size `⌘+ ⌘- ⌘0`, play/pause
+`Space`. In the library: search `⌘F`.
 
-- Browse All Sessions: `Command-O`
-- Import Audio: `Shift-Command-I`
-- Show Clips: `Shift-Command-L`
-- Settings: `Command-,`
+## Tokens (`Theme/`)
 
-## Native windows
+- **`SessionsPalette`** — three families that never stand in for each other:
+  - *Sky*: `nightSkyTop/Mid/Bottom`, the night the capsule and the dark window
+    are made of.
+  - *Light*: `lightCore`, `sunriseGold`, `cloudCoral`, `nova*`. Identity,
+    emphasis and "working". Never a status colour; finished is shown by the
+    absence of a signal, not by green.
+  - *Signal*: `recording` (redder than coral, live capture only) and
+    `attention` (amber, always with a symbol).
+  Names mirror `CepessaBrandPalette` in the Cepessa app so the two can share
+  one token set when Sessions is embedded there. Window colours adapt: warm
+  paper by day, deep sky at night; every ink clears 4.5:1 on its canvas.
+- **`SessionsType`** — Cal Sans for what is *said* (titles, empty states),
+  Geist for what is *read* (transcripts, UI), SF with monospaced digits for
+  clocks. Both faces ship in the app (SIL OFL, `Resources/Fonts/OFL.txt`).
+  Neither draws Hebrew, so each carries a cascade to the matching SF face.
+- **`SessionsMotion`** — arrivals (opacity from nothing while a 14pt blur falls
+  away, a few points of rise, 0.55 s ease-out, 60 ms stagger capped at ten
+  items), departures (recede: blur, 3% smaller, 0.28 s ease-in), the capsule
+  spring (response 0.46, damping 0.88), and `SessionsWordReveal`, a
+  `TextRenderer` that brings a line in word by word in reading order.
+- **`SessionsSurfaces`** — `SessionsAtmosphere` (the window's still sky),
+  `sessionsNightGlass` (floating chrome), `sessionsRaised` (fields on the
+  atmosphere), and the shared button styles.
+- **`SessionsOrb`** — the recorder's face (below).
+- **`SessionsStatus`** — one status vocabulary for every surface, and
+  `SessionsStatusLight`: red pulse while recording, gold while transcribing,
+  amber when something needs a look, nothing when ready.
 
-The session reader is a quiet, opaque document surface. Long-form transcript
-text uses the semantic text background, a centered reading column, native text
-selection, and a native window toolbar for the current session, import,
-transcription, and export. Source audio, evidence warnings, and attachments sit
-with the transcript because they explain what the reader can trust.
+## The floating capsule
 
-Clips is a native two-pane `NavigationSplitView`: recordings in the sidebar,
-the selected clip in the detail pane, and one capture bar anchored below the
-list. It should continue to behave like a document browser rather than a
-dashboard.
+One object that changes width, always night whatever the system appearance,
+because dark glass with cream ink is the combination that reads on every
+document it floats over. 44 pt tall in every state; only the width moves.
 
-Settings is a grouped macOS `Form` with native sections, pickers, toggles,
-progress, permission rows, and destructive confirmation. Do not replace it
-with a custom settings canvas. The application shortcut and floating controls
-must open this same settings window rather than separate SwiftUI and AppKit
-variants.
+- **At rest**: the orb and ⋯. One click on the orb records.
+- **Recording**: orb · timer · two measured level bars (microphone, system
+  audio) · mute · region capture · stop · ⋯. Region capture is one click, no
+  menu. Stop is the one saturated control and never moves.
+- **Folded** (the owner clicks the orb while recording, persisted): orb · timer
+  · levels.
+- **Transcribing / needs attention**: orb and a two-line status column;
+  clicking the orb opens that session.
+- **Notice**: a pinned screenshot or file is confirmed in full for 2.6 s.
 
-## Surfaces and material
+The orb breathes on the Cepessa orb's 5.4 s period and its halo follows the
+*measured* audio level; a source that is not capturing shows an empty track,
+never a fake flicker. Muted is a cool, slashed sphere; a missing source adds a
+dashed amber ring; transcribing dims the orb behind a gold arc of real
+progress (or a slow turn when there is none).
 
-Readable window content is opaque. Separation comes from native lists, forms,
-dividers, spacing, and semantic raised controls. Glass is reserved for the
-floating session indicator, its expanded controls, and transient floating
-menus. Never place transcript text or other long-form content on glass.
+⋯ and right-click open the capsule menu, drawn in the same night glass:
+capture the whole screen, attach a file, recent sessions, the library, import,
+settings, hide, quit — with ↑ ↓ Return Esc. Right-click adds Stop, Mute and
+Fold at the top.
 
-The floating surface uses one native glass or material fill, a lit rim, and two
-shadows: a tight contact shadow and a wider ambient shadow. Its borderless host
-panel includes transparent bleed derived from the ambient shadow radius and
-offset. Preserve that bleed; clipping it creates a hard rectangular edge and
-can hide the collapsed indicator.
+Mechanics that must be kept: the panel carries transparent bleed derived from
+the shadow (`panelBleed`); a morph grows the panel first, animates the shape,
+and settles the panel on SwiftUI's completion (with a watchdog); controls take
+no clicks while the shape moves; the capsule hangs from a persisted top-centre
+anchor and widths are even, unrounded points so it never walks across the
+screen; hover changes light, never geometry.
 
-On macOS 26 and later the floating surface uses Liquid Glass. Earlier systems
-use regular material. Reduce Transparency switches it to an opaque semantic
-surface, and Increase Contrast strengthens the rim.
+## The sessions window
 
-## Color and type
+Full-size content with a transparent title bar: the atmosphere runs to the top
+edge and the traffic lights sit on it. The top strip drags the window.
 
-`CepessaColors` resolves surfaces, labels, separators, and the accent through
-semantic AppKit colors. This is what supports light mode, dark mode, vibrancy,
-and Increase Contrast. The user's system accent marks ordinary selection and
-action. System red means active capture or error; system orange means warning;
-green is reserved for verified ready or success states.
+- **Library**: "Sessions" in the display face, a search field across titles
+  and transcripts, then every recording grouped by day (Today, Yesterday,
+  weekday and date) — time, title, the first words said, and a status light
+  only when something is happening or wrong. Hebrew rows read from the right.
+- **Reader**: a 680 pt measure. The date line in gold small caps; the title in
+  the display face, revealed word by word, double-click to rename; the status
+  line only when there is a transcript to qualify; the recording as a line of
+  light; decisions (TypeSafe, experimental, proposals until confirmed);
+  pinned attachments as a strip; then the transcript as turns — each voice
+  named once, in its own light by order of appearance, Geist 17 on generous
+  leading, right-aligned when it is Hebrew, screenshots inline where they were
+  pinned. Only the header and the first ten turns arrive with motion: long
+  text is read, not watched. Without words yet, one line in the display face
+  says what is happening ("Listening.", "Writing it down.", "The transcript
+  didn't finish.") and offers the one action that helps.
 
-Use system typography and native control metrics. Long-form text may scale
-through the existing reader zoom and `scaledFont` infrastructure. Avoid fixed
-display typography where a native title, label, or section header already
-communicates hierarchy.
+## Settings
 
-## Motion
+A native grouped `Form` — real pickers, toggles and keyboard behaviour — on
+the same atmosphere, under one line in the display face. Destructive storage
+actions stay behind a confirmation that names what will be deleted.
 
-The floating indicator is one continuous lozenge across idle, recording, and
-expanded states. Its container changes geometry with the shared spring while
-contents leave and enter on shorter opacity curves. The state ring stays at the
-leading edge, so it travels with the capsule instead of jumping between views.
+## Menu-bar mark
 
-Hover changes lighting without changing geometry. Smaller state changes use a
-short ease-out. Reduce Motion removes the spring and spatial offsets while
-preserving state changes and readable opacity transitions. The panel expands
-before its contents and shrinks only after outgoing content clears, which keeps
-the glass and its controls inside the host bounds.
+An original S of two opposing rounded voice strokes, drawn as an 18 pt
+template image with a monochrome badge for recording, transcribing, attention
+or ready. The editable reference is
+`desktop/Desktop/Sources/Resources/sessions-status-mark.svg`.
+
+## App icon
+
+The orb rising over a line of first light on a night tile. Rendered from
+`desktop/Desktop/Branding/render-app-icon.swift`; the `.icns` is built from
+that render.
+
+## Accessibility and settings of the Mac
+
+- Reduce Motion: no springs, blurs or reveals; state changes still read.
+- Reduce Transparency: the capsule and menu become opaque night.
+- Increase Contrast: the capsule rim becomes a solid cream edge.
+- Every custom control has a label, and the orb exposes its one action plus
+  the transport action. Colour is never the only carrier of a state.
 
 ## Change rules
 
-- Preserve the native reader, two-pane Clips browser, and grouped Settings
-  structure unless a tested workflow requires a different hierarchy.
-- Keep persistent content opaque and reserve glass for floating chrome.
-- Use semantic colors and system controls before adding fixed visual tokens.
-- Treat evidence, capture, processing, and conflict states truthfully; absence
-  of a warning must not stand in for verified readiness.
-- Test light and dark appearances, Increase Contrast, Reduce Transparency, and
-  Reduce Motion when changing shared theme or floating-bar behavior.
-- Avoid blanket theme rewrites. Change the smallest shared token or component
-  that expresses the intended behavior.
-
-## Menu bar mark
-
-The Sessions mark is an original S made from two opposing rounded voice strokes.
-The native renderer uses an 18-point template image so macOS controls contrast
-on light, dark, and selected menu-bar backgrounds. A separate monochrome badge
-identifies recording, transcription, attention, or readiness while the mark
-stays recognizable. Timers, progress text, and accessibility descriptions retain
-their existing behavior. The editable reference is
-`desktop/Desktop/Sources/Resources/sessions-status-mark.svg`.
+- Keep identity light and operational signal apart. Green does not mean done.
+- Nothing moves behind text. Motion arrives and settles; it does not loop
+  except where it reports something live (the orb, a pulse).
+- Decorative motion never impersonates measured activity, progress or a
+  completed action.
+- Test light and dark, Hebrew and English, Reduce Motion, Reduce Transparency
+  and Increase Contrast when changing shared tokens or the capsule. The
+  fixture renders (`CEPESSA_RENDER_FIXTURES=<dir>`, see
+  `SessionsFixtureRenderTests`) cover every surface in both appearances.

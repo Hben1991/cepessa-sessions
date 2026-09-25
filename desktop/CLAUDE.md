@@ -138,8 +138,11 @@ This keeps development data separate from the production Sessions store and does
 
 ### Local Sessions reliability architecture
 
-- `LocalCaptureLifecycle` owns a single lease shared by Sessions and CLIPS.
+- `LocalCaptureLifecycle` owns a single generation-bound capture lease.
   Generation tokens protect a newer capture from late asynchronous cleanup.
+- Finished-session evidence is published to `MeetingEvidenceOutbox/` and read
+  by Cepessa through the `SessionsHandoff` library; the canonicalizer there is
+  the single definition of the content hash (see `CEPESSA-INTEGRATION.md`).
 - `CepessaMicrophoneCaptureHelper` is packaged under `Contents/Helpers`.
   `MicrophoneCaptureProcess` accepts capture only after the helper handshake and
   valid PCM, then uses a bounded drain and forced termination fallback on stop.

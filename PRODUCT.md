@@ -3,19 +3,37 @@
 register: product
 
 ## Product purpose
-A local-first macOS meeting recorder. It records mic + system audio, lets the user capture screenshots and attach files during a session, and transcribes locally when the recording stops. Transcripts, recap documents, and document chat are the after-the-fact payoff; the live experience is capture.
+A local-first macOS meeting recorder, and Cepessa's ears. It records microphone
+and system audio, lets the owner pin screenshots and files to moments during a
+session, and transcribes on this Mac when the recording stops. The transcript —
+readable, searchable, honest about what it could not hear — is the payoff; the
+live experience is capture.
 
 ## Users
-One primary user: Ben, working alone on a Mac, recording his own meetings and work sessions all day. The app runs in the background of real work. It must never compete with the meeting itself for attention.
+One primary user: Ben, recording his own meetings and work sessions all day,
+in Hebrew and English. The app runs in the background of real work.
 
-## Strategic principle (2026-07 redesign)
-**The floating bar IS the app.** Recording and screen capture are the whole live surface. Everything else (transcripts, recaps, chat, settings, session library) is on-demand, reached from a menu on the floating bar or from the macOS status bar item. The former full workspace window is demoted to a simple, secondary "session window" opened only when the user wants to read something. Visual redesign only: no functionality is removed, it is relocated.
+## Strategic principles (2026-09 redesign)
+- **One click records.** The floating capsule is the app; recording is the
+  thing it is for. Everything else is one step deeper.
+- **It is part of Cepessa.** Same palette, type and motion as Cepessa's First
+  Light onboarding, restrained for daily use. Finished sessions leave through a
+  versioned, hash-verified handoff (`SessionsHandoff`) that Cepessa can read;
+  the app is being shaped so it can later be embedded in Cepessa.
+- **Truthful.** Status says only what the app knows. Light that moves is
+  measured audio or real progress. A transcript that could not be verified says
+  so.
+- **No new features in the redesign.** Clips, and code nothing reached
+  (automatic recaps, document chat, the old workspace), were removed; every
+  other capability was kept and restyled.
 
 ## Tone
-Quiet, native, utilitarian. Feels like a built-in macOS utility (Screenshot toolbar, Control Center), not a SaaS dashboard. Hebrew and English content both flow through it, so layouts must tolerate RTL text.
+Quiet, warm, cinematic. A 2027 app, not a utility panel and not a dashboard:
+few controls, big type where something is said, a reading measure where
+something is read. It must never compete with the meeting for attention.
 
 ## Anti-references
-- Notion/Linear-style multi-pane workspaces with sidebars, rails, and inspectors.
-- Layered "glass" chrome with stacked gradients, double strokes, and inner glows on every surface.
-- Skeuomorphic status popovers with live log feeds.
-- Anything that makes idle state visually loud.
+- Multi-pane workspaces with sidebars, rails and inspectors.
+- Dashboards, cards on cards, charts without real data.
+- Green "success" everywhere; status colours used as decoration.
+- Motion behind text; loops that do not report anything.
