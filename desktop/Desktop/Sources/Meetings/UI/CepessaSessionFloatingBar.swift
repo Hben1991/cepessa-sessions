@@ -316,6 +316,7 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
   /// The status text's click: the session being transcribed, or the one the
   /// problem is about.
   func openStatusSession() {
+    if state.phase == .attention { model?.acknowledgeRecorderError() }
     if let session = activeSession() ?? model?.selectedSession {
       CepessaSessionsWindowController.shared.showSession(id: session.id)
     } else {

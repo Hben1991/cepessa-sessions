@@ -436,6 +436,13 @@ final class LocalSessionAppModel: ObservableObject {
     }
   }
 
+  /// The owner opened the session the problem is about; the recorder stops
+  /// showing it. The session keeps its own notice.
+  func acknowledgeRecorderError() {
+    guard !isRecording else { return }
+    recorderErrorMessage = nil
+  }
+
   func toggleMicrophoneMute() {
     guard isRecording else { return }
     recorder.toggleMicrophoneMute()

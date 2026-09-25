@@ -579,16 +579,12 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
         }
       )
 
-      let timeOffset =
-        Double(chunkStartSample) / Double(LocalMeetingSpeechRegionDetector.sampleRate)
       allItems.append(
-        contentsOf: chunkResult.items.map { segment in
-          LocalSessionTranscriptionSegment(
-            startTime: segment.startTime + timeOffset,
-            endTime: segment.endTime + timeOffset,
-            text: segment.text
-          )
-        }
+        contentsOf: Self.placeOnRecording(
+          chunkResult.items,
+          chunkDuration: Double(chunkSampleCount) / sampleRate,
+          offset: Double(chunkStartSample) / sampleRate
+        )
       )
       if detectedLanguage == nil {
         detectedLanguage = chunkResult.detectedLanguage
@@ -611,6 +607,31 @@ actor LocalSessionWhisperCppTranscriptionService: LocalSessionTranscribing {
     }
 
     return (LocalSessionTranscriptionPostprocessor.cleanSegments(allItems), detectedLanguage)
+  }
+
+  /// One chunk's segments on the recording's clock.
+  ///
+  /// whisper decodes every chunk padded to 30 s and can time a segment's end
+  /// past the chunk's last sample, where there is no audio. Left alone, the
+  /// last chunk's final segment ended after the recording and was rejected
+  /// as timed outside the source, taking a recording's closing words with
+  /// it. The end is clamped to the chunk instead. A segment that starts after
+  /// the chunk was decoded from the padding alone and is dropped.
+  static func placeOnRecording(
+    _ segments: [LocalSessionTranscriptionSegment],
+    chunkDuration: TimeInterval,
+    offset: TimeInterval
+  ) -> [LocalSessionTranscriptionSegment] {
+    segments.compactMap { segment in
+      guard segment.startTime < chunkDuration else { return nil }
+      let start = max(0, segment.startTime)
+      let end = min(max(segment.endTime, start), chunkDuration)
+      return LocalSessionTranscriptionSegment(
+        startTime: start + offset,
+        endTime: end + offset,
+        text: segment.text
+      )
+    }
   }
 
   private func transcribeChunk(
