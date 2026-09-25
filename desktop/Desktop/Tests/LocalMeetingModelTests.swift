@@ -2053,3 +2053,70 @@ private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
   data.append(UInt8((value & 0x00FF_0000) >> 16))
   data.append(UInt8((value & 0xFF00_0000) >> 24))
 }
+
+// MARK: - Legacy segments
+
+final class LocalSessionLegacySegmentDecodingTests: XCTestCase {
+  private func decode(_ json: String) throws -> [LocalSessionTranscriptSegment] {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    return try decoder.decode([LocalSessionTranscriptSegment].self, from: Data(json.utf8))
+  }
+
+  /// Recordings from before segment ids existed must load, and load the same
+  /// way every time, instead of making the whole session unreadable.
+  func testSegmentsWithoutIdsGetStableDistinctIds() throws {
+    let json = """
+      [
+        {"speaker": "Speaker 1", "text": "שלום", "timestamp": "2026-08-20T18:40:48Z"},
+        {"speaker": "Speaker 1", "text": "Hello again", "timestamp": "2026-08-20T18:40:52Z"}
+      ]
+      """
+    let first = try decode(json)
+    let second = try decode(json)
+
+    XCTAssertEqual(first.map(\.id), second.map(\.id))
+    XCTAssertNotEqual(first[0].id, first[1].id)
+    XCTAssertEqual(first[0].text, "שלום")
+  }
+
+  /// The earliest format stored "MM:SS" offsets instead of dates. They load as
+  /// dates from the session start, with stable ids, instead of breaking it.
+  func testOffsetTimestampsFromTheEarliestFormatLoad() throws {
+    let json = """
+      {
+        "id": "D8305BE9-F769-472B-9D6C-E13434AA3820",
+        "title": "Session 20 Aug 2026 at 21:40",
+        "startedAt": "2026-08-20T18:40:48Z",
+        "status": "failed",
+        "audioArtifacts": {},
+        "transcriptSegments": [
+          {"speaker": "Speaker 1", "text": "בוקר טוב", "timestamp": "00:05"},
+          {"speaker": "Speaker 2", "text": "Morning", "timestamp": "1:02:03"}
+        ]
+      }
+      """
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let first = try decoder.decode(LocalSession.self, from: Data(json.utf8))
+    let again = try decoder.decode(LocalSession.self, from: Data(json.utf8))
+
+    XCTAssertEqual(first.transcriptSegments.count, 2)
+    XCTAssertEqual(
+      first.transcriptSegments[0].timestamp.timeIntervalSince(first.startedAt), 5, accuracy: 0.001)
+    XCTAssertEqual(
+      first.transcriptSegments[1].timestamp.timeIntervalSince(first.startedAt), 3723,
+      accuracy: 0.001)
+    XCTAssertEqual(first.transcriptSegments.map(\.id), again.transcriptSegments.map(\.id))
+    XCTAssertNotEqual(first.transcriptSegments[0].id, first.transcriptSegments[1].id)
+  }
+
+  func testAStoredIdIsAlwaysKept() throws {
+    let id = UUID()
+    let segments = try decode(
+      """
+      [{"id": "\(id.uuidString)", "speaker": "A", "text": "x", "timestamp": "2026-08-20T18:40:48Z"}]
+      """)
+    XCTAssertEqual(segments.first?.id, id)
+  }
+}
