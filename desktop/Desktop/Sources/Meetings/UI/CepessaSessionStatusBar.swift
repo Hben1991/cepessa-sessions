@@ -40,8 +40,8 @@ struct CepessaSessionStatusBarSnapshot: Equatable {
 
   static let idle = CepessaSessionStatusBarSnapshot(
     mode: .idle,
-    title: "Sessions ready",
-    detail: "Start or monitor a local session from the status bar.",
+    title: "Ready to record",
+    detail: "Recordings and transcripts stay on this Mac.",
     progress: nil,
     canRetryLocal: false,
     queueCount: 0
@@ -91,7 +91,7 @@ struct CepessaSessionStatusBarSnapshot: Equatable {
       if let captureWarning, !captureWarning.isEmpty {
         detail = "Capture needs attention: \(captureWarning)"
       } else {
-        detail = "Capturing local audio. Stop recording to run the final transcript pass."
+        detail = "Microphone and system audio, on this Mac. The transcript is made when you stop."
       }
 
       return CepessaSessionStatusBarSnapshot(
@@ -130,17 +130,17 @@ struct CepessaSessionStatusBarSnapshot: Equatable {
   }
 }
 
-/// Status bar item with a plain native menu. The former glass popover
-/// (queue rows, live log feed) is gone; progress reads as menu text and the
-/// full trace stays available in the sessions window.
+/// The menu-bar item: the recorder's orb drawn small, the live timer or
+/// progress beside it, and the same night-glass menu the capsule uses.
 @MainActor
-final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
+final class CepessaSessionStatusBarController: NSObject {
   static let shared = CepessaSessionStatusBarController()
 
   private var statusItem: NSStatusItem?
   private weak var model: LocalMeetingAppModel?
   private var cancellables: Set<AnyCancellable> = []
   private var snapshot = CepessaSessionStatusBarSnapshot.idle
+  private var isMenuOpen = false
   private var captureLifecycle: LocalCaptureLifecycle {
     CepessaSessionsStore.shared.captureLifecycle
   }
@@ -201,9 +201,10 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
   private func ensureStatusItem() {
     guard statusItem == nil else { return }
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    let menu = NSMenu()
-    menu.delegate = self
-    item.menu = menu
+    item.button?.target = self
+    item.button?.action = #selector(statusItemClicked)
+    item.button?.sendAction(on: [.leftMouseDown, .rightMouseDown])
+    item.button?.imagePosition = .imageLeading
     statusItem = item
   }
 
@@ -212,10 +213,17 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
     snapshot = CepessaSessionStatusBarSnapshot.make(from: model)
 
     if let button = statusItem?.button {
-      button.image = statusImage(for: snapshot.mode)
-      button.title = titleSuffix(for: snapshot)
-      button.toolTip = "\(snapshot.title) - \(snapshot.detail)"
+      button.image = CepessaSessionStatusBarGlyph.image(
+        for: snapshot.mode, progress: snapshot.progress)
+      let suffix = titleSuffix(for: snapshot)
+      button.attributedTitle = NSAttributedString(
+        string: suffix,
+        attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .medium)])
+      button.toolTip = "\(snapshot.title) — \(snapshot.detail)"
       applyAccessibility(to: button, model: model)
+    }
+    if isMenuOpen {
+      CepessaSessionCapsuleMenuController.shared.update(items: menuItems())
     }
   }
 
@@ -268,158 +276,115 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
 
   // MARK: - Menu
 
-  func menuNeedsUpdate(_ menu: NSMenu) {
-    menu.removeAllItems()
-
-    let status = NSMenuItem(title: snapshot.title, action: nil, keyEquivalent: "")
-    status.isEnabled = false
-    menu.addItem(status)
-
-    if snapshot.queueCount > 1 {
-      let queue = NSMenuItem(
-        title: "\(snapshot.queueCount) sessions in the processing queue",
-        action: nil, keyEquivalent: "")
-      queue.isEnabled = false
-      menu.addItem(queue)
+  @objc private func statusItemClicked() {
+    let menu = CepessaSessionCapsuleMenuController.shared
+    // A click on the item while its menu is open means "close".
+    guard !menu.wasJustClosedByClick, !isMenuOpen,
+      let button = statusItem?.button, let window = button.window
+    else { return }
+    let anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
+    button.highlight(true)
+    isMenuOpen = true
+    menu.open(items: menuItems(), below: anchor.insetBy(dx: 0, dy: -2), alignLeading: true) {
+      [weak self] in
+      self?.isMenuOpen = false
+      self?.statusItem?.button?.highlight(false)
     }
+  }
 
-    menu.addItem(.separator())
-
+  func menuItems() -> [CepessaSessionCapsuleMenuItem] {
+    var items: [CepessaSessionCapsuleMenuItem] = [
+      .status(
+        snapshot.title,
+        detail: snapshot.detail,
+        progress: snapshot.mode == .transcribing ? snapshot.progress : nil,
+        tone: statusTone),
+      .separator,
+    ]
     let isRecording = model?.isRecording == true
+    let barVisible = CepessaSessionFloatingBarController.shared.isBarVisible
 
     // A hidden recorder must never become a dead end: while capture is live
     // the way back sits at the top of the menu, not buried under it.
-    if isRecording && !CepessaSessionFloatingBarController.shared.isBarVisible {
-      let reveal = NSMenuItem(
-        title: "Show Recorder",
-        action: #selector(toggleBarMenuItem),
-        keyEquivalent: ""
-      )
-      reveal.target = self
-      menu.addItem(reveal)
-      menu.addItem(.separator())
+    if isRecording && !barVisible {
+      items.append(.action("Show Recorder", symbol: "capsule") { [weak self] in
+        self?.toggleBar()
+      })
     }
 
     switch CepessaSessionCaptureControlPolicy.resolve(captureLifecycle.phase) {
-    case .cancelSessionStart:
-      let record = NSMenuItem(
-        title: "Cancel Starting Recording",
-        action: #selector(recordMenuItem),
-        keyEquivalent: ""
-      )
-      record.target = self
-      menu.addItem(record)
-    case .stopSession:
-      let record = NSMenuItem(
-        title: "Stop Recording",
-        action: #selector(recordMenuItem),
-        keyEquivalent: ""
-      )
-      record.target = self
-      menu.addItem(record)
-    case .unavailable:
-      let stopping = NSMenuItem(
-        title: "Stopping Recording…",
-        action: nil,
-        keyEquivalent: ""
-      )
-      stopping.isEnabled = false
-      menu.addItem(stopping)
     case .startSession:
-      let record = NSMenuItem(
-        title: "Start Recording",
-        action: #selector(recordMenuItem),
-        keyEquivalent: ""
-      )
-      record.target = self
-      menu.addItem(record)
+      items.append(.action("Start Recording", symbol: "record.circle") { [weak self] in
+        self?.toggleRecording()
+      })
+    case .stopSession:
+      items.append(.action("Stop Recording", symbol: "stop.fill") { [weak self] in
+        self?.toggleRecording()
+      })
+    case .cancelSessionStart:
+      items.append(.action("Cancel Starting Recording", symbol: "xmark") { [weak self] in
+        self?.toggleRecording()
+      })
+    case .unavailable:
+      items.append(.action("Stopping Recording…", symbol: "hourglass", isEnabled: false) {})
     }
 
     if snapshot.mode == .failed && snapshot.canRetryLocal {
-      let retry = NSMenuItem(
-        title: "Retry Transcription",
-        action: #selector(retryMenuItem),
-        keyEquivalent: ""
-      )
-      retry.target = self
-      menu.addItem(retry)
+      items.append(.action("Transcribe Again", symbol: "arrow.clockwise") { [weak self] in
+        self?.retryLocalTranscription()
+      })
     }
-
-    menu.addItem(.separator())
+    items.append(.separator)
 
     let sessions = Array((model?.sessions ?? []).prefix(5))
     if !sessions.isEmpty {
+      items.append(.header("Recent"))
       for session in sessions {
-        let item = NSMenuItem(
-          title: session.displayTitle,
-          action: #selector(openSessionMenuItem(_:)),
-          keyEquivalent: ""
-        )
-        item.target = self
-        item.representedObject = session.id
-        menu.addItem(item)
+        items.append(
+          .action(
+            session.displayTitle,
+            detail: session.startedAt.formatted(date: .omitted, time: .shortened),
+            key: session.id.uuidString
+          ) {
+            CepessaSessionsWindowController.shared.showSession(id: session.id)
+          })
       }
-      menu.addItem(.separator())
+      items.append(.separator)
     }
 
-    let library = NSMenuItem(
-      title: "All Sessions", action: #selector(openWindowMenuItem), keyEquivalent: "")
-    library.target = self
-    menu.addItem(library)
-
-    let importAudio = NSMenuItem(
-      title: "Import Audio…", action: #selector(importAudioMenuItem), keyEquivalent: "")
-    importAudio.target = self
-    menu.addItem(importAudio)
-
-    menu.addItem(.separator())
-
-    let barVisible = CepessaSessionFloatingBarController.shared.isBarVisible
+    items.append(.action("All Sessions", symbol: "rectangle.stack", detail: "⌘O") {
+      CepessaSessionsWindowController.shared.showLibrary()
+    })
+    items.append(.action("Import Audio…", symbol: "square.and.arrow.down") {
+      CepessaSessionsWindowController.shared.importAudio()
+    })
+    items.append(.separator)
     if !isRecording || barVisible {
-      let toggleBar = NSMenuItem(
-        title: barVisible ? "Hide Recorder" : "Show Recorder",
-        action: #selector(toggleBarMenuItem),
-        keyEquivalent: ""
-      )
-      toggleBar.target = self
-      menu.addItem(toggleBar)
+      items.append(
+        .action(
+          barVisible ? "Hide Recorder" : "Show Recorder",
+          symbol: barVisible ? "eye.slash" : "capsule"
+        ) { [weak self] in self?.toggleBar() })
     }
-
-    let settings = NSMenuItem(
-      title: "Settings…", action: #selector(settingsMenuItem), keyEquivalent: ",")
-    settings.target = self
-    menu.addItem(settings)
-
-    menu.addItem(.separator())
-
-    let quit = NSMenuItem(
-      title: "Quit Cepessa Sessions", action: #selector(quitMenuItem), keyEquivalent: "q")
-    quit.target = self
-    menu.addItem(quit)
+    items.append(.action("Settings…", symbol: "gearshape", detail: "⌘,") {
+      CepessaSessionsWindowController.shared.openSettings()
+    })
+    items.append(.action("Quit Cepessa Sessions", symbol: "power") {
+      NSApp.terminate(nil)
+    })
+    return items
   }
 
-  @objc private func recordMenuItem() {
-    toggleRecording()
+  private var statusTone: CepessaSessionCapsuleMenuItem.StatusTone {
+    switch snapshot.mode {
+    case .idle, .transcriptReady: return .quiet
+    case .recording: return .recording
+    case .transcribing: return .working
+    case .failed: return .attention
+    }
   }
 
-  @objc private func retryMenuItem() {
-    retryLocalTranscription()
-  }
-
-  @objc private func openSessionMenuItem(_ sender: NSMenuItem) {
-    guard let id = sender.representedObject as? UUID else { return }
-    CepessaSessionsWindowController.shared.showSession(id: id)
-  }
-
-  @objc private func openWindowMenuItem() {
-    CepessaSessionsWindowController.shared.showLibrary()
-  }
-
-  @objc private func importAudioMenuItem() {
-    CepessaSessionsWindowController.shared.importAudio()
-  }
-
-  @objc private func toggleBarMenuItem() {
+  private func toggleBar() {
     let controller = CepessaSessionFloatingBarController.shared
     if controller.isBarVisible {
       controller.dismissForCurrentRecording()
@@ -428,86 +393,86 @@ final class CepessaSessionStatusBarController: NSObject, NSMenuDelegate {
     }
   }
 
-  @objc private func settingsMenuItem() {
-    CepessaSessionsWindowController.shared.openSettings()
-  }
-
-  @objc private func quitMenuItem() {
-    NSApp.terminate(nil)
-  }
-
-  // MARK: - Icon
+  // MARK: - Title
 
   private func titleSuffix(for snapshot: CepessaSessionStatusBarSnapshot) -> String {
     switch snapshot.mode {
-    case .idle:
+    case .idle, .failed, .transcriptReady:
       return ""
     case .recording:
       let raw = snapshot.title.split(separator: " ").last.map(String.init) ?? snapshot.title
       return " \(CepessaSessionIndicatorTimer.compactText(from: raw))"
     case .transcribing:
-      return snapshot.progress.map { " \(Int(($0 * 100).rounded()))%" } ?? " ..."
-    case .failed:
-      return " !"
-    case .transcriptReady:
-      return " Ready"
+      return snapshot.progress.map { " \(Int(($0 * 100).rounded()))%" } ?? ""
     }
   }
+}
 
-  private func statusImage(for mode: CepessaSessionStatusBarMode) -> NSImage? {
-    // Two opposing voice strokes form the Sessions S. Draw at menu-bar size
-    // instead of scaling a document or microphone symbol down to fit.
-    let width: CGFloat = mode == .idle ? 18 : 25
-    let image = NSImage(size: NSSize(width: width, height: 18), flipped: false) { _ in
-      NSColor.black.setStroke()
-      NSColor.black.setFill()
-      let voices = NSBezierPath()
-      voices.lineWidth = 2.25
-      voices.lineCapStyle = .round
-      voices.lineJoinStyle = .round
-      voices.move(to: NSPoint(x: 14.25, y: 13.75))
-      voices.line(to: NSPoint(x: 7.5, y: 13.75))
-      voices.curve(
-        to: NSPoint(x: 7.5, y: 9.75),
-        controlPoint1: NSPoint(x: 2.75, y: 13.75),
-        controlPoint2: NSPoint(x: 2.75, y: 9.75))
-      voices.line(to: NSPoint(x: 10.5, y: 9.75))
-      voices.move(to: NSPoint(x: 3.75, y: 4.25))
-      voices.line(to: NSPoint(x: 10.5, y: 4.25))
-      voices.curve(
-        to: NSPoint(x: 10.5, y: 8.25),
-        controlPoint1: NSPoint(x: 15.25, y: 4.25),
-        controlPoint2: NSPoint(x: 15.25, y: 8.25))
-      voices.line(to: NSPoint(x: 7.5, y: 8.25))
-      voices.stroke()
+/// The recorder's orb at menu-bar size: a ring around a core. Drawn, not a
+/// scaled symbol, so it stays crisp at 18 pt.
+///
+/// - Rest: the record mark, as a template that follows the menu bar.
+/// - Recording: the core turns recording red; the one state in colour,
+///   because it is the one the owner must never miss.
+/// - Transcribing: the ring becomes a track and fills with real progress
+///   (a fixed quarter when there is none to report).
+/// - Needs attention: the record mark with a small mark beside it.
+enum CepessaSessionStatusBarGlyph {
+  static func image(for mode: CepessaSessionStatusBarMode, progress: Double?) -> NSImage {
+    let hasBadge = mode == .failed
+    let size = NSSize(width: hasBadge ? 24 : 18, height: 18)
+    let image = NSImage(size: size, flipped: false) { _ in
+      let center = NSPoint(x: 9, y: 9)
+      let ringRadius: CGFloat = 6.4
+      let ringRect = NSRect(
+        x: center.x - ringRadius, y: center.y - ringRadius,
+        width: ringRadius * 2, height: ringRadius * 2)
+      let ink: NSColor = mode == .recording ? .labelColor : .black
 
-      let badge = NSBezierPath()
-      badge.lineWidth = 1.5
-      badge.lineCapStyle = .round
-      badge.lineJoinStyle = .round
       switch mode {
-      case .idle:
-        break
-      case .recording:
-        NSBezierPath(ovalIn: NSRect(x: 19, y: 6.5, width: 5, height: 5)).fill()
       case .transcribing:
-        for y: CGFloat in [5.5, 8.5, 11.5] {
-          NSBezierPath(ovalIn: NSRect(x: 20.5, y: y, width: 1.5, height: 1.5)).fill()
-        }
-      case .failed:
-        badge.move(to: NSPoint(x: 21.5, y: 12))
-        badge.line(to: NSPoint(x: 21.5, y: 8.5))
-        badge.stroke()
-        NSBezierPath(ovalIn: NSRect(x: 20.75, y: 5, width: 1.5, height: 1.5)).fill()
-      case .transcriptReady:
-        badge.move(to: NSPoint(x: 19, y: 8.5))
-        badge.line(to: NSPoint(x: 20.75, y: 6.75))
-        badge.line(to: NSPoint(x: 24, y: 11))
-        badge.stroke()
+        ink.withAlphaComponent(0.3).setStroke()
+        let track = NSBezierPath(ovalIn: ringRect)
+        track.lineWidth = 1.5
+        track.stroke()
+        let fraction = CGFloat(min(max(progress ?? 0.25, 0.04), 1))
+        let arc = NSBezierPath()
+        arc.appendArc(
+          withCenter: center, radius: ringRadius, startAngle: 90,
+          endAngle: 90 - 360 * fraction, clockwise: true)
+        arc.lineWidth = 1.9
+        arc.lineCapStyle = .round
+        ink.setStroke()
+        arc.stroke()
+      default:
+        ink.setStroke()
+        let ring = NSBezierPath(ovalIn: ringRect)
+        ring.lineWidth = 1.5
+        ring.stroke()
+      }
+
+      let coreRadius: CGFloat = mode == .recording ? 3.4 : 2.8
+      let core = NSBezierPath(
+        ovalIn: NSRect(
+          x: center.x - coreRadius, y: center.y - coreRadius,
+          width: coreRadius * 2, height: coreRadius * 2))
+      (mode == .recording ? NSColor(SessionsPalette.recording) : ink).setFill()
+      core.fill()
+
+      if hasBadge {
+        ink.setStroke()
+        ink.setFill()
+        let bar = NSBezierPath()
+        bar.lineWidth = 1.7
+        bar.lineCapStyle = .round
+        bar.move(to: NSPoint(x: 21.5, y: 13))
+        bar.line(to: NSPoint(x: 21.5, y: 8.2))
+        bar.stroke()
+        NSBezierPath(ovalIn: NSRect(x: 20.6, y: 4.3, width: 1.8, height: 1.8)).fill()
       }
       return true
     }
-    image.isTemplate = true
+    image.isTemplate = mode != .recording
     image.accessibilityDescription = "Sessions"
     return image
   }

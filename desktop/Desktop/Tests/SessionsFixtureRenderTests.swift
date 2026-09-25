@@ -119,6 +119,76 @@ final class SessionsFixtureRenderTests: XCTestCase {
     try render(view, size: CGSize(width: 330, height: 560), name: "capsule-menu")
   }
 
+  func testRenderMenuBar() throws {
+    let states: [(CepessaSessionStatusBarMode, Double?, String)] = [
+      (.idle, nil, ""), (.recording, nil, " 12:41"), (.transcribing, 0.42, " 42%"),
+      (.transcribing, nil, ""), (.failed, nil, ""),
+    ]
+    for (dark, name) in [(false, "light"), (true, "dark")] {
+      let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
+      let size = CGSize(width: 150, height: CGFloat(states.count) * 30 + 10)
+      let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: Int(size.width) * 2, pixelsHigh: Int(size.height) * 2,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+      rep.size = size
+      NSGraphicsContext.saveGraphicsState()
+      NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+      appearance.performAsCurrentDrawingAppearance {
+        (dark ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.93, alpha: 1)).setFill()
+        NSRect(origin: .zero, size: size).fill()
+        for (index, state) in states.enumerated() {
+          let y = size.height - CGFloat(index + 1) * 30
+          let glyph = CepessaSessionStatusBarGlyph.image(for: state.0, progress: state.1)
+          let rect = NSRect(x: 12, y: y + 6, width: glyph.size.width, height: glyph.size.height)
+          if glyph.isTemplate {
+            let tinted = NSImage(size: glyph.size, flipped: false) { bounds in
+              glyph.draw(in: bounds)
+              NSColor.labelColor.set()
+              bounds.fill(using: .sourceAtop)
+              return true
+            }
+            tinted.draw(in: rect)
+          } else {
+            glyph.draw(in: rect)
+          }
+          NSAttributedString(
+            string: state.2,
+            attributes: [
+              .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .medium),
+              .foregroundColor: NSColor.labelColor,
+            ]
+          ).draw(at: NSPoint(x: rect.maxX + 2, y: y + 7))
+        }
+      }
+      NSGraphicsContext.restoreGraphicsState()
+      try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        .write(to: output.appendingPathComponent("menubar-\(name).png"))
+    }
+
+    let items: [CepessaSessionCapsuleMenuItem] = [
+      .status(
+        "Separating speakers", detail: "Session 25 Sep · the transcript is made on this Mac.",
+        progress: 0.42, tone: .working),
+      .separator,
+      .action("Start Recording", symbol: "record.circle") {},
+      .separator,
+      .header("Recent"),
+      .action("Product review with Dana", detail: "09:05") {},
+      .action("סנכרון שבועי עם גילי", detail: "10:25") {},
+      .separator,
+      .action("All Sessions", symbol: "rectangle.stack", detail: "⌘O") {},
+      .action("Import Audio…", symbol: "square.and.arrow.down") {},
+      .separator,
+      .action("Hide Recorder", symbol: "eye.slash") {},
+      .action("Settings…", symbol: "gearshape", detail: "⌘,") {},
+      .action("Quit Cepessa Sessions", symbol: "power") {},
+    ]
+    try render(
+      CepessaSessionCapsuleMenuView(items: items) {}.padding(30).background(Color.white),
+      size: CGSize(width: 360, height: 600), name: "menubar-menu")
+  }
+
   func testRenderWindows() throws {
     let model = try fixtureModel()
     for appearance in [NSAppearance.Name.aqua, .darkAqua] {

@@ -7,19 +7,41 @@ struct CepessaSessionCapsuleMenuItem: Identifiable {
     case action(symbol: String?, title: String, detail: String?, isEnabled: Bool, handler: () -> Void)
     case header(String)
     case separator
+    /// What Sessions is doing, at the top of the menu-bar menu.
+    case status(title: String, detail: String?, progress: Double?, tone: StatusTone)
   }
 
-  let id = UUID()
+  enum StatusTone {
+    case quiet, recording, working, attention
+  }
+
+  /// Stable for an action (its title), so a menu rebuilt while open — the
+  /// menu-bar menu, every timer tick — keeps the highlighted row.
+  let id: String
   let kind: Kind
 
-  static func action(
-    _ title: String, symbol: String? = nil, detail: String? = nil, isEnabled: Bool = true,
-    handler: @escaping () -> Void
-  ) -> Self {
-    Self(kind: .action(symbol: symbol, title: title, detail: detail, isEnabled: isEnabled, handler: handler))
+  private init(kind: Kind, id: String = UUID().uuidString) {
+    self.kind = kind
+    self.id = id
   }
 
-  static func header(_ title: String) -> Self { Self(kind: .header(title)) }
+  /// `key` tells apart rows that can share a title, such as two sessions.
+  static func action(
+    _ title: String, symbol: String? = nil, detail: String? = nil, isEnabled: Bool = true,
+    key: String? = nil, handler: @escaping () -> Void
+  ) -> Self {
+    Self(
+      kind: .action(symbol: symbol, title: title, detail: detail, isEnabled: isEnabled, handler: handler),
+      id: "action:\(key ?? title)")
+  }
+
+  static func status(
+    _ title: String, detail: String?, progress: Double? = nil, tone: StatusTone
+  ) -> Self {
+    Self(kind: .status(title: title, detail: detail, progress: progress, tone: tone), id: "status")
+  }
+
+  static func header(_ title: String) -> Self { Self(kind: .header(title), id: "header:\(title)") }
   /// A new one each time: every row, separators included, needs its own id.
   static var separator: Self { Self(kind: .separator) }
 
@@ -38,6 +60,8 @@ final class CepessaSessionCapsuleMenuController {
   static let shared = CepessaSessionCapsuleMenuController()
 
   private var panel: CepessaSessionCapsuleMenuPanel?
+  private var hosting: NSHostingView<CepessaSessionCapsuleMenuView>?
+  private var onClose: (() -> Void)?
   private var outsideClickMonitor: Any?
   private var localClickMonitor: Any?
 
@@ -55,7 +79,10 @@ final class CepessaSessionCapsuleMenuController {
 
   /// Opens the menu under (or, near the bottom of a screen, over) `anchor`,
   /// a rectangle in screen coordinates — normally the capsule.
-  func open(items: [CepessaSessionCapsuleMenuItem], below anchor: NSRect, alignLeading: Bool = false) {
+  func open(
+    items: [CepessaSessionCapsuleMenuItem], below anchor: NSRect, alignLeading: Bool = false,
+    onClose: (() -> Void)? = nil
+  ) {
     close()
 
     let panel = CepessaSessionCapsuleMenuPanel(
@@ -76,6 +103,8 @@ final class CepessaSessionCapsuleMenuController {
       rootView: CepessaSessionCapsuleMenuView(items: items) { [weak self] in self?.close() })
     let size = hosting.fittingSize
     panel.contentView = hosting
+    self.hosting = hosting
+    self.onClose = onClose
 
     let screen =
       NSScreen.screens.first { $0.frame.intersects(anchor) } ?? NSScreen.main
@@ -124,6 +153,17 @@ final class CepessaSessionCapsuleMenuController {
     close()
   }
 
+  /// Replaces the open menu's rows in place, keeping its top edge.
+  func update(items: [CepessaSessionCapsuleMenuItem]) {
+    guard let panel, let hosting else { return }
+    hosting.rootView = CepessaSessionCapsuleMenuView(items: items) { [weak self] in self?.close() }
+    let size = hosting.fittingSize
+    guard size.height != panel.frame.height else { return }
+    panel.setFrame(
+      NSRect(x: panel.frame.minX, y: panel.frame.maxY - size.height, width: size.width, height: size.height),
+      display: true)
+  }
+
   func close() {
     if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
     if let localClickMonitor { NSEvent.removeMonitor(localClickMonitor) }
@@ -131,8 +171,12 @@ final class CepessaSessionCapsuleMenuController {
     localClickMonitor = nil
     guard let panel else { return }
     self.panel = nil
+    hosting = nil
     panel.onResignKey = nil
     panel.orderOut(nil)
+    let onClose = self.onClose
+    self.onClose = nil
+    onClose?()
   }
 }
 
@@ -153,7 +197,7 @@ struct CepessaSessionCapsuleMenuView: View {
   let items: [CepessaSessionCapsuleMenuItem]
   let dismiss: () -> Void
 
-  @State private var highlighted: UUID?
+  @State private var highlighted: String?
   @FocusState private var isFocused: Bool
 
   var body: some View {
@@ -190,6 +234,8 @@ struct CepessaSessionCapsuleMenuView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .accessibilityHidden(true)
+    case .status(let title, let detail, let progress, let tone):
+      SessionsMenuStatusRow(title: title, detail: detail, progress: progress, tone: tone)
     case .header(let title):
       Text(title.uppercased())
         .font(SessionsType.text(10.5, weight: .semibold))
@@ -260,5 +306,65 @@ struct CepessaSessionCapsuleMenuView: View {
     else { return }
     dismiss()
     handler()
+  }
+}
+
+/// The top of the menu-bar menu: what Sessions is doing, in a sentence, with
+/// its signal light and, while transcribing, the real progress.
+private struct SessionsMenuStatusRow: View {
+  let title: String
+  let detail: String?
+  let progress: Double?
+  let tone: CepessaSessionCapsuleMenuItem.StatusTone
+
+  var body: some View {
+    HStack(alignment: .firstTextBaseline, spacing: 10) {
+      Circle()
+        .fill(light)
+        .frame(width: 7, height: 7)
+        .shadow(color: light.opacity(tone == .quiet ? 0 : 0.8), radius: 4)
+        .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+        .frame(width: 18)
+      VStack(alignment: .leading, spacing: 3) {
+        Text(LocalTranscriptTextDirection.displayText(title))
+          .font(SessionsType.text(13.5, weight: .semibold))
+          .foregroundStyle(SessionsNight.ink)
+          .monospacedDigit()
+        if let detail, !detail.isEmpty {
+          Text(LocalTranscriptTextDirection.displayText(detail))
+            .font(SessionsType.text(11.5, weight: .medium))
+            .foregroundStyle(SessionsNight.inkSecondary)
+            .lineLimit(3)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        if let progress {
+          GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+              Capsule().fill(SessionsNight.hairline)
+              Capsule()
+                .fill(SessionsPalette.sunriseGold)
+                .frame(width: proxy.size.width * CGFloat(min(max(progress, 0.02), 1)))
+                .shadow(color: SessionsPalette.sunriseGold.opacity(0.6), radius: 3)
+            }
+          }
+          .frame(height: 3)
+          .padding(.top, 5)
+          .animation(.easeOut(duration: 0.3), value: progress)
+        }
+      }
+    }
+    .padding(.horizontal, 10)
+    .padding(.top, 9)
+    .padding(.bottom, 7)
+    .accessibilityElement(children: .combine)
+  }
+
+  private var light: Color {
+    switch tone {
+    case .quiet: return SessionsNight.inkQuiet
+    case .recording: return SessionsPalette.recording
+    case .working: return SessionsPalette.sunriseGold
+    case .attention: return SessionsPalette.attention
+    }
   }
 }

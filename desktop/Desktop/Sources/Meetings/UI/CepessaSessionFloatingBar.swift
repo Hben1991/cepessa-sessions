@@ -449,7 +449,8 @@ final class CepessaSessionFloatingBarController: NSObject, NSWindowDelegate {
         items.append(
           .action(
             session.displayTitle,
-            detail: session.startedAt.formatted(date: .omitted, time: .shortened)
+            detail: session.startedAt.formatted(date: .omitted, time: .shortened),
+            key: session.id.uuidString
           ) {
             CepessaSessionsWindowController.shared.showSession(id: session.id)
           })
