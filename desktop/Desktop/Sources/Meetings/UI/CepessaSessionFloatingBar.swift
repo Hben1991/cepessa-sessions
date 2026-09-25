@@ -13,7 +13,7 @@ final class CepessaSessionsStore {
     let lifecycle = LocalCaptureLifecycle()
     self.captureLifecycle = lifecycle
     self.model = LocalMeetingAppModel(
-      installsTranscriptionModelOnDemand: true,
+      installsTranscriptionModelOnDemand: !LocalSessionStorageRoot.isIsolatedTestRoot,
       captureLifecycle: lifecycle
     )
   }

@@ -27,6 +27,13 @@ enum LocalSessionStorageRoot {
 
     return productionBaseDirectory
   }
+
+  /// True when a dev build runs against an explicit fixture root. Such a root
+  /// has no models of its own, and a 1.6 GB download into a throwaway folder
+  /// is never what a test run wants, so nothing installs automatically there.
+  static var isIsolatedTestRoot: Bool {
+    defaultBaseDirectory.standardizedFileURL != productionBaseDirectory.standardizedFileURL
+  }
 }
 
 @MainActor

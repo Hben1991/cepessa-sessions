@@ -58,7 +58,7 @@ private final class CepessaSessionsAppDelegate: NSObject, NSApplicationDelegate 
     // Install the Hebrew speech model up front when no usable transcription model exists, so
     // the first recording can be transcribed. A model already on disk is verified, not fetched.
     let transcriptionModels = model.transcriptionModelProvisioner
-    if !transcriptionModels.hasUsableModel {
+    if !transcriptionModels.hasUsableModel, !LocalSessionStorageRoot.isIsolatedTestRoot {
       transcriptionModels.prepareIfNeeded()
     }
     installDebugHooks()
