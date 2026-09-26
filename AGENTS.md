@@ -1,154 +1,119 @@
-<!-- Synced from CLAUDE.md. When updating agent rules, edit CLAUDE.md first then sync here. -->
-<!-- Official guidance: https://developers.openai.com/codex/guides/agents-md | Format spec: https://agents.md
-     CLAUDE.md source: https://docs.anthropic.com/en/docs/claude-code/memory -->
+# Cepessa Sessions — agent guide (AGENTS.md)
 
-# Codex Agent Rules
+<!-- Mirror of CLAUDE.md for Codex and other agents. Edit CLAUDE.md first,
+     then sync this file in the same commit. -->
 
-These rules apply to Codex when working in this repository.
+## What is here
 
-## Setup
+- `desktop/Desktop` — Cepessa Sessions, a local-first macOS meeting recorder
+  (SwiftPM, macOS 26). App target `CepessaSessions`; public library
+  `SessionsHandoff` (Cepessa reads finished sessions through it); helper
+  `CepessaMicrophoneCaptureHelper`; tests `CepessaSessionsTests`.
+- `desktop/run.sh` — the only build/package/install path for the app.
+- `mcp/` — read-only MCP server that lists, reads and searches session
+  transcripts (`cepessa-sessions-mcp`). It never writes to the Sessions store.
+- `DESIGN.md`, `PRODUCT.md` — the design system and product principles. Read
+  them before any UI change.
+- `desktop/CEPESSA-INTEGRATION.md` — the Sessions → Cepessa handoff contract.
 
-- **Install pre-commit hook (required):** `ln -s -f ../../scripts/pre-commit .git/hooks/pre-commit` — formatting is enforced by CI
-- Mobile app setup: `cd app && bash setup.sh ios` (or `android`)
+## Behavior
 
-## Safety Rules
+- Never ask for permission to access folders, run commands, search the web, or use tools. Just do it.
+- Never ask for confirmation. Just act. Make decisions autonomously and proceed without checking in.
+- You have full access to the user's computer — browser, desktop, all apps. Never ask the user to do something you can do yourself (sign in, click buttons, dismiss dialogs, etc.).
 
-- Never kill, stop, or restart the production macOS app during local development or testing.
-- Development scripts/commands must target only dev app processes, never production.
+## Computer Control (clicking, typing, screenshots)
 
-## Coding Guidelines
+You have multiple MCP tools for controlling the Mac. Use the **right tool for each job** — don't bounce between tools.
 
-### Backend
-
-- No in-function imports. All imports must be at the module top level.
-- Follow the module hierarchy when importing. Higher-level modules import from lower-level modules, never the reverse.
-
-Module hierarchy (lowest to highest):
-1. `database/`
-2. `utils/`
-3. `routers/`
-4. `main.py`
-
-- Memory management: free large objects immediately after use. E.g., `del` for byte arrays after processing, `.clear()` for dicts/lists holding data.
-
-#### Backend Service Map
-
+### For clicking at coordinates — use `cliclick` (FASTEST)
+```bash
+cliclick c:X,Y        # click
+cliclick dc:X,Y       # double-click
+cliclick rc:X,Y       # right-click
+cliclick m:X,Y        # move mouse
+cliclick t:"text"     # type text
+cliclick p            # print current mouse position
+cliclick kd:cmd ku:cmd  # key down/up
 ```
-Shared: Firestore, Redis
+`cliclick` uses CGEvent, handles Retina correctly, works across all displays. No MCP overhead.
 
-backend (main.py)
-  ├── ws ──► pusher (pusher/)
-  ├── ──────► diarizer (diarizer/)
-  ├── ──────► vad (modal/)
-  └── ──────► deepgram (self-hosted or cloud)
+### For screenshots — use `codriver`
+- `mcp__codriver__desktop_screenshot` — capture screen (use `scale: 0.5` for speed)
+- `mcp__codriver__desktop_ocr` — find text positions on screen
+- `mcp__codriver__desktop_windows` — list/focus windows
 
-pusher
-  ├── ──────► diarizer (diarizer/)
-  └── ──────► deepgram (cloud)
+### Workflow: screenshot → find target → click
+1. Take screenshot with `codriver` to see the screen
+2. Identify the coordinates of what to click (use OCR if needed)
+3. Click with `cliclick c:X,Y` via Bash — instant, reliable
 
-agent-proxy (agent-proxy/main.py)
-  └── ws ──► user agent VM (private IP, port 8080)
+### For native macOS app testing — use `agent-swift`
+Use for the running Sessions Dev app (`agent-swift connect --bundle-id me.cepessa.sessions-dev`).
 
-notifications-job (modal/job.py)  [cron]
-```
+### For browser interaction — priority order:
+1. **`playwright`** MCP — headless browser, most reliable for web automation
+2. **`claude-in-chrome`** — for existing browser tabs (only when extension is connected)
+3. **`codriver` screenshot + `cliclick`** — fallback if browser tools fail
 
-Helm charts: `backend/charts/{backend-listen,pusher,diarizer,vad,deepgram-self-hosted,agent-proxy}/`
+### Rules:
+- NEVER try 3+ different click tools for the same action — pick one and commit
+- For multi-monitor: always check coordinates against the screenshot scale factor
+- `codriver` screenshots at `scale: 0.5` means multiply coordinates by 2 before clicking
+- Prefer `cliclick` over `automac`/`mac-use-mcp` click — they have coordinate bugs on multi-monitor
+- When a tool errors (e.g., "helper binary not found", "extension not connected"), immediately switch to the fallback — don't retry the broken tool
 
-- **backend** (`main.py`) — REST API. Streams audio to pusher via WebSocket (`utils/pusher.py`). Calls diarizer for speaker embeddings (`utils/stt/speaker_embedding.py`). Calls vad for voice activity detection and speaker identification (`utils/stt/vad.py`, `utils/stt/speech_profile.py`). Calls deepgram for STT (`utils/stt/streaming.py`).
-- **pusher** (`pusher/main.py`) — Receives audio via binary WebSocket protocol. Calls diarizer and deepgram for speaker sample extraction (`utils/speaker_identification.py` → `utils/speaker_sample.py`).
-- **agent-proxy** (`agent-proxy/main.py`) — GKE. WebSocket proxy for remote agent sessions. Validates Firebase ID token, looks up `agentVm` in Firestore, proxies bidirectionally to VM's `ws://<ip>:8080/ws`. VM credentials never leave the server.
-- **diarizer** (`diarizer/main.py`) — GPU. Speaker embeddings at `/v2/embedding`. Called by backend and pusher (`HOSTED_SPEAKER_EMBEDDING_API_URL`).
-- **vad** (`modal/main.py`) — GPU. `/v1/vad` (voice activity detection) and `/v1/speaker-identification` (speaker matching). Called by backend only (`HOSTED_VAD_API_URL`, `HOSTED_SPEECH_PROFILE_API_URL`).
-- **deepgram** — STT. Streaming uses self-hosted (`DEEPGRAM_SELF_HOSTED_URL`) or cloud based on `DEEPGRAM_SELF_HOSTED_ENABLED` (`utils/stt/streaming.py`). Pre-recorded always uses Deepgram cloud (`utils/stt/pre_recorded.py`). Called by backend and pusher.
-- **notifications-job** (`modal/job.py`) — Cron job, reads Firestore/Redis, sends push notifications.
+## Build and run
 
-Keep this map up to date. When adding, removing, or changing inter-service calls, update this section and the matching section in `CLAUDE.md`.
+- Dev build (Debug, `Sessions Dev.app`, bundle `me.cepessa.sessions-dev`, isolated
+  data root `desktop/build/dev-data`): `cd desktop && ./run.sh [--launch]`.
+- Explicit fixture data: `./run.sh --launch --test-root /absolute/path`. Never
+  point `--test-root` at `~/Library/Application Support/Cepessa`.
+- Production (Release, `/Applications/Sessions.app`, bundle `me.cepessa.sessions`):
+  `./run.sh --production`. Only with Ben's approval for that install.
+- Pass a stable `--scratch-path` per agent lane (Claude:
+  `/private/tmp/claude-derived-data/<name>`). No UUID/timestamp copies.
+- `desktop/scripts/test-run-safety.sh` checks run.sh's guards; run it after
+  editing run.sh.
 
-If a PR changes how audio streaming, transcription, conversation lifecycle, speaker identification, or the listen/pusher WebSocket protocol works — update `docs/doc/developer/backend/listen_pusher_pipeline.mdx` in the same PR. This includes changes to timeouts, event types, processing flow, or inter-service communication between listen and pusher.
+## Test
 
-### App (Flutter)
+- App: `xcrun swift test --package-path desktop/Desktop --scratch-path <lane>`.
+- Design review renders (every surface, light and dark):
+  `CEPESSA_RENDER_FIXTURES=/abs/dir xcrun swift test ... --filter SessionsFixtureRenderTests`.
+- MCP: `cd mcp && uv run --frozen pytest -q`; lint with `uv run --frozen ruff check`
+  and `uv run --frozen ruff format --check` (CI runs the same on every MCP change).
+- A green test run is source evidence, not proof of the installed app. Report
+  source, tests, installed app, and live runs separately.
 
-- All user-facing strings must use l10n (`context.l10n.keyName`). Add keys to ARB files using `jq` to avoid reading large files.
-- When adding new l10n keys, translate all 33 non-English locales — never leave English text in non-English ARB files. Ensure `{parameter}` placeholders match the English ARB exactly.
-- After modifying ARB files in `app/lib/l10n/`, regenerate localizations: `cd app && flutter gen-l10n`
+## Safety rules
 
-#### Verifying UI Changes (agent-flutter)
+- Never read, modify or delete the owner's real data under
+  `~/Library/Application Support/Cepessa` without explicit approval; use
+  fixture roots for development and QA.
+- Never quit, kill or replace `/Applications/Sessions.app` without approval;
+  automate only the dev bundle `me.cepessa.sessions-dev`.
+- Keep stored-session compatibility: the session model still carries recap and
+  document-chat fields that nothing edits; never drop fields from saved JSON.
+- Evidence in `MeetingEvidenceOutbox/` is immutable and content-hashed; the
+  canonicalizer in `SessionsHandoff` is the only definition of that hash.
+- Capture goes through `LocalCaptureLifecycle`'s single lease; never start
+  microphone or system-audio capture outside it.
+- The speech model and speaker models install through their provisioners
+  (pinned revision, size and SHA-256); never place unverified model files.
 
-After any Flutter UI edit, verify programmatically with [agent-flutter](https://github.com/beastoin/agent-flutter). Marionette is already integrated in debug builds. Install once: `npm install -g agent-flutter-cli`.
+## Design
 
-Edit → Verify → Evidence loop:
-1. Edit code, hot restart: `kill -SIGUSR2 $(pgrep -f "flutter run" | head -1)`
-2. Connect: `AGENT_FLUTTER_LOG=/tmp/flutter-run.log agent-flutter connect`
-3. Verify: `agent-flutter snapshot -i` (see widgets on screen)
-4. Interact: `agent-flutter press @e3` / `press 540 1200` (coordinates) / `find type button press` / `fill @e5 "text"` / `dismiss` (system dialogs)
-5. Evidence: `agent-flutter screenshot /tmp/evidence.png`
-
-Key rules:
-- Must reconnect after every hot restart (kills VM Service session).
-- Refs go stale frequently (Flutter rebuilds aggressively) — always re-snapshot before every interaction. Use `press x y` as fallback.
-- Use `AGENT_FLUTTER_LOG` pointing to flutter run stdout (not logcat) for auto-detect.
-- Prefer `find type X` or `find key "name"` over hardcoded `@ref` for stability.
-- When adding interactive widgets, use `Key('descriptive_name')` for agent discoverability.
-- App flows & exploration skill: See `app/e2e/SKILL.md` for navigation architecture, widget patterns, and reference flows.
-- Full command reference: `agent-flutter schema` or `agent-flutter --help`.
-
-### Desktop (macOS)
-
-#### Verifying UI Changes (agent-swift)
-
-After any Swift UI edit, verify programmatically with [agent-swift](https://github.com/beastoin/agent-swift). No app-side instrumentation needed — uses macOS Accessibility API. Install once: `brew install beastoin/tap/agent-swift`.
-
-Requires: Accessibility permission for Terminal.app (System Settings → Privacy & Security → Accessibility).
-
-Edit → Verify → Evidence loop:
-1. Edit code, rebuild: `cd desktop && ./run.sh`
-2. Connect: `agent-swift connect --bundle-id me.cepessa.sessions.local`
-3. Verify: `agent-swift snapshot -i` (interactive elements only)
-4. Interact: `agent-swift click @e3` / `fill @e5 "text"` / `find role button click`
-5. Assert: `agent-swift is exists @e3` / `wait text "Settings"`
-6. Evidence: `agent-swift screenshot /tmp/evidence.png`
-
-Key rules:
-- `agent-swift doctor` verifies Accessibility permission and target app.
-- Prefer `click` over `press` for SwiftUI — `click` sends CGEvent clicks (triggers NavigationLink), `press` sends AXPress (AppKit only).
-- Refs stale after `click`/`press`/`fill`/`scroll` — re-snapshot before next interaction.
-- Always use `snapshot -i` — full snapshots of complex apps are very verbose.
-- Argument order: `get <property> <ref>`, `is <condition> <ref>`, `wait <condition> [<target>]`, `find <locator> <value>`.
-- JSON output: `--json` flag, `AGENT_SWIFT_JSON=1` env var, or pipe to auto-detect.
-- 15 commands: `doctor`, `connect`, `disconnect`, `status`, `snapshot`, `press`, `click`, `fill`, `get`, `find`, `screenshot`, `is`, `wait`, `scroll`, `schema`.
-- Works with any macOS app (SwiftUI, AppKit, Electron) — zero app-side setup.
-- Dev bundle ID: `me.cepessa.sessions.local`. Keep production and custom test bundle IDs aligned with the installed app name.
-- If you launch a custom-named desktop test build, keep the bundle suffix and app name identical so auth callbacks reopen the correct app.
-- App flows & exploration skill: See `desktop/e2e/SKILL.md` for navigation architecture, interaction patterns, and reference flows.
-- Full command reference: `agent-swift --help` or `agent-swift schema`.
-- When asked to build or rebuild the desktop app for testing, don't stop at a successful compile: launch the dev app, interact with it programmatically to confirm it actually runs, and report any environment blocker if full interaction is impossible.
-
-## Formatting
-
-Always format code after making changes. The pre-commit hook handles this automatically, but you can also run manually:
-
-- **Dart (app/)**: `dart format --line-length 120 <files>`
-  - Files ending in `.gen.dart` or `.g.dart` are auto-generated and should not be formatted manually.
-- **Python (backend/)**: `black --line-length 120 --skip-string-normalization <files>`
-- **C/C++ (firmware directories)**: `clang-format -i <files>`
+- Follow `DESIGN.md`: Theme tokens (`SessionsPalette`, `SessionsType`,
+  `SessionsMotion`, `SessionsSurfaces`, `SessionsOrb`), identity light kept apart
+  from status signals, Hebrew right-to-left everywhere, Reduce Motion /
+  Transparency / Increase Contrast respected.
+- The floating capsule's panel mechanics (bleed, grow → morph → settle, no clicks
+  while moving, top-centre anchor, even widths) are load-bearing; keep them.
 
 ## Git
 
-- Never push directly to `main`.
-- Never merge directly from a local branch. Land changes through a PR only.
-- When a change should go remote, create or use a feature branch, commit there, open/update a PR, and merge via the PR.
-- Always work in a git worktree for code changes. Use `EnterWorktree` at the start of a task to isolate your work.
-
-## Documentation Maintenance
-
-- Update this file and `CLAUDE.md` in the same commit when rules change.
-- For architecture or core flow changes, update Mintlify docs (`docs/doc/developer/`) in the same PR.
-
-## Testing
-
-- Always run tests before committing:
-  - Backend changes: run `backend/test.sh`
-  - App changes: run `app/test.sh`
-- Run `backend/test-preflight.sh` first to verify tools, packages, and env vars are ready.
-- Backend unit tests need: `python3`, `pytest`, packages from `requirements.txt`, `ENCRYPTION_SECRET` (set by test.sh).
-- Integration tests optionally need: `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `ADMIN_KEY`, Redis connectivity, `GOOGLE_APPLICATION_CREDENTIALS`.
+- Work on a feature branch; land changes through a PR. Never push to `main`.
+- Never squash-merge; use a regular merge.
+- Commit and push only when asked. Group commits by change.
+- End commit messages with the co-author line the harness provides.

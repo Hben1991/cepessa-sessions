@@ -1,37 +1,31 @@
 [project]
-name = "mcp-server-omi"
+name = "cepessa-sessions-mcp"
 dynamic = ["version"]
-description = 'Model Context Protocol Server for Omi AI'
+description = "Read-only MCP server for Cepessa Sessions transcripts"
 readme = "README.md"
 requires-python = ">=3.11.6"
 license = "MIT"
-keywords = ["omi", "mcp"]
-authors = [
-  { name = "Joan Cabezas", email = "joan.santiago.cabezas@gmail.com" },
-]
+authors = [{ name = "Ben" }]
 classifiers = [
-  "Development Status :: 4 - Beta",
-  "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License", 
+  "Private :: Do Not Upload",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
     "click>=8.1.7",
-    "mcp[cli]>=1.0.0",
+    "mcp>=1.10.0",
     "pydantic>=2.0.0",
-    "requests>=2.32.3",
 ]
 
 [project.scripts]
-mcp-server-omi = "mcp_server_omi:main"
+cepessa-sessions-mcp = "cepessa_sessions_mcp:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = ["pyright>=1.1.389", "ruff>=0.7.3", "pytest>=8.0.0"]
+[dependency-groups]
+dev = ["pyright>=1.1.389", "ruff>=0.7.3", "pytest>=8.0.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -40,4 +34,7 @@ python_classes = "Test*"
 python_functions = "test_*"
 
 [tool.hatch.version]
-path = "src/mcp_server_omi/__about__.py"
+path = "src/cepessa_sessions_mcp/__about__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cepessa_sessions_mcp"]

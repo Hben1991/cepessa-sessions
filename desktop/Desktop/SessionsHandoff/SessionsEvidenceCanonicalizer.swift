@@ -3,9 +3,9 @@ import Foundation
 
 /// The one definition of how meeting evidence is hashed.
 ///
-/// Sessions writes evidence with this canonicalizer and every consumer —
-/// Cepessa, the local MCP index — verifies with the same rules, so a hash
-/// means the same bytes on both sides of the handoff.
+/// Sessions writes evidence with this canonicalizer and every consumer
+/// (Cepessa, through `SessionsOutboxReader`) verifies with the same rules, so
+/// a hash means the same bytes on both sides of the handoff.
 ///
 /// Canonical form: the envelope's JSON object without `contentHash`, keys
 /// sorted, slashes unescaped, and every number rewritten as a decimal string

@@ -42,7 +42,6 @@ production_dry_run="$(zsh "$run_script" --dry-run --production)"
 for forbidden in \
   'pkill' \
   'rm -rf' \
-  'api.omi.me' \
   'a.run.app' \
   'trycloudflare.com'; do
   if grep -Fq -- "$forbidden" "$run_script"; then

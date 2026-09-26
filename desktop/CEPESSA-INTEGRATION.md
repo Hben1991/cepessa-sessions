@@ -49,8 +49,8 @@ Resolving the package also fetches Sessions' transcription dependencies
   (`testPublishedEvidenceIsReadAndVerifiedByTheHandoffLibrary`) writes evidence
   through the real transcription coordinator and reads it back through the
   library.
-- The local MCP index (`mcp/src/mcp_server_omi/local_brain.py`) reads the same
-  outbox with the same hashing rules.
+- The read-only MCP server in `mcp/` exposes the session transcripts
+  themselves; it does not read or re-hash the outbox.
 
 ## What Cepessa needs to add
 
