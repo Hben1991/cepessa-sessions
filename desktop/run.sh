@@ -6,7 +6,6 @@ app_name='Sessions Dev'
 bundle_id='me.cepessa.sessions-dev'
 url_scheme='cepessa-sessions-dev'
 binary_name='CepessaSessions'
-model_runner='CepessaLocalModelRunner'
 capture_helper='CepessaMicrophoneCaptureHelper'
 resource_bundle_name='CepessaSessions_CepessaSessions.bundle'
 
@@ -25,6 +24,7 @@ should_install=false
 should_launch=false
 dry_run=false
 production=false
+build_configuration='debug'
 
 usage() {
   cat <<'USAGE'
@@ -72,6 +72,7 @@ while (( $# > 0 )); do
       ;;
     --production)
       production=true
+      build_configuration='release'
       app_name='Sessions'
       bundle_id='me.cepessa.sessions'
       url_scheme='cepessa-sessions'
@@ -155,6 +156,7 @@ print_contract() {
   print "URL scheme:   $url_scheme"
   print "Package:      $package_root"
   print "Scratch:      $scratch_path"
+  print "Build:        $build_configuration"
   print "Jobs:         $jobs"
   print "Data root:    $test_root"
   print "Output:       $output_app"
@@ -179,15 +181,17 @@ print_contract
 xcrun swift build \
   --package-path "$package_root" \
   --scratch-path "$scratch_path" \
+  --configuration "$build_configuration" \
   --force-resolved-versions \
   --jobs "$jobs"
 
 bin_root="$(xcrun swift build \
   --package-path "$package_root" \
   --scratch-path "$scratch_path" \
+  --configuration "$build_configuration" \
   --show-bin-path)"
 
-for required_product in "$binary_name" "$model_runner" "$capture_helper"; do
+for required_product in "$binary_name" "$capture_helper"; do
   if [[ ! -x "$bin_root/$required_product" ]]; then
     print -u2 "Missing built executable: $bin_root/$required_product"
     exit 1
@@ -206,8 +210,6 @@ mkdir -p "$stage_app/Contents/MacOS" "$stage_app/Contents/Helpers" \
 ditto --norsrc --noextattr --noqtn --noacl \
   "$bin_root/$binary_name" "$stage_app/Contents/MacOS/$binary_name"
 
-ditto --norsrc --noextattr --noqtn --noacl \
-  "$bin_root/$model_runner" "$stage_app/Contents/MacOS/$model_runner"
 ditto --norsrc --noextattr --noqtn --noacl \
   "$bin_root/$capture_helper" "$stage_app/Contents/Helpers/$capture_helper"
 
@@ -238,14 +240,14 @@ done
 ditto --norsrc --noextattr --noqtn --noacl \
   "$package_root/Info.plist" "$stage_app/Contents/Info.plist"
 ditto --norsrc --noextattr --noqtn --noacl \
-  "$script_dir/omi_icon.icns" "$stage_app/Contents/Resources/AppIcon.icns"
+  "$package_root/Branding/AppIcon.icns" "$stage_app/Contents/Resources/AppIcon.icns"
 
 plist="$stage_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $binary_name" "$plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName $app_name" "$plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $app_name" "$plist"
-/usr/libexec/PlistBuddy -c 'Set :LSMinimumSystemVersion 14.0' "$plist"
+/usr/libexec/PlistBuddy -c 'Set :LSMinimumSystemVersion 26.0' "$plist"
 /usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' "$plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes array' "$plist"
 /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0 dict' "$plist"
@@ -257,9 +259,6 @@ if [[ "$production" != true ]]; then
   /usr/libexec/PlistBuddy -c 'Add :LSEnvironment dict' "$plist"
   /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CEPESSA_SESSIONS_TEST_ROOT string $test_root" "$plist"
   /usr/libexec/PlistBuddy -c "Add :LSEnvironment:TMPDIR string $runtime_tmp/" "$plist"
-  if [[ -n "${CEPESSA_INSIGHTS_USE_FIXTURE:-}" ]]; then
-    /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CEPESSA_INSIGHTS_USE_FIXTURE string $CEPESSA_INSIGHTS_USE_FIXTURE" "$plist"
-  fi
 fi
 
 if [[ -n "$env_file" ]]; then
@@ -267,11 +266,6 @@ if [[ -n "$env_file" ]]; then
     "$env_file" "$stage_app/Contents/Resources/.env"
 fi
 print -n 'APPL????' > "$stage_app/Contents/PkgInfo"
-
-runner="$stage_app/Contents/MacOS/$model_runner"
-if [[ -x "$runner" && -d "$stage_app/Contents/Frameworks/llama.framework" ]]; then
-  install_name_tool -add_rpath '@executable_path/../Frameworks' "$runner" 2>/dev/null || true
-fi
 
 chmod -R u+w "$stage_app"
 xattr -cr "$stage_app"
@@ -282,7 +276,6 @@ fi
 for framework in "$stage_app/Contents/Frameworks"/*.framework; do
   codesign $sign_options "$framework"
 done
-[[ -x "$runner" ]] && codesign $sign_options "$runner"
 capture_helper_path="$stage_app/Contents/Helpers/$capture_helper"
 [[ -x "$capture_helper_path" ]] && codesign $sign_options "$capture_helper_path"
 if [[ "$sign_identity" == '-' ]]; then

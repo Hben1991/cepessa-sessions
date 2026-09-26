@@ -1,0 +1,44 @@
+name: Sessions CI
+
+# The read-only transcripts MCP server: tests and lint on every change to it.
+# The macOS app is built and tested locally (see desktop/README.md); it needs
+# the macOS 26 SDK, which the hosted runners are not guaranteed to have.
+on:
+  pull_request:
+    paths:
+      - "mcp/**"
+      - ".github/workflows/sessions-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "mcp/**"
+      - ".github/workflows/sessions-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sessions-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mcp:
+    name: MCP server
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --frozen
+      - name: Lint
+        run: |
+          uv run --frozen ruff check
+          uv run --frozen ruff format --check
+      - name: Test
+        run: uv run --frozen pytest -q

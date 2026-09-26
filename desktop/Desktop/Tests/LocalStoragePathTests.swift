@@ -14,7 +14,6 @@ final class LocalStoragePathTests: XCTestCase {
       let layout = LocalSessionFileLayout(baseDirectory: root)
       let sessionID = UUID()
       try layout.ensureDirectories(for: sessionID)
-      try LocalClipFileSafety.validateDirectoryChain(to: root, allowMissingTail: false)
 
       let audio = layout.importedAudioURL(for: sessionID)
       let writer = try LocalMeetingWaveFileWriter(fileURL: audio)

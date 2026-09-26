@@ -188,10 +188,17 @@ struct LocalSessionTranscriptSegment: Identifiable, Codable, Equatable, Sendable
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    id = try container.decode(UUID.self, forKey: .id)
     speaker = try container.decode(String.self, forKey: .speaker)
     text = try container.decode(String.self, forKey: .text)
     timestamp = try container.decode(Date.self, forKey: .timestamp)
+    // The earliest recordings stored segments without an id. Rejecting them
+    // made the whole session unreadable; a stable id derived from what was
+    // said, by whom and when lets it load identically every time.
+    id =
+      try container.decodeIfPresent(UUID.self, forKey: .id)
+      ?? LocalSessionStableID.uuid(
+        namespace: "legacy-transcript-segment",
+        components: [speaker, text, String(format: "%.3f", timestamp.timeIntervalSince1970)])
     endTimestamp = try container.decodeIfPresent(Date.self, forKey: .endTimestamp)
     speakerID = try container.decodeIfPresent(String.self, forKey: .speakerID)
     source = try container.decodeIfPresent(LocalSessionAudioSourceKind.self, forKey: .source)
@@ -666,11 +673,7 @@ struct LocalSession: Identifiable, Codable, Equatable, Sendable {
     processingError = try container.decodeIfPresent(String.self, forKey: .processingError)
     startedAt = try container.decode(Date.self, forKey: .startedAt)
     status = try container.decode(LocalSessionStatus.self, forKey: .status)
-    transcriptSegments =
-      try container.decodeIfPresent(
-        [LocalSessionTranscriptSegment].self, forKey: .transcriptSegments)
-      ?? container.decodeIfPresent([LocalSessionTranscriptSegment].self, forKey: .segments)
-      ?? []
+    transcriptSegments = try Self.decodeTranscriptSegments(from: container, startedAt: startedAt)
     recap = try container.decodeIfPresent(LocalSessionRecap.self, forKey: .recap) ?? .empty
     attachments =
       try container.decodeIfPresent([LocalSessionAttachment].self, forKey: .attachments) ?? []
@@ -2266,5 +2269,68 @@ extension LocalSession {
 
   mutating func setRecapSection(_ section: LocalSessionRecapSection) {
     recap.upsertSection(section)
+  }
+}
+
+
+// MARK: - Legacy transcript segments
+
+extension LocalSession {
+  /// The earliest recordings stored each segment's time as an offset from the
+  /// start ("12:34", "1:02:03") and no segment id. Decoding those as dates
+  /// failed and left the whole session unreadable, so they are converted on
+  /// load: the offset becomes a date from `startedAt`, and the id is derived
+  /// from the session start, the position and the words, so it is stable.
+  fileprivate static func decodeTranscriptSegments(
+    from container: KeyedDecodingContainer<CodingKeys>, startedAt: Date
+  ) throws -> [LocalSessionTranscriptSegment] {
+    for key in [CodingKeys.transcriptSegments, .segments] where container.contains(key) {
+      do {
+        return try container.decode([LocalSessionTranscriptSegment].self, forKey: key)
+      } catch let modernError {
+        guard let legacy = try? container.decode([LegacySegment].self, forKey: key) else {
+          throw modernError
+        }
+        return try legacy.enumerated().map { index, segment in
+          try segment.converted(index: index, startedAt: startedAt)
+        }
+      }
+    }
+    return []
+  }
+
+  private struct LegacySegment: Decodable {
+    let speaker: String
+    let text: String
+    let timestamp: String
+
+    func converted(index: Int, startedAt: Date) throws -> LocalSessionTranscriptSegment {
+      guard let offset = Self.offset(from: timestamp) else {
+        throw DecodingError.dataCorrupted(
+          .init(codingPath: [], debugDescription: "Unrecognised legacy segment time."))
+      }
+      return LocalSessionTranscriptSegment(
+        id: LocalSessionStableID.uuid(
+          namespace: "legacy-offset-transcript-segment",
+          components: [
+            String(format: "%.3f", startedAt.timeIntervalSince1970), String(index), text,
+          ]),
+        speaker: speaker,
+        text: text,
+        timestamp: startedAt.addingTimeInterval(offset)
+      )
+    }
+
+    /// "SS", "MM:SS" or "H:MM:SS" into seconds.
+    static func offset(from value: String) -> TimeInterval? {
+      let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+      guard (1...3).contains(parts.count) else { return nil }
+      var seconds = 0.0
+      for part in parts {
+        guard let number = Double(part), number >= 0 else { return nil }
+        seconds = seconds * 60 + number
+      }
+      return seconds
+    }
   }
 }

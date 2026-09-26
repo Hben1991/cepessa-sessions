@@ -165,17 +165,7 @@ struct LocalSessionSpeakerModelValidator: @unchecked Sendable {
   }
 
   private func sha256(_ url: URL) -> String? {
-    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-    defer { try? handle.close() }
-    var hasher = SHA256()
-    do {
-      while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
-        hasher.update(data: data)
-      }
-    } catch {
-      return nil
-    }
-    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    try? LocalFileDigest.sha256(of: url)
   }
 
   private func modelBundle(in directory: URL, named name: String) -> URL? {

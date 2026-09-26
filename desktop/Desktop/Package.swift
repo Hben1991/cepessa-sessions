@@ -4,18 +4,29 @@ import PackageDescription
 let package = Package(
   name: "CepessaSessions",
   platforms: [
-    .macOS("14.0")
+    // Matches the Cepessa app, so the handoff library (and later the capture
+    // core) can be embedded there without a second deployment floor.
+    .macOS("26.0")
+  ],
+  products: [
+    // The contract Cepessa consumes: read and verify finished-session
+    // evidence from the shared outbox. Foundation and CryptoKit only.
+    .library(name: "SessionsHandoff", targets: ["SessionsHandoff"])
   ],
   dependencies: [
     .package(path: "Vendor/whisper.spm"),
     .package(
       url: "https://github.com/argmaxinc/argmax-oss-swift.git", exact: "0.18.0"),
-    .package(url: "https://github.com/mattt/llama.swift", exact: "2.10549.0"),
   ],
   targets: [
+    .target(
+      name: "SessionsHandoff",
+      path: "SessionsHandoff"
+    ),
     .executableTarget(
       name: "CepessaSessions",
       dependencies: [
+        "SessionsHandoff",
         .product(name: "whisper", package: "whisper.spm"),
         .product(name: "WhisperKit", package: "argmax-oss-swift"),
         .product(name: "SpeakerKit", package: "argmax-oss-swift"),
@@ -30,20 +41,14 @@ let package = Package(
       ]
     ),
     .executableTarget(
-      name: "CepessaLocalModelRunner",
-      dependencies: [
-        .product(name: "LlamaSwift", package: "llama.swift")
-      ],
-      path: "LocalModelRunner"
-    ),
-    .executableTarget(
       name: "CepessaMicrophoneCaptureHelper",
       path: "MicrophoneCaptureHelper"
     ),
     .testTarget(
       name: "CepessaSessionsTests",
       dependencies: [
-        .target(name: "CepessaSessions")
+        .target(name: "CepessaSessions"),
+        "SessionsHandoff",
       ],
       path: "Tests"
     ),

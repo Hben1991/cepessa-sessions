@@ -76,6 +76,42 @@ final class LocalMeetingTranscriptionPreprocessingTests: XCTestCase {
     XCTAssertEqual(cleaned.map(\.text), ["Actual transcript", "תודה רבה"])
   }
 
+  /// whisper pads each chunk to 30 s and may end the last segment in the
+  /// padding. The closing words must stay, timed to the chunk's end; text
+  /// that starts in the padding alone is dropped.
+  func testChunkSegmentsAreClampedToTheChunkNotDropped() {
+    let placed = LocalSessionWhisperCppTranscriptionService.placeOnRecording(
+      [
+        .init(startTime: 0, endTime: 2.1, text: "first"),
+        .init(startTime: 3.0, endTime: 7.2, text: "closing words"),
+        .init(startTime: 5.4, endTime: 9.0, text: "padding"),
+      ],
+      chunkDuration: 5.0,
+      offset: 18.5
+    )
+
+    XCTAssertEqual(placed.map(\.text), ["first", "closing words"])
+    XCTAssertEqual(placed[0].startTime, 18.5, accuracy: 1e-9)
+    XCTAssertEqual(placed[0].endTime, 20.6, accuracy: 1e-9)
+    XCTAssertEqual(placed[1].startTime, 21.5, accuracy: 1e-9)
+    XCTAssertEqual(placed[1].endTime, 23.5, accuracy: 1e-9, "clamped to the chunk's last sample")
+  }
+
+  /// SpeakerKit ended a 23.45 s microphone track's only turn at 23.99 s; the
+  /// whole interval was then rejected and the track had no diarization.
+  func testDiarizationTurnsAreClampedToTheAudio() {
+    let clusters = LocalSessionSpeakerKitDiarizer.clampedToAudio(
+      [
+        .init(stableID: "a", startSeconds: 0.98, endSeconds: 23.99, confidence: nil),
+        .init(stableID: "b", startSeconds: 23.6, endSeconds: 24.2, confidence: nil),
+      ],
+      duration: 23.4453125
+    )
+    XCTAssertEqual(clusters.count, 1)
+    XCTAssertEqual(clusters[0].startSeconds, 0.98)
+    XCTAssertEqual(clusters[0].endSeconds, 23.4453125)
+  }
+
   func testNormalizedSamplesForRecognitionAmplifiesQuietAudio() {
     let samples: [Float] = [0.06, -0.03, 0.0, 0.015]
 

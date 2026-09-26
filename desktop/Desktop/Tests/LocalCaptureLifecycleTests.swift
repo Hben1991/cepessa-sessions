@@ -13,12 +13,11 @@ final class LocalCaptureLifecycleTests: XCTestCase {
     XCTAssertTrue(lifecycle.isBusy)
     XCTAssertEqual(lifecycle.activeKind, .session)
     XCTAssertThrowsError(try lifecycle.beginCapture(.session))
-    XCTAssertThrowsError(try lifecycle.beginCapture(.clip))
   }
 
   func testMatchingLeaseMovesThroughRecordingAndStopping() throws {
     let lifecycle = LocalCaptureLifecycle()
-    let lease = try lifecycle.beginCapture(.clip)
+    let lease = try lifecycle.beginCapture(.session)
 
     XCTAssertTrue(lifecycle.markRecording(lease))
     XCTAssertEqual(lifecycle.phase, .recording(lease))
@@ -32,7 +31,7 @@ final class LocalCaptureLifecycleTests: XCTestCase {
     let lifecycle = LocalCaptureLifecycle()
     let staleLease = try lifecycle.beginCapture(.session)
     XCTAssertTrue(lifecycle.finishCapture(staleLease))
-    let currentLease = try lifecycle.beginCapture(.clip)
+    let currentLease = try lifecycle.beginCapture(.session)
 
     XCTAssertFalse(lifecycle.markRecording(staleLease))
     XCTAssertFalse(lifecycle.beginStopping(staleLease))

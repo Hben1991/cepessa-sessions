@@ -1,4 +1,5 @@
 import Foundation
+import SessionsHandoff
 import XCTest
 
 @testable import CepessaSessions
@@ -767,5 +768,59 @@ private actor RecordingEvidenceDiarizerStub: LocalSessionDiarizing {
 
   func calledSources() -> [LocalSessionAudioSourceKind] {
     sources
+  }
+}
+
+// MARK: - Handoff contract
+
+extension LocalMeetingEvidenceTranscriptionTests {
+  /// What Sessions writes, the handoff library reads and verifies. If either
+  /// side changes the envelope or the hash, this is the test that fails.
+  func testPublishedEvidenceIsReadAndVerifiedByTheHandoffLibrary() async throws {
+    let layout = LocalMeetingFileLayout(baseDirectory: tempRoot)
+    let session = makeSession()
+    try layout.ensureDirectories(fileManager: fileManager, for: session.id)
+    let micURL = layout.micTranscriptAudioURL(for: session.id)
+    let systemURL = layout.systemAudioURL(for: session.id)
+    try writeWave(to: micURL)
+    try writeWave(to: systemURL)
+
+    let coordinator = LocalSessionEvidenceTranscriptionCoordinator(
+      transcriptionService: EvidenceTranscriptionStub(
+        results: [
+          "mic-transcript.wav": result("I will ship it", language: "en"),
+          "system.wav": result("אני מסכים", language: "he"),
+        ]
+      ),
+      diarizer: RecordingEvidenceDiarizerStub(),
+      fileLayout: layout,
+      fileManager: fileManager,
+      now: { Date(timeIntervalSince1970: 1_800_000_000) }
+    )
+    let output = try await coordinator.transcribe(
+      .init(
+        session: session,
+        plan: makePlan(),
+        microphoneURL: micURL,
+        systemURL: systemURL,
+        mixedURL: nil,
+        revision: 1,
+        parentContentHash: nil
+      )
+    )
+
+    let snapshot = try SessionsOutboxReader(baseDirectory: tempRoot).snapshot()
+    XCTAssertEqual(snapshot.rejected, [])
+    let evidence = try XCTUnwrap(snapshot.evidence.first)
+    XCTAssertEqual(snapshot.evidence.count, 1)
+    XCTAssertEqual(evidence.schemaVersion, SessionsHandoff.schemaVersion)
+    XCTAssertEqual(evidence.evidenceID, output.envelope.evidenceID)
+    XCTAssertEqual(evidence.contentHash, output.envelope.contentHash)
+    XCTAssertEqual(evidence.session.id, output.envelope.session.id)
+    XCTAssertEqual(evidence.session.title, output.envelope.session.title)
+    XCTAssertEqual(evidence.segments.map(\.activeText), output.envelope.segments.map(\.activeText))
+    XCTAssertEqual(evidence.transcript.renderedText, output.envelope.transcript.renderedText)
+    XCTAssertEqual(evidence.quality.isComplete, output.envelope.quality.isComplete)
+    XCTAssertTrue(evidence.isUsable)
   }
 }

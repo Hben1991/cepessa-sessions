@@ -1,17 +1,22 @@
 # Sessions Desktop
 
-Local-first macOS session capture and transcription app built with SwiftUI.
+Local-first macOS session capture and transcription app built with SwiftUI —
+Cepessa's recorder. Design: `../DESIGN.md`. Handoff to Cepessa:
+`CEPESSA-INTEGRATION.md`.
 
 ## Structure
 
 ```
-Desktop/          Swift/SwiftUI macOS app (SPM package)
-scripts/          Local build safety checks
+Desktop/Sources           the app: capsule, sessions window, settings, capture, transcription
+Desktop/SessionsHandoff   public library Cepessa uses to read finished-session evidence
+Desktop/Branding          app icon and its renderer
+Desktop/Tests             unit, lifecycle, contract and (opt-in) fixture-render tests
+scripts/                  local build safety checks
 ```
 
 ## Development
 
-Requires macOS 14.0+ and Xcode command-line tools. The desktop package vendors
+Requires macOS 26 and Xcode command-line tools. The desktop package vendors
 its pinned whisper.cpp source and uses a checked-in SwiftPM lockfile.
 
 ```bash
@@ -26,6 +31,17 @@ its pinned whisper.cpp source and uses a checked-in SwiftPM lockfile.
 
 # Verify the build script's production guards without building
 ./scripts/test-run-safety.sh
+
+# Tests (use your own stable scratch path)
+xcrun swift test --package-path Desktop --scratch-path <scratch>
+
+# Still renders of every surface, light and dark, for design review
+CEPESSA_RENDER_FIXTURES=/absolute/output/dir \
+  xcrun swift test --package-path Desktop --scratch-path <scratch> \
+  --filter SessionsFixtureRenderTests
+
+# Release build installed as /Applications/Sessions.app
+./run.sh --production
 ```
 
 The default bundle is `Sessions Dev.app`, identifier
@@ -33,8 +49,9 @@ The default bundle is `Sessions Dev.app`, identifier
 uses an isolated data root; the default is `desktop/build/dev-data`.
 
 The app's **Sessions** menu opens the library with `Command-O`, imports audio
-with `Shift-Command-I`, and opens Clips with `Shift-Command-L`. The application
-Settings command and floating controls share the same window (`Command-,`).
+with `Shift-Command-I`, and exports the open transcript with `Command-E`. The
+application Settings command and floating controls share the same window
+(`Command-,`). Dev builds are Debug; `--production` builds Release.
 
 `./run.sh` does not start backend services, copy credentials, choose an external
 endpoint, stop another app, or write to `/Applications`. `--install` explicitly
@@ -50,8 +67,8 @@ Sign in with Apple entitlement.
 
 ## Local sessions reliability contracts
 
-- **Capture ownership:** Sessions and CLIPS acquire one shared, generation-bound
-  capture lease before starting asynchronous work. A stale completion cannot
+- **Capture ownership:** capture acquires one shared, generation-bound lease
+  before starting asynchronous work. A stale completion cannot
   release a newer capture. Microphone audio runs in the packaged
   `CepessaMicrophoneCaptureHelper`; startup requires its handshake and a valid
   PCM frame. Stop sends `STOP`, drains final frames for a bounded interval, and

@@ -1,9 +1,8 @@
 import AVFoundation
-import AVKit
 import AppKit
 import SwiftUI
 
-/// A compact audio transport keeps the recording next to the words it produced.
+/// Keeps the recording next to the words it produced.
 @MainActor
 final class LocalSessionAudioPlayback: ObservableObject {
   @Published private(set) var isPlaying = false
@@ -89,42 +88,100 @@ final class LocalSessionAudioPlayback: ObservableObject {
   }
 }
 
+/// The recording as a line of light: play, a track that fills in the orb's
+/// gold, and the time it has reached.
 struct LocalSessionAudioPlayer: View {
   let url: URL
-  var seekSeconds: Double? = nil
-  var seekGeneration: UUID? = nil
   @StateObject private var playback = LocalSessionAudioPlayback()
+  @State private var isScrubbing = false
+  @State private var isHovered = false
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      HStack(spacing: 12) {
-        Button(action: playback.toggle) {
-          Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-            .frame(width: 20, height: 20)
-        }
-        .buttonStyle(.borderless)
-        .disabled(playback.duration == 0)
-        .accessibilityLabel(playback.isPlaying ? "Pause recording playback" : "Play recording")
-        Slider(
-          value: Binding(get: { playback.currentTime }, set: { playback.seek(to: $0) }),
-          in: 0...max(1, playback.duration)
-        )
-        .disabled(playback.duration == 0)
-        .accessibilityLabel("Recording playback position")
-        Text("\(stamp(playback.currentTime)) / \(stamp(playback.duration))")
-          .font(.caption.monospacedDigit())
-          .foregroundStyle(.secondary)
+    HStack(spacing: 14) {
+      Button(action: playback.toggle) {
+        Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+          .font(.system(size: 13, weight: .bold))
+          .foregroundStyle(SessionsPalette.inkInverse)
+          .offset(x: playback.isPlaying ? 0 : 1)
+          .frame(width: 34, height: 34)
+          .background(Circle().fill(SessionsPalette.ink))
+          .contentShape(Circle())
       }
+      .buttonStyle(SessionsPressStyle(scale: 0.92))
+      .disabled(playback.duration == 0)
+      .keyboardShortcut(.space, modifiers: [])
+      .accessibilityLabel(playback.isPlaying ? "Pause recording" : "Play recording")
+
+      track
+
+      Text("\(stamp(playback.currentTime)) / \(stamp(playback.duration))")
+        .font(SessionsType.figure(12))
+        .foregroundStyle(SessionsPalette.inkTertiary)
+        .fixedSize()
+    }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 8)
+    .sessionsRaised(radius: 26)
+    .overlay(alignment: .bottomLeading) {
       if let error = playback.errorMessage {
-        Text(error).font(.caption).foregroundStyle(.secondary)
+        Text(error)
+          .font(SessionsType.text(12))
+          .foregroundStyle(SessionsPalette.inkTertiary)
+          .offset(y: 20)
       }
     }
     .task(id: url) { await playback.load(url) }
-    .onChange(of: seekGeneration) { _, _ in
-      guard let seekSeconds else { return }
-      playback.seek(to: seekSeconds)
-    }
     .onDisappear { playback.stop() }
+  }
+
+  private var track: some View {
+    GeometryReader { proxy in
+      let width = proxy.size.width
+      let fraction = playback.duration > 0 ? playback.currentTime / playback.duration : 0
+      ZStack(alignment: .leading) {
+        Capsule()
+          .fill(SessionsPalette.hairline)
+          .frame(height: isHovered || isScrubbing ? 6 : 4)
+        Capsule()
+          .fill(
+            LinearGradient(
+              colors: [SessionsPalette.sunriseGold, SessionsPalette.cloudCoral],
+              startPoint: .leading, endPoint: .trailing)
+          )
+          .frame(width: max(0, width * fraction), height: isHovered || isScrubbing ? 6 : 4)
+          .shadow(color: SessionsPalette.sunriseGold.opacity(0.45), radius: 4)
+        Circle()
+          .fill(SessionsPalette.lightCore)
+          .frame(width: 12, height: 12)
+          .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+          .offset(x: max(0, min(width - 12, width * fraction - 6)))
+          .opacity(isHovered || isScrubbing ? 1 : 0)
+      }
+      .frame(maxHeight: .infinity)
+      .contentShape(Rectangle())
+      .gesture(
+        DragGesture(minimumDistance: 0)
+          .onChanged { value in
+            isScrubbing = true
+            playback.seek(to: Double(max(0, min(1, value.location.x / width))) * playback.duration)
+          }
+          .onEnded { _ in isScrubbing = false }
+      )
+    }
+    .frame(height: 24)
+    .onHover { isHovered = $0 }
+    .animation(SessionsMotion.hover, value: isHovered)
+    .disabled(playback.duration == 0)
+    .accessibilityElement()
+    .accessibilityLabel("Recording position")
+    .accessibilityValue("\(stamp(playback.currentTime)) of \(stamp(playback.duration))")
+    .accessibilityAdjustableAction { direction in
+      switch direction {
+      case .increment: playback.seek(to: playback.currentTime + 10)
+      case .decrement: playback.seek(to: playback.currentTime - 10)
+      @unknown default: break
+      }
+    }
   }
 
   private func stamp(_ seconds: Double) -> String {
@@ -135,112 +192,77 @@ struct LocalSessionAudioPlayer: View {
   }
 }
 
-struct LocalSessionAttachmentsView: View {
+/// Everything pinned to the recording, in the order it was pinned: images as
+/// thumbnails, files as named tiles. Both open the real thing.
+struct LocalSessionAttachmentsStrip: View {
   let session: LocalSession
   let folder: URL?
-  @State private var expanded = true
+  let enlarge: (NSImage) -> Void
+
   @State private var errorMessage: String?
 
   var body: some View {
-    DisclosureGroup("Attachments (\(session.attachments.count))", isExpanded: $expanded) {
-      VStack(alignment: .leading, spacing: 10) {
-        ForEach(session.attachments) { attachment in
-          Button {
-            guard let url = localURL(for: attachment),
-              FileManager.default.fileExists(atPath: url.path), NSWorkspace.shared.open(url)
-            else {
-              errorMessage = "This attachment is no longer at its saved location."
-              return
-            }
-          } label: {
-            Label(
-              attachment.title,
-              systemImage: attachment.kind == .image || attachment.kind == .capture
-                ? "photo" : "doc"
-            )
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
+    VStack(alignment: .leading, spacing: 10) {
+      SessionsEyebrow(text: "Pinned · \(session.attachments.count)")
+      ScrollView(.horizontal) {
+        HStack(spacing: 10) {
+          ForEach(session.attachments) { attachment in
+            tile(for: attachment)
           }
-          .buttonStyle(.plain)
-          .accessibilityLabel("Open attachment \(attachment.title)")
         }
-        if let errorMessage { Text(errorMessage).font(.caption).foregroundStyle(.secondary) }
+        .padding(.vertical, 2)
       }
-      .padding(.top, 10)
+      .scrollIndicators(.hidden)
+      if let errorMessage {
+        Text(errorMessage)
+          .font(SessionsType.text(12))
+          .foregroundStyle(SessionsPalette.inkTertiary)
+      }
     }
-    .font(.callout)
   }
 
-  private func localURL(for attachment: LocalSessionAttachment) -> URL? {
-    LocalSessionAttachmentResolver.localURL(for: attachment, in: folder)
-  }
-}
+  @ViewBuilder
+  private func tile(for attachment: LocalSessionAttachment) -> some View {
+    let url = LocalSessionAttachmentResolver.localURL(for: attachment, in: folder)
+    let isImage = attachment.kind == .image || attachment.kind == .capture
+    let image = isImage ? url.flatMap { SessionsImageCache.image(at: $0) } : nil
 
-struct LocalSessionLibrarySheet: View {
-  @ObservedObject var model: LocalMeetingAppModel
-  @Environment(\.dismiss) private var dismiss
-  @State private var query = ""
-  @State private var selection: UUID?
-
-  private var matches: [LocalSession] {
-    let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-    return query.isEmpty
-      ? model.sessions
-      : model.sessions.filter {
-        $0.title.localizedCaseInsensitiveContains(query)
-          || $0.transcriptText.localizedCaseInsensitiveContains(query)
+    Button {
+      if let image {
+        enlarge(image)
+      } else if let url, FileManager.default.fileExists(atPath: url.path),
+        NSWorkspace.shared.open(url)
+      {
+        errorMessage = nil
+      } else {
+        errorMessage = "This attachment is no longer at its saved location."
       }
-  }
-
-  var body: some View {
-    VStack(spacing: 0) {
-      HStack {
-        Text("Sessions").font(.title3.weight(.semibold))
-        Spacer()
-        Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
-      }.padding(20)
-      TextField("Search titles and transcripts", text: $query)
-        .textFieldStyle(.roundedBorder).padding(.horizontal, 20).padding(.bottom, 12)
-        .accessibilityLabel("Search sessions")
-      List(selection: $selection) {
-        ForEach(matches) { session in
-          VStack(alignment: .leading, spacing: 4) {
-            Text(session.displayTitle).lineLimit(2)
-            Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
-              .font(.caption).foregroundStyle(.secondary)
-          }
-          .tag(session.id)
-          .contextMenu {
-            Button("Open") { open(session.id) }
-          }
-          .onTapGesture(count: 2) { open(session.id) }
+    } label: {
+      if let image {
+        Image(nsImage: image)
+          .resizable()
+          .scaledToFill()
+          .frame(width: 132, height: 84)
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+              .strokeBorder(SessionsPalette.hairline, lineWidth: 1))
+      } else {
+        HStack(spacing: 8) {
+          Image(systemName: "doc.text")
+            .foregroundStyle(SessionsPalette.accent)
+          Text(attachment.title)
+            .font(SessionsType.text(13, weight: .medium))
+            .foregroundStyle(SessionsPalette.ink)
+            .lineLimit(2)
         }
+        .padding(.horizontal, 12)
+        .frame(width: 180, height: 84, alignment: .leading)
+        .sessionsRaised(radius: 12)
       }
-      .overlay {
-        if matches.isEmpty { ContentUnavailableView.search(text: query) }
-      }
-      HStack {
-        Text("\(matches.count) \(matches.count == 1 ? "session" : "sessions")")
-          .font(.caption).foregroundStyle(.secondary)
-        Button("Reload") { model.refreshLibraryIfIdle() }
-          .disabled(model.captureLifecycle.isBusy || model.isTranscribing)
-        Spacer()
-        Button("Open Session") { if let selection { open(selection) } }
-          .keyboardShortcut(.defaultAction).disabled(selection == nil)
-      }.padding(20)
     }
-    .frame(width: 520, height: 480)
-    .onAppear {
-      model.refreshLibraryIfIdle()
-      selection = model.selectedSessionID
-    }
-    .onChange(of: query) { _, _ in
-      if !matches.contains(where: { $0.id == selection }) { selection = nil }
-    }
-  }
-
-  private func open(_ id: UUID) {
-    model.selectSession(id: id)
-    dismiss()
+    .buttonStyle(SessionsPressStyle(scale: 0.97))
+    .help(attachment.title)
+    .accessibilityLabel("Open attachment \(attachment.title)")
   }
 }

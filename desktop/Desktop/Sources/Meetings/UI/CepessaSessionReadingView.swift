@@ -1,84 +1,79 @@
 import AppKit
-import Combine
 import SwiftUI
-import UniformTypeIdentifiers
 
-/// The session reader keeps source audio, quality status, attachments, and
-/// transcript together, with library and export actions in the native toolbar.
+/// One recording, read. The title is said in the display face; the transcript
+/// is set for reading — one measure, generous leading, each speaker's turn in
+/// its own light — with the recording and pinned screenshots kept next to the
+/// words they belong to.
+///
+/// Long text is read, not watched: only the header and the first few turns
+/// arrive with motion, and they arrive in well under a second.
 struct CepessaSessionReadingView: View {
-  @ObservedObject private var model = CepessaSessionsStore.shared.model
+  /// Turns that arrive with the staggered reveal when a session opens.
+  static let arrivingTurns = 6
+
+  @ObservedObject var model: LocalMeetingAppModel
+  let back: () -> Void
 
   /// Reading-only text zoom (⌘+ / ⌘- / ⌘0 or trackpad pinch).
   @AppStorage("cepessa.reading.textScale") private var textScale: Double = 1.0
   @GestureState private var pinch: CGFloat = 1
   @State private var enlargedImage: NSImage?
-  @State private var renameTarget: LocalSessionTranscriptSegment?
+  // Each rename remembers its session when it begins: starting a recording
+  // or pinning a screenshot while the alert is open changes the selection.
+  @State private var renameTarget: (segment: LocalSessionTranscriptSegment, sessionID: UUID)?
   @State private var proposedSpeakerName = ""
-  @State private var renameSession = false
+  @State private var renamingSessionID: UUID?
   @State private var proposedTitle = ""
   @State private var editError: String?
+  @State private var isTitleHovered = false
 
-  private let inlineImageMaxHeight: CGFloat = 320
-
-  /// Base column width at 1× zoom. Grows with the zoom factor so the number of
-  /// words per line stays roughly constant as the reader zooms in.
-  private let baseColumnWidth: CGFloat = 620
-  private let minScale = 0.7
-  private let maxScale = 2.2
+  private let baseMeasure: CGFloat = 680
+  private let minScale = 0.8
+  private let maxScale = 1.8
 
   private var zoom: CGFloat { CGFloat(textScale) * pinch }
 
-  private func sz(_ base: CGFloat) -> CGFloat {
-    round(base * zoom)
-  }
-
-  private func columnWidth(available: CGFloat) -> CGFloat {
-    min(baseColumnWidth * zoom, max(320, available - 64))
-  }
-
   var body: some View {
-    Group {
+    VStack(spacing: 0) {
+      topBar
       if let session = model.selectedSession {
         content(for: session)
-      } else {
-        emptyState(
-          title: "No Session Open",
-          message: model.recorderErrorMessage
-            ?? "Start a recording or import audio from the toolbar.",
-          symbol: "rectangle.stack"
-        )
+          .id(session.id)
       }
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    // Long-form text always sits on an opaque reading surface — never glass.
-    .background(CepessaColors.readingSurface)
     .gesture(
       MagnifyGesture()
         .updating($pinch) { value, state, _ in
-          state = value.magnification
+          state = min(max(value.magnification, 0.7), 1.6)
         }
         .onEnded { value in
           setScale(textScale * Double(value.magnification))
         }
     )
     .background(zoomShortcuts)
-    .sheet(isPresented: $model.isSessionLibraryPresented) {
-      LocalSessionLibrarySheet(model: model)
-    }
-    .alert("Rename session", isPresented: $renameSession) {
-      TextField("Session title", text: $proposedTitle)
-      Button("Cancel", role: .cancel) {}
-      Button("Save") {
-        editError =
-          model.updateSessionTitle(proposedTitle)
-          ? nil : model.recorderErrorMessage ?? "The session title could not be saved."
-      }
-      .disabled(proposedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-    }
     .overlay {
       if let enlargedImage {
-        enlargedOverlay(enlargedImage)
+        lightbox(enlargedImage)
       }
+    }
+    .alert(
+      "Rename session",
+      isPresented: Binding(
+        get: { renamingSessionID != nil },
+        set: { if !$0 { renamingSessionID = nil } }
+      ),
+      presenting: renamingSessionID
+    ) { sessionID in
+      TextField("Session title", text: $proposedTitle)
+      Button("Cancel", role: .cancel) { renamingSessionID = nil }
+      Button("Save") {
+        editError =
+          model.updateSessionTitle(proposedTitle, for: sessionID)
+          ? nil : model.recorderErrorMessage ?? "The session title could not be saved."
+        renamingSessionID = nil
+      }
+      .disabled(proposedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
     .alert(
       "Rename speaker",
@@ -87,15 +82,14 @@ struct CepessaSessionReadingView: View {
         set: { if !$0 { renameTarget = nil } }
       ),
       presenting: renameTarget
-    ) { segment in
+    ) { target in
       TextField("Speaker name", text: $proposedSpeakerName)
-      Button("Cancel", role: .cancel) {
-        renameTarget = nil
-      }
+      Button("Cancel", role: .cancel) { renameTarget = nil }
       Button("Save") {
-        if let speakerID = segment.speakerID {
+        if let speakerID = target.segment.speakerID {
           editError =
-            model.renameSpeaker(speakerID: speakerID, to: proposedSpeakerName)
+            model.renameSpeaker(
+              speakerID: speakerID, to: proposedSpeakerName, in: target.sessionID)
             ? nil : model.recorderErrorMessage ?? "The speaker name could not be saved."
         }
         renameTarget = nil
@@ -106,280 +100,368 @@ struct CepessaSessionReadingView: View {
     }
   }
 
-  /// Image lightbox. The scrim is a system material so it follows appearance
-  /// and Reduce Transparency instead of a fixed black wash, and the dismiss
-  /// control is the standard hierarchical close glyph.
-  private func enlargedOverlay(_ image: NSImage) -> some View {
-    ZStack {
-      Rectangle()
-        .fill(.regularMaterial)
-        .ignoresSafeArea()
+  // MARK: Top bar
 
-      Image(nsImage: image)
-        .resizable()
-        .scaledToFit()
-        .padding(CepessaChrome.Space.xxl)
-
-      VStack {
-        HStack {
-          Spacer()
-          Button {
-            enlargedImage = nil
-          } label: {
-            Image(systemName: "xmark.circle.fill")
-              .font(.system(size: 20))
-              .symbolRenderingMode(.hierarchical)
-              .foregroundStyle(.secondary)
-          }
-          .buttonStyle(.plain)
-          .keyboardShortcut(.cancelAction)
-          .accessibilityLabel("Close image")
-          .padding(CepessaChrome.Space.l)
+  private var topBar: some View {
+    SessionsTopBar {
+      SessionsBackButton(title: "Sessions", action: back)
+    } trailing: {
+      if let session = model.selectedSession {
+        SessionsRoundIconButton(
+          symbol: "arrow.clockwise", title: "Transcribe Again"
+        ) {
+          model.retranscribeSession(id: session.id)
         }
-        Spacer()
+        .disabled(!model.canRetranscribe(session))
+
+        SessionsRoundIconButton(
+          symbol: "square.and.arrow.up", title: "Export Transcript…",
+          action: CepessaSessionsWindowController.shared.exportSelectedTranscript
+        )
+        .disabled(!hasText(session))
       }
     }
-    .contentShape(Rectangle())
-    .onTapGesture { enlargedImage = nil }
-    .transition(.opacity)
   }
 
-  @ViewBuilder
+  // MARK: Content
+
   private func content(for session: LocalSession) -> some View {
-    let items = session.transcriptTimelineItems
-    let hasText = !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let status = CepessaStatusStyle.resolve(session.status)
+    let isRTL = LocalTranscriptTextDirection.isRightToLeft(session.displayTitle)
 
-    GeometryReader { geometry in
-      let width = columnWidth(available: geometry.size.width)
-      ScrollViewReader { scroller in
-        ScrollView {
-          VStack(alignment: .leading, spacing: sz(24)) {
-            sessionHeader(session)
-            if let audioURL = model.audioPlaybackURL(for: session), session.status != .recording {
-              LocalSessionAudioPlayer(
-                url: audioURL,
-                seekSeconds: model.insightReveal?.sessionID == session.id
-                  ? model.insightReveal?.audioOffsetSeconds : nil,
-                seekGeneration: model.insightReveal?.generation
-              )
-            }
-            LocalSessionInsightsView(model: model, session: session)
-            if !session.attachments.isEmpty {
-              LocalSessionAttachmentsView(
-                session: session, folder: model.sessionFolderURL(for: session.id))
-            }
-            Divider()
-            if hasText {
-              ForEach(items) { item in
-                transcriptBlock(item, in: session, width: width)
-                  .id(item.segment.id)
-              }
-            } else {
-              Text(pendingMessage(for: session, status: CepessaStatusStyle.resolve(session.status)))
-                .font(.body).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
-            }
+    return GeometryReader { geometry in
+      let measure = min(baseMeasure * zoom, max(360, geometry.size.width - 96))
+      ScrollView {
+        VStack(alignment: .leading, spacing: 0) {
+          header(session, isRTL: isRTL)
+            .padding(.bottom, 34)
+
+          if let audioURL = model.audioPlaybackURL(for: session), session.status != .recording {
+            LocalSessionAudioPlayer(url: audioURL)
+              .sessionsArrival(2)
+              .padding(.bottom, 30)
           }
-          .frame(width: width, alignment: .leading)
-          .frame(maxWidth: .infinity, alignment: .center)
-          .padding(.top, 28)
-          .padding(.bottom, 64)
-          .scrollIndicators(.hidden)
+
+          if !session.attachments.isEmpty {
+            LocalSessionAttachmentsStrip(
+              session: session, folder: model.sessionFolderURL(for: session.id)
+            ) { image in
+              enlargedImage = image
+            }
+            .sessionsArrival(3)
+            .padding(.bottom, 34)
+          }
+
+          if hasText(session) {
+            transcript(session, measure: measure)
+            transcriptEnd(session)
+              .padding(.top, 56)
+          } else {
+            pendingState(session, status: status)
+          }
         }
-        .onChange(of: model.insightReveal?.generation) { _, _ in
-          guard let reveal = model.insightReveal, reveal.sessionID == session.id else { return }
-          withAnimation(.easeInOut(duration: 0.2)) {
-            scroller.scrollTo(reveal.segmentID, anchor: .center)
-          }
+        .frame(width: measure, alignment: .leading)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 20)
+        .padding(.bottom, 120)
+      }
+      .scrollIndicators(.automatic)
+      // Words fade under the top strip and into the bottom edge instead of
+      // being cut by them.
+      .mask {
+        VStack(spacing: 0) {
+          LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+            .frame(height: 28)
+          Color.black
+          LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+            .frame(height: 44)
         }
       }
     }
-    .alert("Analyze with TypeSafe?", isPresented: consentBinding) {
-      Button("Cancel", role: .cancel) { model.declineInsightConsent() }
-      Button("Send transcript text") {
-        if let id = model.pendingInsightConsentSessionID {
-          model.confirmInsightConsent(for: id)
-        }
-      }
-    } message: {
-      Text(LocalSessionInsightPolicy.cloudDisclosure)
-    }
   }
 
-  private var consentBinding: Binding<Bool> {
-    Binding(
-      get: { model.pendingInsightConsentSessionID != nil },
-      set: { if !$0 { model.declineInsightConsent() } }
-    )
-  }
+  // MARK: Header
 
-  private func sessionHeader(_ session: LocalSession) -> some View {
+  private func header(_ session: LocalSession, isRTL: Bool) -> some View {
     let notice = LocalSessionReadingNotice.resolve(session)
     let progress = model.processingSnapshot(for: session.id)
     let saveError = model.sessionSaveErrors[session.id]
-    return VStack(alignment: .leading, spacing: 12) {
-      HStack(alignment: .firstTextBaseline) {
-        Text(session.startedAt.formatted(date: .long, time: .shortened))
-          .font(.caption).foregroundStyle(.secondary)
-        Spacer()
-        Button("Rename") {
-          proposedTitle = session.title
-          renameSession = true
+    let titleSize = 48 * min(zoom, 1.3)
+    let edge: Alignment = isRTL ? .trailing : .leading
+
+    return VStack(alignment: isRTL ? .trailing : .leading, spacing: 12) {
+      HStack(alignment: .firstTextBaseline, spacing: 12) {
+        if isRTL {
+          Spacer(minLength: 0)
+          renameButton(session)
         }
-        .buttonStyle(.borderless).font(.caption)
-        .accessibilityLabel("Rename session")
-      }
-      VStack(alignment: .leading, spacing: 6) {
-        Label(
-          saveError != nil ? "Changes not saved" : progress?.title ?? notice.title,
-          systemImage: saveError != nil
-            ? "exclamationmark.triangle"
-            : progress != nil
-              ? "waveform" : notice.needsReview ? "exclamationmark.triangle" : "doc.text"
+        SessionsRevealedLine(
+          // Isolated in the direction it is aligned to, so "Q3 סיכום" reads
+          // right to left like its alignment says.
+          text: LocalTranscriptTextDirection.displayText(session.displayTitle),
+          font: SessionsType.display(titleSize),
+          alignment: isRTL ? .trailing : .leading,
+          tracking: titleSize * -0.02
         )
-        .font(.system(size: 15, weight: .medium))
-        Text(saveError ?? progress?.detail ?? notice.detail)
-          .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-        if let progress {
-          if let value = progress.progress {
-            ProgressView(value: value)
-          } else {
-            ProgressView().controlSize(.small)
+        .onTapGesture(count: 2) { beginRename(session) }
+        .contextMenu {
+          Button("Rename…") { beginRename(session) }
+        }
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityAction(named: "Rename") { beginRename(session) }
+        if !isRTL {
+          renameButton(session)
+          Spacer(minLength: 0)
+        }
+      }
+      .onHover { isTitleHovered = $0 }
+
+      Text(metaLine(for: session))
+        .font(SessionsType.text(14))
+        .foregroundStyle(SessionsPalette.inkTertiary)
+        .monospacedDigit()
+        .frame(maxWidth: .infinity, alignment: edge)
+        .sessionsArrival(1)
+
+      // Only what changes how the words should be trusted earns a line here:
+      // work in progress, a transcript that needs review, a failed save.
+      if saveError != nil || progress != nil || (notice.needsReview && hasText(session)) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+          Image(systemName: saveError != nil || notice.needsReview ? "exclamationmark.triangle.fill" : "waveform")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(
+              saveError != nil || notice.needsReview ? SessionsPalette.attention : SessionsPalette.accent)
+          VStack(alignment: .leading, spacing: 3) {
+            Text(saveError != nil ? "Changes not saved" : progress?.title ?? notice.title)
+              .font(SessionsType.text(14, weight: .semibold))
+              .foregroundStyle(SessionsPalette.ink)
+            Text(saveError ?? progress?.detail ?? notice.detail)
+              .font(SessionsType.text(13))
+              .foregroundStyle(SessionsPalette.inkSecondary)
+              .fixedSize(horizontal: false, vertical: true)
           }
         }
+        .padding(.top, 6)
+        .accessibilityElement(children: .combine)
+        .sessionsArrival(2)
       }
-      .accessibilityElement(children: .combine)
+
+      if let fraction = progress?.progress {
+        SessionsLightProgress(fraction: fraction)
+          .frame(height: 3)
+          .padding(.top, 4)
+          .accessibilityLabel("Transcription progress")
+          .accessibilityValue("\(Int((fraction * 100).rounded())) percent")
+      }
+
       if saveError == nil, let editError {
-        Label(editError, systemImage: "exclamationmark.triangle")
-          .font(.callout).foregroundStyle(.secondary)
+        Label(editError, systemImage: "exclamationmark.triangle.fill")
+          .font(SessionsType.text(13))
+          .foregroundStyle(SessionsPalette.attention)
       }
     }
   }
 
-  /// What to say when a session has no transcript text yet.
-  ///
-  /// The old copy told everyone to "Run Transcribe from the toolbar" — which
-  /// is wrong advice while capture is still running and worse advice while the
-  /// transcript is already being generated. Each state now says what is
-  /// actually happening, in the same words the indicator and the menu-bar item
-  /// use for it.
-  private func pendingTitle(for status: CepessaStatusStyle) -> String {
-    switch status {
-    case .capturing: return "Recording"
-    case .working: return "Transcribing"
-    case .needsAttention: return "Needs Attention"
-    case .ready: return "Transcript Not Ready"
+  /// A pencil that appears beside the title on hover. Double-click and the
+  /// context menu rename too; this makes the action findable.
+  private func renameButton(_ session: LocalSession) -> some View {
+    Button {
+      beginRename(session)
+    } label: {
+      Image(systemName: "pencil")
+        .font(.system(size: 13, weight: .semibold))
     }
+    .buttonStyle(SessionsRoundButtonStyle(diameter: 28))
+    .opacity(isTitleHovered ? 1 : 0)
+    .animation(SessionsMotion.hover, value: isTitleHovered)
+    .help("Rename")
+    .accessibilityLabel("Rename session")
   }
 
-  private func pendingMessage(for session: LocalSession, status: CepessaStatusStyle) -> String {
-    switch status {
-    case .capturing:
-      return "This session is still being captured. The transcript appears once you stop."
-    case .working:
-      if let detail = model.processingSnapshot(for: session.id)?.detail.trimmingCharacters(
-        in: .whitespacesAndNewlines),
-        !detail.isEmpty
-      {
-        return detail
+  /// When it was, and who was there: one quiet line under the title.
+  private func metaLine(for session: LocalSession) -> String {
+    let day = session.startedAt.formatted(.dateTime.weekday(.wide).day().month(.wide))
+    let time = session.startedAt.formatted(date: .omitted, time: .shortened)
+    var parts = [day, time]
+    let speakers = Set(session.transcriptSegments.map(\.speaker).filter { !$0.isEmpty })
+    if speakers.count > 1 {
+      parts.append("\(speakers.count) speakers")
+    }
+    if !session.attachments.isEmpty {
+      parts.append("\(session.attachments.count) pinned")
+    }
+    return parts.joined(separator: "  ·  ")
+  }
+
+  /// The close of a transcript: a point of light, and — for a transcript made
+  /// before completeness checks existed — the honest footnote.
+  private func transcriptEnd(_ session: LocalSession) -> some View {
+    let notice = LocalSessionReadingNotice.resolve(session)
+    let isLegacy = !notice.needsReview && session.transcriptionEvidence?.isComplete != true
+    return VStack(spacing: 12) {
+      Circle()
+        .fill(SessionsPalette.sunriseGold)
+        .frame(width: 5, height: 5)
+        .shadow(color: SessionsPalette.sunriseGold.opacity(0.8), radius: 6)
+      Text("End of transcript")
+        .font(SessionsType.text(12.5, weight: .medium))
+        .foregroundStyle(SessionsPalette.inkQuiet)
+      if isLegacy {
+        Text(notice.detail)
+          .font(SessionsType.text(12.5))
+          .foregroundStyle(SessionsPalette.inkQuiet)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: 420)
       }
-      return "Preparing the transcript on this Mac."
-    case .needsAttention:
-      return model.audioPlaybackURL(for: session) != nil
-        ? "Use Transcribe in the toolbar to try the saved recording again."
-        : "Use Import Audio to choose another recording."
-    case .ready:
-      return "The audio is saved. Run Transcribe from the toolbar to read it."
+    }
+    .frame(maxWidth: .infinity)
+    .accessibilityElement(children: .combine)
+  }
+
+  private func beginRename(_ session: LocalSession) {
+    proposedTitle = session.title
+    renamingSessionID = session.id
+  }
+
+  // MARK: Transcript
+
+  private func hasText(_ session: LocalSession) -> Bool {
+    !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private func transcript(_ session: LocalSession, measure: CGFloat) -> some View {
+    let turns = SessionTranscriptTurn.group(session.transcriptTimelineItems)
+    let voices = SessionTranscriptTurn.voiceOrder(session.transcriptSegments)
+    return LazyVStack(alignment: .leading, spacing: 30 * zoom) {
+      ForEach(Array(turns.enumerated()), id: \.element.id) { index, turn in
+        turnView(turn, in: session, measure: measure, voices: voices)
+          .modifier(SessionsTurnHighlight())
+          // Only the opening turns arrive; later ones are simply there when
+          // scrolled to, never blank while a delayed reveal catches up.
+          .sessionsArrival(index + 4, isEnabled: index < Self.arrivingTurns)
+      }
     }
   }
 
-  private func transcriptBlock(
-    _ item: LocalSessionTranscriptTimelineItem, in session: LocalSession, width: CGFloat
+  private func turnView(
+    _ turn: SessionTranscriptTurn, in session: LocalSession, measure: CGFloat,
+    voices: [String: Int]
   ) -> some View {
-    let segment = item.segment
-    let images = timelineImages(for: item, in: session)
-    let isRightToLeft = LocalTranscriptTextDirection.isRightToLeft(segment.text)
+    let isRTL = LocalTranscriptTextDirection.isRightToLeft(
+      turn.items.map(\.segment.text).joined(separator: " "))
+    let alignment: HorizontalAlignment = isRTL ? .trailing : .leading
 
-    return VStack(alignment: .leading, spacing: sz(7)) {
-      HStack(spacing: 8) {
-        if !segment.speaker.trimmingCharacters(in: .whitespaces).isEmpty {
-          if let speakerID = segment.speakerID, session.transcriptionEvidence != nil {
-            Menu {
-              Button("Rename speaker…") {
-                proposedSpeakerName = segment.speaker
-                renameTarget = segment
+    return VStack(alignment: alignment, spacing: 10 * zoom) {
+      turnLabel(turn, in: session, voices: voices, isRTL: isRTL)
+        .frame(maxWidth: .infinity, alignment: isRTL ? .trailing : .leading)
+
+      ForEach(turn.items) { item in
+        VStack(alignment: alignment, spacing: 14 * zoom) {
+          Text(LocalTranscriptTextDirection.displayText(item.segment.text))
+            .font(SessionsType.text(18 * zoom))
+            .foregroundStyle(SessionsPalette.ink)
+            .lineSpacing(18 * zoom * 0.5)
+            .textSelection(.enabled)
+            .multilineTextAlignment(isRTL ? .trailing : .leading)
+            .frame(maxWidth: .infinity, alignment: isRTL ? .trailing : .leading)
+            .accessibilityLabel(item.segment.text)
+
+          let images = timelineImages(for: item, in: session)
+          if !images.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+              ForEach(images, id: \.0) { _, title, image in
+                inlineImage(image, title: title, measure: measure)
               }
-              if segment.identityStatus == .confirmed {
-                Button("Undo latest rename") {
-                  if !model.undoLatestSpeakerRename(speakerID: speakerID, in: session.id) {
-                    editError =
-                      model.recorderErrorMessage ?? "There is no saved speaker rename to undo."
-                  }
+            }
+          }
+        }
+        .id(item.segment.id)
+      }
+    }
+  }
+
+  private func turnLabel(
+    _ turn: SessionTranscriptTurn, in session: LocalSession, voices: [String: Int],
+    isRTL: Bool
+  ) -> some View {
+    let segment = turn.items[0].segment
+    let speaker = segment.speaker.trimmingCharacters(in: .whitespacesAndNewlines)
+    let color = SessionsPalette.speakerColor(
+      at: voices[SessionTranscriptTurn.speakerKey(segment)] ?? 0)
+
+    return HStack(spacing: 9) {
+      // The voice's own light, then its name.
+      Circle()
+        .fill(color)
+        .frame(width: 6, height: 6)
+        .shadow(color: color.opacity(0.75), radius: 5)
+        .accessibilityHidden(true)
+      if !speaker.isEmpty {
+        if let speakerID = segment.speakerID, session.transcriptionEvidence != nil {
+          Menu {
+            Button("Rename Speaker…") {
+              proposedSpeakerName = speaker
+              renameTarget = (segment, session.id)
+            }
+            if segment.identityStatus == .confirmed {
+              Button("Undo Latest Rename") {
+                if !model.undoLatestSpeakerRename(speakerID: speakerID, in: session.id) {
+                  editError =
+                    model.recorderErrorMessage ?? "There is no saved speaker rename to undo."
                 }
               }
-            } label: {
-              Text(segment.speaker.uppercased())
-                .font(.system(size: sz(11), weight: .semibold))
-                .foregroundStyle(.secondary)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .accessibilityLabel("Speaker actions for \(segment.speaker)")
-          } else {
-            Text(segment.speaker.uppercased())
-              .font(.system(size: sz(11), weight: .semibold))
-              .foregroundStyle(.secondary)
-              .tracking(0.4)
+          } label: {
+            SessionsEyebrow(text: speaker, color: color, size: 12 * min(zoom, 1.3))
           }
+          .menuStyle(.button)
+          .buttonStyle(.plain)
+          .menuIndicator(.hidden)
+          .fixedSize()
+          .accessibilityLabel("Speaker actions for \(speaker)")
+        } else {
+          SessionsEyebrow(text: speaker, color: color, size: 12 * min(zoom, 1.3))
         }
-
-        Text(timestampLabel(for: segment, in: session))
-          .font(.system(size: sz(11), weight: .medium).monospacedDigit())
-          .foregroundStyle(.secondary)
       }
-      .frame(maxWidth: .infinity, alignment: isRightToLeft ? .trailing : .leading)
 
-      highlightedTranscript(segment, isRightToLeft: isRightToLeft)
-        .font(.system(size: sz(15)))
-        .foregroundColor(CepessaColors.textPrimary)
-        .lineSpacing(sz(5))
-        .textSelection(.enabled)
-        .multilineTextAlignment(isRightToLeft ? .trailing : .leading)
-        .frame(maxWidth: .infinity, alignment: isRightToLeft ? .trailing : .leading)
-        .accessibilityLabel(segment.text)
-
-      if !images.isEmpty {
-        VStack(alignment: .leading, spacing: sz(8)) {
-          ForEach(images, id: \.0) { _, title, image in
-            Button {
-              enlargedImage = image
-            } label: {
-              Image(nsImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: width, maxHeight: inlineImageMaxHeight, alignment: .leading)
-                .clipShape(
-                  RoundedRectangle(cornerRadius: CepessaChrome.cardRadius, style: .continuous)
-                )
-                .overlay(
-                  RoundedRectangle(cornerRadius: CepessaChrome.cardRadius, style: .continuous)
-                    .strokeBorder(CepessaColors.border, lineWidth: 1)
-                )
-                .contentShape(
-                  RoundedRectangle(cornerRadius: CepessaChrome.cardRadius, style: .continuous)
-                )
-            }
-            .buttonStyle(.plain)
-            .help("Open \(title)")
-            .accessibilityLabel("Open attachment \(title)")
-          }
-        }
-        .padding(.top, sz(4))
-      }
+      Text(timestampLabel(for: segment, in: session))
+        .font(SessionsType.figure(12 * min(zoom, 1.3)))
+        .foregroundStyle(SessionsPalette.inkQuiet)
     }
+    // Right-to-left turns read name-first from the right.
+    .environment(\.layoutDirection, isRTL ? .rightToLeft : .leftToRight)
   }
 
-  /// Screenshots and image attachments pinned to this transcript moment.
+  private func inlineImage(_ image: NSImage, title: String, measure: CGFloat) -> some View {
+    Button {
+      enlargedImage = image
+    } label: {
+      // The outline and shadow belong to the picture, not to the column, so
+      // the picture is sized to fit exactly before they are drawn.
+      Image(nsImage: image)
+        .resizable()
+        .frame(width: fitted(image, measure: measure).width, height: fitted(image, measure: measure).height)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(SessionsPalette.imageOutline, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+    .buttonStyle(SessionsPressStyle(scale: 0.99))
+    .help("Open \(title)")
+    .accessibilityLabel("Open attachment \(title)")
+  }
+
+  private func fitted(_ image: NSImage, measure: CGFloat) -> CGSize {
+    let size = image.size
+    guard size.width > 0, size.height > 0 else { return CGSize(width: measure, height: 200) }
+    let scale = min(measure / size.width, 340 / size.height, 1)
+    return CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+  }
+
+  /// Screenshots and image attachments pinned to this moment.
   private func timelineImages(
     for item: LocalSessionTranscriptTimelineItem, in session: LocalSession
   ) -> [(UUID, String, NSImage)] {
@@ -392,58 +474,16 @@ struct CepessaSessionReadingView: View {
     var seen = Set<UUID>()
     return attachments.compactMap { attachment in
       guard !seen.contains(attachment.id),
-        let image = attachmentImage(for: attachment, in: session)
+        attachment.kind == .image || attachment.kind == .capture,
+        let url = LocalSessionAttachmentResolver.localURL(
+          for: attachment, in: model.sessionFolderURL(for: session.id)),
+        let image = SessionsImageCache.image(at: url)
       else {
         return nil
       }
       seen.insert(attachment.id)
       return (attachment.id, attachment.title, image)
     }
-  }
-
-  private func attachmentImage(
-    for attachment: LocalSessionAttachment,
-    in session: LocalSession
-  ) -> NSImage? {
-    guard attachment.kind == .image || attachment.kind == .capture else { return nil }
-    guard let url = LocalSessionAttachmentResolver.localURL(
-      for: attachment,
-      in: model.sessionFolderURL(for: session.id)
-    ) else { return nil }
-    return NSImage(contentsOf: url)
-  }
-
-  private func highlightedTranscript(
-    _ segment: LocalSessionTranscriptSegment, isRightToLeft: Bool
-  ) -> Text {
-    let reveal = model.insightReveal
-    guard reveal?.segmentID == segment.id,
-      let range = reveal?.range,
-      range.isValid(in: segment.text),
-      let slice = LocalSessionInsightWindowBuilder.extract(range: range, from: segment.text)
-    else {
-      return Text(LocalTranscriptTextDirection.displayText(segment.text))
-    }
-    let prefixText =
-      LocalSessionInsightWindowBuilder.extract(
-        range: LocalSessionInsightTextRange(utf16Start: 0, utf16Length: range.utf16Start),
-        from: segment.text) ?? ""
-    let suffixText =
-      LocalSessionInsightWindowBuilder.extract(
-        range: LocalSessionInsightTextRange(
-          utf16Start: range.utf16End,
-          utf16Length: max(0, segment.text.utf16.count - range.utf16End)
-        ),
-        from: segment.text) ?? ""
-    let isolateStart = isRightToLeft ? "\u{2067}" : "\u{2066}"
-    var marked = AttributedString(slice)
-    marked.backgroundColor = CepessaColors.accentLight
-    marked.underlineStyle = .single
-    return Text(isolateStart)
-      + Text(prefixText)
-      + Text(marked)
-      + Text(suffixText)
-      + Text("\u{2069}")
   }
 
   private func timestampLabel(for segment: LocalSessionTranscriptSegment, in session: LocalSession)
@@ -457,6 +497,116 @@ struct CepessaSessionReadingView: View {
     return h > 0
       ? String(format: "%d:%02d:%02d", h, m, s)
       : String(format: "%d:%02d", m, s)
+  }
+
+  // MARK: Pending
+
+  /// No words yet. Each state says what is actually happening, in the same
+  /// words the recorder and the menu-bar item use.
+  @ViewBuilder
+  private func pendingState(_ session: LocalSession, status: CepessaStatusStyle) -> some View {
+    VStack(alignment: .leading, spacing: 14) {
+      SessionsRevealedLine(
+        text: pendingTitle(status),
+        font: SessionsType.display(30),
+        color: SessionsPalette.inkSecondary,
+        delay: 0.25)
+      Text(pendingMessage(for: session, status: status))
+        .font(SessionsType.text(15))
+        .foregroundStyle(SessionsPalette.inkTertiary)
+        .fixedSize(horizontal: false, vertical: true)
+        .sessionsArrival(4, after: 0.2)
+
+      switch status {
+      case .needsAttention, .ready:
+        if model.canRetranscribe(session) {
+          Button("Transcribe Again") { model.retranscribeSession(id: session.id) }
+            .buttonStyle(SessionsCapsuleButtonStyle())
+            .padding(.top, 8)
+            .sessionsArrival(5, after: 0.2)
+        } else if model.audioPlaybackURL(for: session) == nil {
+          Button("Import Audio…", action: CepessaSessionsWindowController.shared.importAudio)
+            .buttonStyle(SessionsCapsuleButtonStyle())
+            .padding(.top, 8)
+            .sessionsArrival(5, after: 0.2)
+        }
+      case .capturing, .working:
+        EmptyView()
+      }
+    }
+    .padding(.top, 18)
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  private func pendingTitle(_ status: CepessaStatusStyle) -> String {
+    switch status {
+    case .capturing: return "Listening."
+    case .working: return "Writing it down."
+    case .needsAttention: return "The transcript didn’t finish."
+    case .ready: return "Nothing to read yet."
+    }
+  }
+
+  private func pendingMessage(for session: LocalSession, status: CepessaStatusStyle) -> String {
+    switch status {
+    case .capturing:
+      return "This session is still being recorded. The transcript appears once you stop."
+    case .working:
+      if let detail = model.processingSnapshot(for: session.id)?.detail.trimmingCharacters(
+        in: .whitespacesAndNewlines),
+        !detail.isEmpty
+      {
+        return detail
+      }
+      return "Preparing the transcript on this Mac."
+    case .needsAttention:
+      let reason =
+        session.processingError?.trimmingCharacters(in: .whitespacesAndNewlines)
+        ?? session.transcriptionEvidence?.issues.first
+      let base = reason.map { "\($0) " } ?? ""
+      return model.audioPlaybackURL(for: session) != nil
+        ? base + "The recording is saved; you can transcribe it again."
+        : base + "Import the recording to try again."
+    case .ready:
+      return "The audio is saved. Transcribe it again to read it here."
+    }
+  }
+
+  // MARK: Lightbox
+
+  private func lightbox(_ image: NSImage) -> some View {
+    ZStack {
+      Rectangle()
+        .fill(.ultraThinMaterial)
+        .overlay(SessionsPalette.nightSkyTop.opacity(0.55))
+        .ignoresSafeArea()
+
+      Image(nsImage: image)
+        .resizable()
+        .scaledToFit()
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .shadow(color: .black.opacity(0.4), radius: 30, y: 12)
+        .padding(56)
+
+      VStack {
+        HStack {
+          Spacer()
+          Button {
+            enlargedImage = nil
+          } label: {
+            Image(systemName: "xmark")
+          }
+          .buttonStyle(SessionsRoundButtonStyle())
+          .keyboardShortcut(.cancelAction)
+          .accessibilityLabel("Close image")
+          .padding(20)
+        }
+        Spacer()
+      }
+    }
+    .contentShape(Rectangle())
+    .onTapGesture { enlargedImage = nil }
+    .transition(.opacity)
   }
 
   // MARK: Zoom
@@ -480,234 +630,90 @@ struct CepessaSessionReadingView: View {
     .frame(width: 0, height: 0)
     .accessibilityHidden(true)
   }
+}
 
-  /// The system empty state — correct metrics, typography and VoiceOver
-  /// grouping for free, instead of a hand-rolled stack of labels.
-  private func emptyState(title: String, message: String, symbol: String) -> some View {
-    ContentUnavailableView {
-      Label(title, systemImage: symbol)
-    } description: {
-      Text(message)
+/// Consecutive transcript segments by the same speaker, read as one turn: the
+/// name is said once, then the words follow. A long silence starts a new turn
+/// even for the same voice, so a turn never hides a gap in the recording.
+struct SessionTranscriptTurn: Identifiable, Equatable {
+  let items: [LocalSessionTranscriptTimelineItem]
+
+  var id: UUID { items[0].segment.id }
+
+  static let maximumGap: TimeInterval = 90
+
+  static func group(_ items: [LocalSessionTranscriptTimelineItem]) -> [SessionTranscriptTurn] {
+    var turns: [[LocalSessionTranscriptTimelineItem]] = []
+    for item in items {
+      if let last = turns.last?.last,
+        speakerKey(last.segment) == speakerKey(item.segment),
+        !speakerKey(item.segment).isEmpty,
+        item.segment.timestamp.timeIntervalSince(
+          last.segment.endTimestamp ?? last.segment.timestamp) <= maximumGap
+      {
+        turns[turns.count - 1].append(item)
+      } else {
+        turns.append([item])
+      }
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    return turns.map(SessionTranscriptTurn.init)
+  }
+
+  /// Each voice's place in the conversation, by first appearance, so the first
+  /// speaker is always the gold one and two voices never share a colour
+  /// until there are more voices than colours.
+  static func voiceOrder(_ segments: [LocalSessionTranscriptSegment]) -> [String: Int] {
+    var order: [String: Int] = [:]
+    for segment in segments {
+      let key = speakerKey(segment)
+      if order[key] == nil { order[key] = order.count }
+    }
+    return order
+  }
+
+  static func speakerKey(_ segment: LocalSessionTranscriptSegment) -> String {
+    segment.speakerID ?? segment.speaker.trimmingCharacters(in: .whitespacesAndNewlines)
   }
 }
 
-// MARK: - Native window toolbar
+/// A turn lifts softly under the pointer, so the eye can hold its place in a
+/// long transcript. The lift never changes layout.
+struct SessionsTurnHighlight: ViewModifier {
+  @State private var isHovered = false
 
-/// Owns the reading window's toolbar: the session picker, export and transcribe
-/// controls. Keeping these in the titlebar leaves the content pure.
-@MainActor
-final class CepessaSessionReadingToolbar: NSObject, NSToolbarDelegate, NSToolbarItemValidation {
-  private weak var model: LocalMeetingAppModel?
-  private weak var window: NSWindow?
-  private let toolbar: NSToolbar
-  private var cancellables: Set<AnyCancellable> = []
-  private let exporter = LocalSessionRecapExporter()
-
-  private let sessionItemID = NSToolbarItem.Identifier("cepessa.reading.session")
-  private let exportItemID = NSToolbarItem.Identifier("cepessa.reading.export")
-  private let transcribeItemID = NSToolbarItem.Identifier("cepessa.reading.transcribe")
-  private let importItemID = NSToolbarItem.Identifier("cepessa.reading.import")
-
-  init(model: LocalMeetingAppModel, window: NSWindow) {
-    let toolbar = NSToolbar(identifier: "cepessa.reading.toolbar")
-    self.model = model
-    self.window = window
-    self.toolbar = toolbar
-    super.init()
-
-    toolbar.delegate = self
-    toolbar.displayMode = .default
-    toolbar.allowsUserCustomization = false
-    window.toolbar = toolbar
-    window.toolbarStyle = .unified
-
-    // Refresh titles/validation when the selected session or list changes.
-    let publishers: [AnyPublisher<Void, Never>] = [
-      model.$selectedSessionID.map { _ in () }.eraseToAnyPublisher(),
-      model.$sessions.map { _ in () }.eraseToAnyPublisher(),
-      model.$processingSnapshots.map { _ in () }.eraseToAnyPublisher(),
-      model.$retranscribableSessionIDs.map { _ in () }.eraseToAnyPublisher(),
-      model.$isTranscribing.map { _ in () }.eraseToAnyPublisher(),
-    ]
-    Publishers.MergeMany(publishers)
-      .receive(on: DispatchQueue.main)
-      .sink { [weak self] in
-        self?.refreshTitles()
-        self?.toolbar.validateVisibleItems()
-      }
-      .store(in: &cancellables)
+  func body(content: Content) -> some View {
+    content
+      .padding(.horizontal, 18)
+      .padding(.vertical, 14)
+      .background(
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+          .fill(isHovered ? SessionsPalette.raised.opacity(0.6) : .clear)
+      )
+      .padding(.horizontal, -18)
+      .padding(.vertical, -14)
+      .onHover { isHovered = $0 }
+      .animation(SessionsMotion.hover, value: isHovered)
   }
+}
 
-  func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-    [sessionItemID, .flexibleSpace, importItemID, transcribeItemID, exportItemID]
-  }
+/// A thin line of the orb's light that fills with real progress.
+struct SessionsLightProgress: View {
+  let fraction: Double
 
-  func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-    toolbarDefaultItemIdentifiers(toolbar)
-  }
-
-  func toolbar(
-    _ toolbar: NSToolbar,
-    itemForItemIdentifier identifier: NSToolbarItem.Identifier,
-    willBeInsertedIntoToolbar flag: Bool
-  ) -> NSToolbarItem? {
-    switch identifier {
-    case importItemID:
-      let item = NSToolbarItem(itemIdentifier: identifier)
-      item.label = "Import Audio"
-      item.image = NSImage(
-        systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Import audio")
-      item.target = self
-      item.action = #selector(importAction)
-      return item
-    case sessionItemID:
-      let item = NSMenuToolbarItem(itemIdentifier: identifier)
-      item.title = currentSessionTitle
-      item.image = NSImage(
-        systemSymbolName: "rectangle.stack", accessibilityDescription: "Sessions")
-      item.menu = sessionMenu()
-      item.showsIndicator = true
-      return item
-
-    case transcribeItemID:
-      let item = NSToolbarItem(itemIdentifier: identifier)
-      item.label = "Transcribe"
-      item.image = NSImage(
-        systemSymbolName: "waveform.badge.magnifyingglass", accessibilityDescription: "Transcribe")
-      item.target = self
-      item.action = #selector(transcribeAction)
-      item.toolTip = "Run a fresh local transcript"
-      return item
-
-    case exportItemID:
-      let item = NSToolbarItem(itemIdentifier: identifier)
-      item.label = "Export"
-      item.image = NSImage(
-        systemSymbolName: "square.and.arrow.up", accessibilityDescription: "Export")
-      item.target = self
-      item.action = #selector(exportAction)
-      item.toolTip = "Save the transcript as Markdown"
-      return item
-
-    default:
-      return nil
-    }
-  }
-
-  // MARK: Menus
-
-  private func sessionMenu() -> NSMenu {
-    let menu = NSMenu()
-    let sessions = model?.sessions ?? []
-    if sessions.isEmpty {
-      let empty = NSMenuItem(title: "No sessions yet", action: nil, keyEquivalent: "")
-      empty.isEnabled = false
-      menu.addItem(empty)
-      return menu
-    }
-    for session in sessions.prefix(8) {
-      let item = NSMenuItem(
-        title: session.displayTitle, action: #selector(selectSessionAction(_:)), keyEquivalent: "")
-      item.target = self
-      item.representedObject = session.id
-      item.state = (session.id == model?.selectedSessionID) ? .on : .off
-      menu.addItem(item)
-    }
-    menu.addItem(.separator())
-    let browse = NSMenuItem(
-      title: "Browse All Sessions…", action: #selector(browseAction), keyEquivalent: "")
-    browse.target = self
-    menu.addItem(browse)
-    return menu
-  }
-
-  // MARK: Actions
-
-  @objc private func importAction() { CepessaSessionsWindowController.shared.importAudio() }
-  @objc private func browseAction() { model?.isSessionLibraryPresented = true }
-
-  @objc private func selectSessionAction(_ sender: NSMenuItem) {
-    guard let id = sender.representedObject as? UUID else { return }
-    model?.selectSession(id: id)
-  }
-
-  @objc private func transcribeAction() {
-    guard let id = model?.selectedSessionID else { return }
-    model?.retranscribeSession(id: id)
-  }
-
-  @objc private func exportAction() {
-    guard let session = model?.selectedSession, let window else { return }
-
-    let panel = NSSavePanel()
-    panel.title = "Export Transcript"
-    panel.nameFieldStringValue =
-      LocalSessionRecapMarkdownDocument.title(for: session, language: .english) + " Transcript.md"
-    if let markdownType = UTType(filenameExtension: "md") {
-      panel.allowedContentTypes = [markdownType]
-    }
-
-    panel.beginSheetModal(for: window) { [weak self] response in
-      guard response == .OK, let destination = panel.url, let self else { return }
-      do {
-        _ = try self.exporter.exportTranscriptMarkdown(session: session, toFile: destination)
-      } catch {
-        let alert = NSAlert(error: error)
-        alert.messageText = "The transcript could not be exported"
-        alert.informativeText = error.localizedDescription
-        alert.beginSheetModal(for: window)
+  var body: some View {
+    GeometryReader { proxy in
+      ZStack(alignment: .leading) {
+        Capsule().fill(SessionsPalette.hairline)
+        Capsule()
+          .fill(
+            LinearGradient(
+              colors: [SessionsPalette.sunriseGold, SessionsPalette.cloudCoral],
+              startPoint: .leading, endPoint: .trailing)
+          )
+          .frame(width: proxy.size.width * CGFloat(min(max(fraction, 0), 1)))
+          .shadow(color: SessionsPalette.sunriseGold.opacity(0.5), radius: 4)
       }
     }
-  }
-
-  // MARK: Validation & titles
-
-  nonisolated func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
-    MainActor.assumeIsolated {
-      switch item.itemIdentifier {
-      case transcribeItemID:
-        guard let session = model?.selectedSession else { return false }
-        return model?.canRetranscribe(session) ?? false
-      case exportItemID:
-        guard let session = model?.selectedSession else { return false }
-        return !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-      default:
-        return true
-      }
-    }
-  }
-
-  private var currentSessionTitle: String {
-    model?.selectedSession?.displayTitle ?? "Sessions"
-  }
-
-  private func refreshTitles() {
-    for item in toolbar.items {
-      if item.itemIdentifier == sessionItemID, let menuItem = item as? NSMenuToolbarItem {
-        menuItem.title = currentSessionTitle
-        menuItem.menu = sessionMenu()
-      }
-    }
-  }
-
-  func setVisible(_ isVisible: Bool) {
-    guard let window else { return }
-    guard isVisible else {
-      // Do not hide or mutate a toolbar owned by the Clips hierarchy.
-      if window.toolbar === toolbar {
-        toolbar.isVisible = false
-      }
-      return
-    }
-
-    if window.toolbar !== toolbar {
-      window.toolbar = toolbar
-    }
-    window.toolbarStyle = .unified
-    toolbar.isVisible = true
-    refreshTitles()
-    toolbar.validateVisibleItems()
+    .animation(.easeOut(duration: 0.4), value: fraction)
   }
 }

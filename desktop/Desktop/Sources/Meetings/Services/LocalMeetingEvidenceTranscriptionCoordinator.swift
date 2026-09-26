@@ -110,6 +110,8 @@ actor LocalSessionSpeakerKitDiarizer: LocalSessionDiarizing {
           )
         }
       }
+      clusters = Self.clampedToAudio(
+        clusters, duration: Double(samples.count) / Double(WhisperKit.sampleRate))
       guard !clusters.isEmpty else {
         return .init(
           status: .failed,
@@ -123,6 +125,25 @@ actor LocalSessionSpeakerKitDiarizer: LocalSessionDiarizing {
         status: .failed,
         clusters: [],
         issues: ["SpeakerKit diarization failed: \(error.localizedDescription)"]
+      )
+    }
+  }
+
+  /// SpeakerKit rounds a speaker turn out to its analysis frames, so the last
+  /// turn can end up to about half a second after the recording. Left alone,
+  /// that interval was rejected as timed outside the source; on a microphone
+  /// track with one long turn it was all of the diarization. The end is
+  /// clamped to the audio instead; a turn that starts after it is dropped.
+  static func clampedToAudio(
+    _ clusters: [LocalSessionDiarizationCluster], duration: TimeInterval
+  ) -> [LocalSessionDiarizationCluster] {
+    clusters.compactMap { cluster in
+      guard cluster.startSeconds < duration else { return nil }
+      return LocalSessionDiarizationCluster(
+        stableID: cluster.stableID,
+        startSeconds: max(0, cluster.startSeconds),
+        endSeconds: min(cluster.endSeconds, duration),
+        confidence: cluster.confidence
       )
     }
   }
