@@ -80,7 +80,6 @@ Use for the running Sessions Dev app (`agent-swift connect --bundle-id me.cepess
 ## Test
 
 - App: `xcrun swift test --package-path desktop/Desktop --scratch-path <lane>`.
-  Live TypeSafe tests skip without `TYPESAFE_API_KEY`.
 - Design review renders (every surface, light and dark):
   `CEPESSA_RENDER_FIXTURES=/abs/dir xcrun swift test ... --filter SessionsFixtureRenderTests`.
 - MCP: `cd mcp && uv run --frozen pytest -q`; lint with `uv run --frozen ruff check`
