@@ -92,8 +92,6 @@ final class LocalSessionAudioPlayback: ObservableObject {
 /// gold, and the time it has reached.
 struct LocalSessionAudioPlayer: View {
   let url: URL
-  var seekSeconds: Double? = nil
-  var seekGeneration: UUID? = nil
   @StateObject private var playback = LocalSessionAudioPlayback()
   @State private var isScrubbing = false
   @State private var isHovered = false
@@ -133,10 +131,6 @@ struct LocalSessionAudioPlayer: View {
       }
     }
     .task(id: url) { await playback.load(url) }
-    .onChange(of: seekGeneration) { _, _ in
-      guard let seekSeconds else { return }
-      playback.seek(to: seekSeconds)
-    }
     .onDisappear { playback.stop() }
   }
 

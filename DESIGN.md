@@ -96,8 +96,7 @@ edge and the traffic lights sit on it. The top strip drags the window.
 - **Reader**: a 680 pt measure. The date line in gold small caps; the title in
   the display face, revealed word by word, double-click to rename; the status
   line only when there is a transcript to qualify; the recording as a line of
-  light; decisions (TypeSafe, experimental, proposals until confirmed);
-  pinned attachments as a strip; then the transcript as turns — each voice
+  light; pinned attachments as a strip; then the transcript as turns — each voice
   named once, in its own light by order of appearance, Geist 17 on generous
   leading, right-aligned when it is Hebrew, screenshots inline where they were
   pinned. Only the header and the first ten turns arrive with motion: long

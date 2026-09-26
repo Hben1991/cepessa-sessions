@@ -259,9 +259,6 @@ if [[ "$production" != true ]]; then
   /usr/libexec/PlistBuddy -c 'Add :LSEnvironment dict' "$plist"
   /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CEPESSA_SESSIONS_TEST_ROOT string $test_root" "$plist"
   /usr/libexec/PlistBuddy -c "Add :LSEnvironment:TMPDIR string $runtime_tmp/" "$plist"
-  if [[ -n "${CEPESSA_INSIGHTS_USE_FIXTURE:-}" ]]; then
-    /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CEPESSA_INSIGHTS_USE_FIXTURE string $CEPESSA_INSIGHTS_USE_FIXTURE" "$plist"
-  fi
 fi
 
 if [[ -n "$env_file" ]]; then

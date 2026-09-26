@@ -157,7 +157,6 @@ struct CepessaSessionsSettingsPage: View {
           captureSection
           transcriptionSection
           speakerRecognitionSection
-          cloudAnalysisSection
           permissionsSection
           storageSection
         }
@@ -221,10 +220,6 @@ struct CepessaSessionsSettingsPage: View {
         "Fast draft uses lighter local models when available. A language choice adds a hint while keeping bilingual detection on. The menu bar always shows recording and transcription progress, even with the recorder hidden."
       )
     }
-  }
-
-  private var cloudAnalysisSection: some View {
-    CloudAnalysisSettingsSection()
   }
 
   private var permissionsSection: some View {

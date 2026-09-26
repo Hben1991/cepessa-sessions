@@ -56,11 +56,6 @@ final class LocalMeetingFileLayoutTests: XCTestCase {
       baseDirectory.appendingPathComponent("Sessions", isDirectory: true).appendingPathComponent(
         sessionID.uuidString, isDirectory: true
       ).appendingPathComponent("mixed.wav", isDirectory: false))
-    XCTAssertEqual(
-      layout.insightsURL(for: sessionID),
-      baseDirectory.appendingPathComponent("Sessions", isDirectory: true).appendingPathComponent(
-        sessionID.uuidString, isDirectory: true
-      ).appendingPathComponent("insights.json", isDirectory: false))
   }
 
   func testEnsureDirectoriesCreatesSessionAndModelFolders() throws {

@@ -311,11 +311,6 @@ struct LocalSessionFileLayout {
     sessionDirectory(for: sessionID).appendingPathComponent("session.json", isDirectory: false)
   }
 
-  func insightsURL(for sessionID: UUID) -> URL {
-    sessionDirectory(for: sessionID).appendingPathComponent(
-      LocalSessionInsightSchema.sidecarFileName, isDirectory: false)
-  }
-
   func attachmentsDirectory(for sessionID: UUID) -> URL {
     sessionDirectory(for: sessionID).appendingPathComponent("Attachments", isDirectory: true)
   }

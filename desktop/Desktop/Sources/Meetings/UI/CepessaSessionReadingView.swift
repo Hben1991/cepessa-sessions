@@ -3,8 +3,8 @@ import SwiftUI
 
 /// One recording, read. The title is said in the display face; the transcript
 /// is set for reading — one measure, generous leading, each speaker's turn in
-/// its own light — with the recording, pinned screenshots and any analysis
-/// kept next to the words they belong to.
+/// its own light — with the recording and pinned screenshots kept next to the
+/// words they belong to.
 ///
 /// Long text is read, not watched: only the header and the first few turns
 /// arrive with motion, and they arrive in well under a second.
@@ -98,16 +98,6 @@ struct CepessaSessionReadingView: View {
     } message: { _ in
       Text("This adds a local correction without changing the original transcript evidence.")
     }
-    .alert("Analyze with TypeSafe?", isPresented: consentBinding) {
-      Button("Cancel", role: .cancel) { model.declineInsightConsent() }
-      Button("Send transcript text") {
-        if let id = model.pendingInsightConsentSessionID {
-          model.confirmInsightConsent(for: id)
-        }
-      }
-    } message: {
-      Text(LocalSessionInsightPolicy.cloudDisclosure)
-    }
   }
 
   // MARK: Top bar
@@ -117,14 +107,6 @@ struct CepessaSessionReadingView: View {
       SessionsBackButton(title: "Sessions", action: back)
     } trailing: {
       if let session = model.selectedSession {
-        if hasText(session), !LocalSessionInsightsView.isShown(for: session, model: model) {
-          SessionsRoundIconButton(
-            symbol: "sparkles", title: "Find Decisions with TypeSafe (Experimental)…"
-          ) {
-            model.requestInsightAnalysis(for: session.id)
-          }
-        }
-
         SessionsRoundIconButton(
           symbol: "arrow.clockwise", title: "Transcribe Again"
         ) {
@@ -149,82 +131,50 @@ struct CepessaSessionReadingView: View {
 
     return GeometryReader { geometry in
       let measure = min(baseMeasure * zoom, max(360, geometry.size.width - 96))
-      ScrollViewReader { scroller in
-        ScrollView {
-          VStack(alignment: .leading, spacing: 0) {
-            header(session, isRTL: isRTL)
-              .padding(.bottom, 34)
+      ScrollView {
+        VStack(alignment: .leading, spacing: 0) {
+          header(session, isRTL: isRTL)
+            .padding(.bottom, 34)
 
-            if let audioURL = model.audioPlaybackURL(for: session), session.status != .recording {
-              LocalSessionAudioPlayer(
-                url: audioURL,
-                seekSeconds: model.insightReveal?.sessionID == session.id
-                  ? model.insightReveal?.audioOffsetSeconds : nil,
-                seekGeneration: model.insightReveal?.generation
-              )
+          if let audioURL = model.audioPlaybackURL(for: session), session.status != .recording {
+            LocalSessionAudioPlayer(url: audioURL)
               .sessionsArrival(2)
               .padding(.bottom, 30)
-            }
-
-            if LocalSessionInsightsView.isShown(for: session, model: model) {
-              LocalSessionInsightsView(model: model, session: session)
-                .sessionsArrival(3)
-                .padding(.bottom, 34)
-            }
-
-            if !session.attachments.isEmpty {
-              LocalSessionAttachmentsStrip(
-                session: session, folder: model.sessionFolderURL(for: session.id)
-              ) { image in
-                enlargedImage = image
-              }
-              .sessionsArrival(3)
-              .padding(.bottom, 34)
-            }
-
-            if hasText(session) {
-              transcript(session, measure: measure)
-              transcriptEnd(session)
-                .padding(.top, 56)
-            } else {
-              pendingState(session, status: status)
-            }
           }
-          .frame(width: measure, alignment: .leading)
-          .frame(maxWidth: .infinity)
-          .padding(.top, 20)
-          .padding(.bottom, 120)
-        }
-        .scrollIndicators(.automatic)
-        // Words fade under the top strip and into the bottom edge instead of
-        // being cut by them.
-        .mask {
-          VStack(spacing: 0) {
-            LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
-              .frame(height: 28)
-            Color.black
-            LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
-              .frame(height: 44)
+
+          if !session.attachments.isEmpty {
+            LocalSessionAttachmentsStrip(
+              session: session, folder: model.sessionFolderURL(for: session.id)
+            ) { image in
+              enlargedImage = image
+            }
+            .sessionsArrival(3)
+            .padding(.bottom, 34)
+          }
+
+          if hasText(session) {
+            transcript(session, measure: measure)
+            transcriptEnd(session)
+              .padding(.top, 56)
+          } else {
+            pendingState(session, status: status)
           }
         }
-        .onChange(of: model.insightReveal?.generation) { _, _ in
-          guard let reveal = model.insightReveal, reveal.sessionID == session.id else { return }
-          // The transcript is a lazy list of turns: only a turn is a row it can
-          // scroll to before it is built. Reach the turn, then the line in it.
-          let turnID =
-            SessionTranscriptTurn.group(session.transcriptTimelineItems)
-            .first { $0.items.contains { $0.segment.id == reveal.segmentID } }?.id
-            ?? reveal.segmentID
-          withAnimation(.easeInOut(duration: 0.25)) {
-            scroller.scrollTo(turnID, anchor: .center)
-          }
-          if turnID != reveal.segmentID {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-              withAnimation(.easeInOut(duration: 0.2)) {
-                scroller.scrollTo(reveal.segmentID, anchor: .center)
-              }
-            }
-          }
+        .frame(width: measure, alignment: .leading)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 20)
+        .padding(.bottom, 120)
+      }
+      .scrollIndicators(.automatic)
+      // Words fade under the top strip and into the bottom edge instead of
+      // being cut by them.
+      .mask {
+        VStack(spacing: 0) {
+          LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+            .frame(height: 28)
+          Color.black
+          LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+            .frame(height: 44)
         }
       }
     }
@@ -407,7 +357,7 @@ struct CepessaSessionReadingView: View {
 
       ForEach(turn.items) { item in
         VStack(alignment: alignment, spacing: 14 * zoom) {
-          highlightedTranscript(item.segment, isRightToLeft: isRTL)
+          Text(LocalTranscriptTextDirection.displayText(item.segment.text))
             .font(SessionsType.text(18 * zoom))
             .foregroundStyle(SessionsPalette.ink)
             .lineSpacing(18 * zoom * 0.5)
@@ -534,37 +484,6 @@ struct CepessaSessionReadingView: View {
       seen.insert(attachment.id)
       return (attachment.id, attachment.title, image)
     }
-  }
-
-  private func highlightedTranscript(
-    _ segment: LocalSessionTranscriptSegment, isRightToLeft: Bool
-  ) -> Text {
-    let reveal = model.insightReveal
-    guard reveal?.segmentID == segment.id,
-      let range = reveal?.range,
-      range.isValid(in: segment.text),
-      let slice = LocalSessionInsightWindowBuilder.extract(range: range, from: segment.text)
-    else {
-      return Text(LocalTranscriptTextDirection.displayText(segment.text))
-    }
-    let prefixText =
-      LocalSessionInsightWindowBuilder.extract(
-        range: LocalSessionInsightTextRange(utf16Start: 0, utf16Length: range.utf16Start),
-        from: segment.text) ?? ""
-    let suffixText =
-      LocalSessionInsightWindowBuilder.extract(
-        range: LocalSessionInsightTextRange(
-          utf16Start: range.utf16End,
-          utf16Length: max(0, segment.text.utf16.count - range.utf16End)
-        ),
-        from: segment.text) ?? ""
-    let isolateStart = isRightToLeft ? "\u{2067}" : "\u{2066}"
-    var marked = AttributedString(slice)
-    marked.backgroundColor = SessionsPalette.accentWash
-    marked.underlineStyle = .single
-    return Text(
-      "\(Text(verbatim: isolateStart))\(Text(verbatim: prefixText))\(Text(marked))\(Text(verbatim: suffixText))\(Text(verbatim: "\u{2069}"))"
-    )
   }
 
   private func timestampLabel(for segment: LocalSessionTranscriptSegment, in session: LocalSession)
@@ -710,13 +629,6 @@ struct CepessaSessionReadingView: View {
     .opacity(0)
     .frame(width: 0, height: 0)
     .accessibilityHidden(true)
-  }
-
-  private var consentBinding: Binding<Bool> {
-    Binding(
-      get: { model.pendingInsightConsentSessionID != nil },
-      set: { if !$0 { model.declineInsightConsent() } }
-    )
   }
 }
 

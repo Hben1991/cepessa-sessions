@@ -58,10 +58,6 @@ final class LocalSessionAppModel: ObservableObject {
     .formattedDuration
   @Published private(set) var recorderErrorMessage: String?
   @Published private(set) var sessionSaveErrors: [LocalSession.ID: String] = [:]
-  @Published private(set) var insightRecords: [UUID: LocalSessionInsightRecord] = [:]
-  @Published private(set) var insightMalformedSessionIDs: Set<UUID> = []
-  @Published var insightReveal: LocalSessionInsightReveal?
-  @Published var pendingInsightConsentSessionID: LocalSession.ID?
   @Published private(set) var processingStatusTitle: String?
   @Published private(set) var processingStatusDetail: String?
   @Published private(set) var processingProgress: Double?
@@ -77,9 +73,6 @@ final class LocalSessionAppModel: ObservableObject {
   /// Hebrew model and tells the owner so. Off by default so tests and previews never download.
   private let installsTranscriptionModelOnDemand: Bool
   private let store: LocalSessionStore?
-  private let insightStore: LocalSessionInsightStore
-  private let insightProviderOverride: (any LocalSessionInsightProviding)?
-  private var insightTasks: [UUID: Task<Void, Never>] = [:]
   private let recorder: LocalMeetingRecorder
   private let transcriptionService: any LocalSessionTranscribing
   private let evidenceTranscriptionCoordinator: LocalSessionEvidenceTranscriptionCoordinator
@@ -105,8 +98,7 @@ final class LocalSessionAppModel: ObservableObject {
     transcriptionModelProvisioner: LocalSessionTranscriptionModelProvisioner? = nil,
     installsTranscriptionModelOnDemand: Bool = false,
     fileManager: FileManager = .default,
-    captureLifecycle: LocalCaptureLifecycle? = nil,
-    insightProvider: (any LocalSessionInsightProviding)? = nil
+    captureLifecycle: LocalCaptureLifecycle? = nil
   ) {
     let resolvedFileLayout =
       fileLayout ?? LocalSessionFileLayout(baseDirectory: Self.defaultBaseDirectory)
@@ -114,8 +106,6 @@ final class LocalSessionAppModel: ObservableObject {
     self.sessions = sessions
     self.fileLayout = resolvedFileLayout
     self.store = resolvedStore
-    self.insightStore = LocalSessionInsightStore(fileLayout: resolvedFileLayout)
-    self.insightProviderOverride = insightProvider
     let resolvedSpeakerModelProvisioner =
       speakerModelProvisioner
       ?? LocalSessionSpeakerModelProvisioner(
@@ -219,7 +209,6 @@ final class LocalSessionAppModel: ObservableObject {
       fileManager: fileManager
     )
     sessions = normalizedSessions.map(annotationStore.applyingAnnotations(to:))
-    loadInsightRecords(for: sessions)
 
     if selectedSessionID == nil {
       selectedSessionID = sessions.first?.id
@@ -359,7 +348,6 @@ final class LocalSessionAppModel: ObservableObject {
     }
 
     sessions.sort { $0.startedAt > $1.startedAt }
-    refreshInsightFreshness(for: displayedSession)
 
     return displayedSession
   }
@@ -1488,300 +1476,6 @@ final class LocalSessionAppModel: ObservableObject {
     return lhs.id.uuidString < rhs.id.uuidString
   }
 
-  func insightRecord(for sessionID: UUID) -> LocalSessionInsightRecord? {
-    insightRecords[sessionID]
-  }
-
-  func requestInsightAnalysis(for sessionID: LocalSession.ID) {
-    guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
-    guard !session.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-      return
-    }
-    if insightProviderOverride != nil || LocalSessionInsightPolicy.shouldUseFixtureProvider() {
-      startInsightAnalysis(session: session, consented: false)
-      return
-    }
-    if !LocalSessionInsightPolicy.isFeatureEnabled() {
-      pendingInsightConsentSessionID = sessionID
-      return
-    }
-    if !LocalSessionInsightPolicy.hasCloudConsent() {
-      pendingInsightConsentSessionID = sessionID
-      return
-    }
-    startInsightAnalysis(session: session, consented: true)
-  }
-
-  func confirmInsightConsent(for sessionID: LocalSession.ID) {
-    UserDefaults.standard.set(true, forKey: LocalSessionInsightPolicy.featureEnabledDefaultsKey)
-    UserDefaults.standard.set(true, forKey: LocalSessionInsightPolicy.cloudConsentDefaultsKey)
-    pendingInsightConsentSessionID = nil
-    guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
-    startInsightAnalysis(session: session, consented: true)
-  }
-
-  func declineInsightConsent() {
-    pendingInsightConsentSessionID = nil
-  }
-
-  func cancelAllInsightAnalysis() {
-    for sessionID in insightTasks.keys {
-      cancelInsightAnalysis(for: sessionID)
-    }
-  }
-
-  func cancelInsightAnalysis(for sessionID: LocalSession.ID) {
-    insightTasks[sessionID]?.cancel()
-    insightTasks[sessionID] = nil
-    if var record = insightRecords[sessionID], record.status == .running {
-      record.status = .cancelled
-      record.failureCategory = .cancelled
-      record.failureMessage = "Analysis was cancelled. Anything already sent cannot be recalled."
-      insightRecords[sessionID] = record
-      _ = try? insightStore.save(record)
-    }
-  }
-
-  func reviewInsight(_ item: LocalSessionInsightItem, state: LocalSessionInsightReviewState) {
-    guard var record = insightRecords[item.evidence.sessionID],
-      let index = record.items.firstIndex(where: { $0.id == item.id })
-    else { return }
-    record.items[index].reviewState = state
-    record.items[index].reviewUpdatedAt = Date()
-    insightRecords[record.sessionID] = record
-    _ = try? insightStore.save(record)
-  }
-
-  func revealInsightSource(_ item: LocalSessionInsightItem) {
-    guard let segmentID = item.evidence.segmentIDs.first else { return }
-    selectSession(id: item.evidence.sessionID)
-    insightReveal = LocalSessionInsightReveal(
-      sessionID: item.evidence.sessionID,
-      segmentID: segmentID,
-      range: item.evidence.spans.first?.range,
-      audioOffsetSeconds: item.evidence.startOffsetSeconds,
-      generation: UUID()
-    )
-  }
-
-  func exportInsightsMarkdown(for session: LocalSession, to url: URL) throws -> URL {
-    let record =
-      insightRecords[session.id]
-      ?? LocalSessionInsightRecord(
-        schemaVersion: LocalSessionInsightSchema.version,
-        analysisID: UUID(),
-        sessionID: session.id,
-        createdAt: Date(),
-        updatedAt: Date(),
-        transcriptRevisionHash: "",
-        provider: "none",
-        requestedModel: "",
-        returnedModel: nil,
-        questionVersion: LocalSessionInsightSchema.questionVersion,
-        policyVersion: LocalSessionInsightSchema.policyVersion,
-        status: .notAnalyzed,
-        failureCategory: nil,
-        failureMessage: nil,
-        coverage: LocalSessionInsightCoverage(
-          totalSegments: session.transcriptSegments.count,
-          totalSpans: 0,
-          coveredSpanIDs: [],
-          omittedSpanIDs: [],
-          failedWindowIDs: [],
-          reconciliationCoveredItemIDs: [],
-          reconciliationOmittedItemIDs: []
-        ),
-        usage: LocalSessionInsightUsage(
-          requestCount: 0, retryCount: 0, inputTokens: 0, outputTokens: 0, latencyMilliseconds: 0),
-        items: [],
-        historicalReviews: [],
-        userConsentedToCloud: false
-      )
-    return try LocalSessionInsightExporter().export(session: session, record: record, toFile: url)
-  }
-
-  private func startInsightAnalysis(session: LocalSession, consented: Bool) {
-    if !consented && insightProviderOverride == nil
-      && !LocalSessionInsightPolicy.shouldUseFixtureProvider()
-    {
-      var record = placeholderRecord(for: session, status: .failed)
-      record.failureCategory = .missingConsent
-      record.failureMessage = "Cloud analysis was not started."
-      insightRecords[session.id] = record
-      return
-    }
-
-    insightTasks[session.id]?.cancel()
-    let provider: any LocalSessionInsightProviding
-    if let insightProviderOverride {
-      provider = insightProviderOverride
-    } else if LocalSessionInsightPolicy.shouldUseFixtureProvider() {
-      provider = LocalSessionInsightFixtureProvider()
-    } else {
-      do {
-        guard try LocalSessionInsightCredentialStore().load() != nil else {
-          var record = placeholderRecord(for: session, status: .failed)
-          record.failureCategory = .missingCredential
-          record.failureMessage =
-            "Add a TypeSafe API key in Settings. No transcript was sent."
-          insightRecords[session.id] = record
-          _ = try? insightStore.save(record)
-          return
-        }
-      } catch {
-        var record = placeholderRecord(for: session, status: .failed)
-        record.failureCategory = .missingCredential
-        record.failureMessage = "The TypeSafe API key could not be read from Keychain."
-        insightRecords[session.id] = record
-        return
-      }
-      provider = TypeSafeSessionInsightClient()
-    }
-
-    let language = LocalSessionTranscriptionSettings.current().languagePreference
-    let expectedHash = LocalSessionInsightPolicy.transcriptRevisionHash(
-      session: session, languagePreference: language)
-    let previous = insightRecords[session.id]
-    let analyzer = LocalSessionInsightAnalyzer(provider: provider)
-    insightTasks[session.id] = Task { [weak self] in
-      guard let self else { return }
-      do {
-        let result = try await analyzer.analyze(
-          session: session,
-          languagePreference: language,
-          previous: previous,
-          userConsentedToCloud: consented
-        ) { progress in
-          Task { @MainActor [weak self] in
-            self?.insightRecords[session.id] = progress
-          }
-        }
-        await MainActor.run {
-          self.finishInsightAnalysis(
-            result, sessionID: session.id, expectedHash: expectedHash)
-        }
-      } catch is CancellationError {
-        await MainActor.run {
-          self.cancelInsightAnalysis(for: session.id)
-        }
-      } catch {
-        await MainActor.run {
-          var record = self.insightRecords[session.id] ?? self.placeholderRecord(
-            for: session, status: .failed)
-          record.status = .failed
-          record.failureCategory = .unknown
-          record.failureMessage = "Analysis failed. The transcript was not changed."
-          self.insightRecords[session.id] = record
-          _ = try? self.insightStore.save(record)
-        }
-      }
-    }
-  }
-
-  private func finishInsightAnalysis(
-    _ result: LocalSessionInsightRecord,
-    sessionID: UUID,
-    expectedHash: String
-  ) {
-    insightTasks[sessionID] = nil
-    guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
-    let currentHash = LocalSessionInsightPolicy.transcriptRevisionHash(
-      session: session,
-      languagePreference: LocalSessionTranscriptionSettings.current().languagePreference
-    )
-    guard currentHash == expectedHash, result.transcriptRevisionHash == expectedHash else {
-      var stale = result
-      stale.status = .stale
-      stale.failureMessage =
-        "The transcript changed before this analysis finished. The new transcript was not overwritten."
-      if insightRecords[sessionID]?.transcriptRevisionHash == currentHash {
-        return
-      }
-      insightRecords[sessionID] = stale
-      _ = try? insightStore.save(stale)
-      return
-    }
-    insightRecords[sessionID] = result
-    _ = try? insightStore.save(result)
-  }
-
-  private func loadInsightRecords(for sessions: [LocalSession]) {
-    var records: [UUID: LocalSessionInsightRecord] = [:]
-    var malformed: Set<UUID> = []
-    for session in sessions {
-      let loaded = insightStore.loadLenient(sessionID: session.id)
-      if loaded.malformed {
-        malformed.insert(session.id)
-        continue
-      }
-      if var record = loaded.record {
-        let hash = LocalSessionInsightPolicy.transcriptRevisionHash(
-          session: session,
-          languagePreference: LocalSessionTranscriptionSettings.current().languagePreference
-        )
-        if record.transcriptRevisionHash != hash, record.status != .running {
-          record.status = .stale
-        }
-        records[session.id] = record
-      }
-    }
-    insightRecords = records
-    insightMalformedSessionIDs = malformed
-  }
-
-  private func refreshInsightFreshness(for session: LocalSession) {
-    guard var record = insightRecords[session.id] else { return }
-    let hash = LocalSessionInsightPolicy.transcriptRevisionHash(
-      session: session,
-      languagePreference: LocalSessionTranscriptionSettings.current().languagePreference
-    )
-    if record.status == .running, record.transcriptRevisionHash != hash {
-      cancelInsightAnalysis(for: session.id)
-      return
-    }
-    if record.transcriptRevisionHash != hash, record.status != .stale {
-      record.status = .stale
-      insightRecords[session.id] = record
-    }
-  }
-
-  private func placeholderRecord(
-    for session: LocalSession, status: LocalSessionInsightStatus
-  ) -> LocalSessionInsightRecord {
-    LocalSessionInsightRecord(
-      schemaVersion: LocalSessionInsightSchema.version,
-      analysisID: UUID(),
-      sessionID: session.id,
-      createdAt: Date(),
-      updatedAt: Date(),
-      transcriptRevisionHash: LocalSessionInsightPolicy.transcriptRevisionHash(
-        session: session,
-        languagePreference: LocalSessionTranscriptionSettings.current().languagePreference
-      ),
-      provider: insightProviderOverride?.providerName ?? LocalSessionInsightPolicy.providerName,
-      requestedModel: LocalSessionInsightPolicy.requestedModel,
-      returnedModel: nil,
-      questionVersion: LocalSessionInsightSchema.questionVersion,
-      policyVersion: LocalSessionInsightSchema.policyVersion,
-      status: status,
-      failureCategory: nil,
-      failureMessage: nil,
-      coverage: LocalSessionInsightCoverage(
-        totalSegments: session.transcriptSegments.count,
-        totalSpans: 0,
-        coveredSpanIDs: [],
-        omittedSpanIDs: [],
-        failedWindowIDs: [],
-        reconciliationCoveredItemIDs: [],
-        reconciliationOmittedItemIDs: []
-      ),
-      usage: LocalSessionInsightUsage(
-        requestCount: 0, retryCount: 0, inputTokens: 0, outputTokens: 0, latencyMilliseconds: 0),
-      items: [],
-      historicalReviews: [],
-      userConsentedToCloud: false
-    )
-  }
 }
 
 private struct LocalSessionSourceAttributor {
